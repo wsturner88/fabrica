@@ -1,0 +1,19 @@
+# Keep the build context to what the images need (Hub: requirements.txt + app/; adapter: its own folder).
+.git
+.github
+.gitignore
+.dockerignore
+.env
+.env.*
+data/
+tests/
+docs/
+tools/
+detector/
+**/__pycache__/
+**/*.pyc
+.DS_Store
+.venv/
+app/config.yml
+docker-compose*.yml
+*.md

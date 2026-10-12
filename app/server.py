@@ -2130,7 +2130,7 @@ async def _static_brand(request: Request):
 @_safe_route
 async def _manifest(request: Request):
     hub = str(SETTINGS.get("general.hub_name") or "").strip()
-    short = BRAND_NAME if hub in ("", "Print Hub") else hub[:12].strip()
+    short = BRAND_NAME if hub in ("", "Print Hub", "Fabrica") else hub[:12].strip()
     icon = lambda f, n, purpose="any": {"src": f"/static/brand/{f}", "sizes": f"{n}x{n}", "type": "image/png", "purpose": purpose}
     doc = {"name": BRAND_NAME, "short_name": short or BRAND_NAME, "description": BRAND_TAGLINE,
            "start_url": "/dashboard", "scope": "/", "display": "standalone",
@@ -2812,7 +2812,9 @@ async def _api_auth_me(request: Request):
     out = {"login_required": required, "role": role, "role_words": security.ROLE_WORDS.get(role, "View-only"),
            "view_only": role != "control", "signed_in_with": how,
            "connection": security.connection_info(request.url.scheme, dict(request.headers)),
-           "offer_login": bool(role == "control" and AUTH.offer_login()),
+           # a fresh install that has not answered "Protect your printers" yet (set a password, or skip)
+           "offer_login": bool(role == "control" and AUTH.first_run_required()),
+           "min_password": security.MIN_PASSWORD,
            "admin_password": AUTH.admin_password_set(),
            # unset: nobody can manage keys / security yet - choose an admin password; locked: type it to unlock;
            # ok: unlocked for the next 30 minutes
@@ -2870,12 +2872,49 @@ async def _api_admin_lock(request: Request):
 @mcp.custom_route("/api/auth/dismiss-offer", methods=["POST"])
 @_safe_route
 async def _api_dismiss_offer(request: Request):
-    """'Not now' on the first-run prompt. Not an admin action: it only stops the prompt from coming back."""
+    """'Skip' on the first-run "Protect your printers" step. Not an admin action: it is recorded, the step does not
+    come back, and nothing else changes (sign-in stays off; Settings > Security keeps saying so)."""
     ident = _request_identity(request)
     if ident is None or ident.kind != "cookie" or ident.scope != "control":
         return JSONResponse({"error": "Only the dashboard can do this."}, status_code=403)
-    await _run(AUTH.dash.set_fields, offer_dismissed=True)
+    if not AUTH.host_ok(request.headers) or not _same_origin(request):
+        return JSONResponse({"error": "request refused (unrecognised host or cross-site)"}, status_code=403)
+    await _run(AUTH.skip_first_run)
     return JSONResponse({"ok": True})
+
+
+@mcp.custom_route("/api/auth/first-run", methods=["POST"])
+@_safe_route
+async def _api_first_run(request: Request):
+    """{"password": "...", "device_name"?: "..."} -> 200 + a trusted-device cookie | 400 bad password | 403 not the
+    dashboard | 409 nothing to set up. Only while GET /api/auth/me says offer_login (a FRESH install with no dashboard
+    password that has not skipped the step). Sets the dashboard password, turns sign-in ON and makes this browser a
+    trusted device so the owner stays signed in. Needs no admin rights (there is no password to unlock with yet) -
+    exactly like choosing the first admin password - but must come from the dashboard in a browser, same-origin."""
+    ident = _request_identity(request)
+    if not AUTH.host_ok(request.headers) or not _same_origin(request, strict=True):
+        return JSONResponse({"error": "request refused: this must come from the dashboard in a browser "
+                                      "(unrecognised host or not same-origin)."}, status_code=403)
+    if ident is None or ident.kind != "cookie" or ident.scope != "control":
+        return JSONResponse({"error": "Open the dashboard in a browser to set the password.",
+                             "required_scope": "admin"}, status_code=403)
+    body = await _optional_json(request)
+    pw = body.get("password")
+    if body.get("confirm") is not None and body.get("confirm") != pw:
+        return JSONResponse({"error": "The two passwords differ."}, status_code=400)
+    try:
+        dev, value, age = await _run(AUTH.complete_first_run, pw, _client_ip(request),
+                                     request.headers.get("user-agent", ""), body.get("device_name"))
+    except security.AuthError as e:
+        return _auth_error(e)
+    except settings_store.SettingsError as e:
+        return _settings_json(e)
+    resp = JSONResponse({"ok": True, "dashboard_login": True, "device": {"id": dev["id"], "name": dev["name"]},
+                         "note": "Dashboard password set and sign-in is on. This browser stays signed in. "
+                                 "Pair a wall screen later from Settings > Security."},
+                        headers={"Cache-Control": "no-store"})
+    resp.delete_cookie(security.COOKIE_NAME, path="/")         # the old no-password cookie is of no use any more
+    return _set_login_cookies(request, resp, device=(value, age))
 
 
 @mcp.custom_route("/api/security/admin-password", methods=["POST"])

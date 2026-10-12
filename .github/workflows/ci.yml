@@ -1,0 +1,140 @@
+name: CI
+
+# Runs on every pull request and push to main. release.yml and edge.yml reuse it, so nothing
+# is ever published without these exact checks having passed.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch/PR cancels the older run; tag runs are never cancelled.
+# (The group avoids ${{ github.workflow }}: inside a called workflow that is the CALLER's name.)
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  tests:
+    name: tests (python 3.12)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"       # same as the runtime image (python:3.12-slim)
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      # Every tests/test_*.py runs in its OWN process: the files pass on their own but leak
+      # environment into each other when run together, so never `unittest discover` them at once.
+      # All files run even if one fails; the step fails at the end. Needs no printers, no internet.
+      # Browser tests skip themselves when Chrome is missing.
+      - name: Run every test file in its own process
+        shell: bash
+        run: |
+          export BAMBU_MCP_CONFIG="$RUNNER_TEMP/config.yml"
+          export BAMBU_MCP_CACHE="$RUNNER_TEMP/metacache.json"
+          fail=0
+          shopt -s nullglob
+          files=(tests/test_*.py)
+          [ "${#files[@]}" -gt 0 ] || { echo "::error::no tests/test_*.py files found"; exit 1; }
+          for f in "${files[@]}"; do
+            echo "::group::$f"
+            python "$f" || { fail=1; echo "::error file=$f::$f failed"; }
+            echo "::endgroup::"
+          done
+          exit $fail
+
+  compose:
+    name: compose files parse
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      DETECTOR_TOKEN: ci-placeholder-not-a-secret     # `config -q` only interpolates; nothing starts
+    steps:
+      - uses: actions/checkout@v7
+      - run: |
+          set -eu
+          docker compose -f docker-compose.yml config -q
+          docker compose -f docker-compose.ghcr.yml config -q
+          docker compose -f docker-compose.detection.yml --profile detection config -q
+          docker compose -f docker-compose.ghcr.yml -f docker-compose.detection.yml --profile detection config -q
+
+  docker-smoke:
+    name: docker build smoke (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: hub
+            context: .
+          - name: adapter
+            context: detector/adapter
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build (amd64, loaded locally, never pushed)
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ matrix.context }}
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: fabrica-ci/${{ matrix.name }}:ci
+          build-args: BUILD_REV=ci
+          cache-from: type=gha,scope=ci-${{ matrix.name }}
+          cache-to: type=gha,scope=ci-${{ matrix.name }},mode=max,ignore-error=true
+
+      # The Hub must start and answer its public health route, and Docker's own HEALTHCHECK must turn healthy.
+      - name: Hub starts and is healthy
+        if: matrix.name == 'hub'
+        shell: bash
+        run: |
+          cid=$(docker run -d --health-interval 5s --health-start-period 5s -p 127.0.0.1:18271:8271 fabrica-ci/hub:ci)
+          ok=0
+          for _ in $(seq 1 45); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' "$cid")" = healthy ] && { ok=1; break; }
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:18271/api/health || ok=0
+          echo
+          docker logs "$cid" || true
+          docker rm -f "$cid" >/dev/null
+          [ "$ok" = 1 ] || { echo "::error::Hub smoke test failed"; exit 1; }
+
+      # The adapter refuses to start without DETECTOR_TOKEN. With no model container behind it,
+      # /healthz answers 503: either 200 or 503 proves the server is up.
+      - name: Adapter starts and answers /healthz
+        if: matrix.name == 'adapter'
+        shell: bash
+        run: |
+          cid=$(docker run -d -e DETECTOR_TOKEN=ci-smoke-not-a-secret -p 127.0.0.1:18080:8080 fabrica-ci/adapter:ci)
+          ok=0
+          for _ in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/healthz || true)
+            case "$code" in 200|503) ok=1; break;; esac
+            sleep 1
+          done
+          echo "healthz -> $code"
+          docker logs "$cid" || true
+          docker rm -f "$cid" >/dev/null
+          [ "$ok" = 1 ] || { echo "::error::adapter smoke test failed"; exit 1; }

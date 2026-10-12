@@ -164,10 +164,10 @@ OCTOPRINT_GUIDE = {
         # VERIFIED (behaviour): the old global key still works but logs deprecation warnings.
         # UNVERIFIED: exact menu wording of Application Keys on every OctoPrint version.
         {"id": "apikey", "title": "Create an API key for the Hub",
-         "text": "In OctoPrint open Settings (spanner icon) > Application Keys. Type Print Hub as "
+         "text": "In OctoPrint open Settings (spanner icon) > Application Keys. Type Fabrica as "
                  "the application name and tap Generate. Copy the long key it shows and paste it "
                  "below. Older OctoPrint versions have only Settings > API: copy the key from there. "
-                 "A separate Print Hub key is better than the global key: you can revoke it "
+                 "A separate Fabrica key is better than the global key: you can revoke it "
                  "without touching anything else."},
         # VERIFIED: classic webcam snapshot at /webcam/?action=snapshot works from outside the Pi.
         {"id": "webcam", "title": "Webcam (optional)",
@@ -270,7 +270,7 @@ HINTS = {
     "octoprint": [
         {"codes": ("bad_key",), "step": "apikey",
          "when": "OctoPrint rejected the API key",
-         "tip": "Create a new key under OctoPrint Settings > Application Keys (name it Print Hub) and "
+         "tip": "Create a new key under OctoPrint Settings > Application Keys (name it Fabrica) and "
                 "paste it again without spaces. A key that was revoked or deleted in OctoPrint stops "
                 "working."},
         {"codes": ("unreachable",), "step": "url",

@@ -30,7 +30,7 @@ docker compose -f docker-compose.ghcr.yml up -d
 **💪 Full** (Fabrica + spaghetti detection)
 ```bash
 echo "DETECTOR_TOKEN=$(openssl rand -hex 32)" >> .env
-docker compose -f docker-compose.ghcr.yml -f docker-compose.detection.yml --profile detection up -d --build
+docker compose -f docker-compose.ghcr.yml -f docker-compose.detection.yml --profile detection up -d
 ```
 The detector takes about two minutes to load the first time.
 Then turn it on: **Settings → Detection → This machine**.

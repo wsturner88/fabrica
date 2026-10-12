@@ -1,0 +1,74 @@
+name: Printer support request
+description: Ask for support for a printer model or family Fabrica does not handle yet
+title: "[Printer]: "
+labels: ["printer-support", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Fabrica currently supports Bambu Lab printers in LAN mode, OctoPrint (including Prusa MK4), PrusaLink and
+        Klipper via Moonraker. A new driver is feasible when the printer has a documented local API and someone can
+        test it on real hardware. Please do not paste serial numbers, access codes or IP addresses.
+  - type: input
+    id: make_model
+    attributes:
+      label: Make and model
+      placeholder: "Example: Vendor X Model Y"
+    validations:
+      required: true
+  - type: input
+    id: firmware
+    attributes:
+      label: Firmware or software version
+      description: Firmware of the printer and, if applicable, of the software that exposes its API.
+    validations:
+      required: true
+  - type: dropdown
+    id: connection
+    attributes:
+      label: How does it connect?
+      options:
+        - MQTT
+        - HTTP / REST
+        - WebSocket
+        - Serial / USB only
+        - Vendor cloud only (no local API)
+        - Other
+        - I don't know
+    validations:
+      required: true
+  - type: input
+    id: docs_link
+    attributes:
+      label: Link to the protocol or API documentation
+      description: Official or well-established public documentation, if you know of any.
+      placeholder: "https://"
+    validations:
+      required: false
+  - type: textarea
+    id: capabilities
+    attributes:
+      label: What can the printer do over that interface?
+      description: Status, job start/stop/pause, file list, camera, light, temperatures, filament changes... whatever you know.
+    validations:
+      required: false
+  - type: dropdown
+    id: can_test
+    attributes:
+      label: Can you test on real hardware?
+      description: Testing a driver on a real printer is the main thing that lets us ship support.
+      options:
+        - "Yes, I can test builds and report results"
+        - "Maybe, with some guidance"
+        - "No, I only own the printer for now"
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues for this printer.
+          required: true
+        - label: I removed serial numbers, access codes and IP addresses from everything I wrote.
+          required: true

@@ -1,4 +1,4 @@
-"""PrusaLink driver for the Print Hub (Prusa MK4/MK4S/MK3.9/Core One/XL/Mini, firmware 5/6+).
+"""PrusaLink driver for Fabrica (Prusa MK4/MK4S/MK3.9/Core One/XL/Mini, firmware 5/6+).
 
 PrusaLink is the web service built into Prusa printers. It speaks a small REST
 API ("v1") over plain HTTP on the LAN. This driver mirrors the public surface of

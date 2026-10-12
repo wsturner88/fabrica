@@ -1,0 +1,9 @@
+# Fabrica Hub runtime dependencies (the detector adapter is stdlib-only and needs nothing).
+#
+# Compatible-release ranges around the TESTED set, so a rebuilt image cannot jump to a new major:
+#   tested with: mcp 1.30.0 | paho-mqtt 2.1.0 | PyYAML 6.0.3
+# starlette, httpx, pydantic, uvicorn, ... arrive through `mcp`.
+# Raise the floors after running the full test suite against a newer set.
+mcp>=1.30,<2
+paho-mqtt>=2.1,<3
+PyYAML>=6.0,<7

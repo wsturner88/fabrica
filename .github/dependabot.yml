@@ -1,0 +1,31 @@
+version: 2
+updates:
+  # Python dependencies (needs a requirements file at the repository root)
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels: ["dependencies"]
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels: ["dependencies"]
+
+  # Hub image: Dockerfile at the repository root
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels: ["dependencies"]
+
+  # Detector adapter image: detector/adapter/Dockerfile
+  - package-ecosystem: "docker"
+    directory: "/detector/adapter"
+    schedule:
+      interval: "weekly"
+    labels: ["dependencies"]
+
+  # The digest-pinned Obico model image in docker-compose.detection.yml is bumped by hand
+  # (see docs/detection.md).

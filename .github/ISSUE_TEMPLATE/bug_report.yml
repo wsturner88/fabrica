@@ -1,0 +1,113 @@
+name: Bug report
+description: Something in Fabrica does not work as expected
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Please **do not paste real access codes, API keys, passwords, tokens, printer
+        serial numbers, IP addresses or host names**. Use placeholders such as `<ACCESS_CODE>` and `192.168.1.x`.
+        Security problems go through [private reporting](https://github.com/wsturner88/fabrica/security/advisories/new), not here.
+  - type: input
+    id: version
+    attributes:
+      label: Fabrica version
+      description: Settings > Agents / MCP > About shows the version (build id).
+      placeholder: "1.0.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: edition
+    attributes:
+      label: Edition
+      description: Lite = Hub only. Full = Hub and spaghetti detector on one machine. Split = detector on a second machine.
+      options:
+        - Lite (Hub only)
+        - Full (Hub and detector on one machine)
+        - Split (detector on another machine)
+        - Not sure
+    validations:
+      required: true
+  - type: dropdown
+    id: install_method
+    attributes:
+      label: How did you install it?
+      options:
+        - Docker Compose, pre-built image (docker-compose.ghcr.yml)
+        - Docker Compose, built from source
+        - Run from source (python app/server.py)
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Host machine
+      description: Operating system and hardware where the Hub runs (for example "Raspberry Pi 4, 64-bit Linux" or "macOS, Colima").
+    validations:
+      required: false
+  - type: dropdown
+    id: family
+    attributes:
+      label: Printer family involved
+      options:
+        - Bambu Lab (LAN mode)
+        - OctoPrint / Prusa MK4
+        - PrusaLink
+        - Klipper / Moonraker
+        - Not printer-specific (dashboard, MCP, settings, notifications...)
+    validations:
+      required: true
+  - type: input
+    id: printer_model
+    attributes:
+      label: Printer model and firmware
+      description: Model and firmware version, if a printer is involved. No serial numbers.
+      placeholder: "Example: P1S, firmware 01.08.02.00"
+    validations:
+      required: false
+  - type: textarea
+    id: what_happened
+    attributes:
+      label: What happened?
+      description: Describe what you saw. Screenshots are welcome (hide secrets).
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open the dashboard ...
+        2. Click ...
+        3. See ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        Output of `docker compose logs fabrica` (or the terminal output when run from source) around the time of the problem.
+        **Read it through and redact access codes, API keys, tokens, serial numbers, IP addresses and host names before pasting.**
+      render: shell
+    validations:
+      required: false
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and this has not been reported.
+          required: true
+        - label: I removed or replaced secrets (access codes, API keys, tokens), serial numbers, IP addresses and host names in everything I pasted.
+          required: true
+        - label: I am not reporting a security vulnerability (those go through private reporting).
+          required: true

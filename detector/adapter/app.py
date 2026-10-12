@@ -1,4 +1,4 @@
-"""Print Hub detector adapter (MIT).
+"""Fabrica detector adapter (MIT).
 
 A small front door for an unmodified Obico `ml_api` container. `ml_api` can only be asked to
 fetch a picture from a URL; it cannot be handed bytes. This adapter turns that into a plain

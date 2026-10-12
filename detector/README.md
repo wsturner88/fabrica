@@ -1,4 +1,4 @@
-# Print Hub detector (spaghetti detection add-on)
+# Fabrica detector (spaghetti detection add-on)
 
 An optional add-on that watches running prints through the Hub's chamber cameras and raises
 an **alert** when a print looks like it has turned into spaghetti. It never pauses or stops a

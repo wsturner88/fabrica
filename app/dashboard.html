@@ -166,6 +166,16 @@
   .mbox { background:var(--card); border:1px solid var(--line); border-radius:16px;
           padding:22px; width:640px; max-height:560px; overflow-y:auto; }
   .mbox h2 { font-size:20px; margin-bottom:12px; }
+  /* first-run "Protect your printers": a full-screen step that sits above everything (incl. the modal) until it is answered */
+  #firstrun { position:fixed; inset:0; background:var(--bg); display:none; z-index:60; align-items:center; justify-content:center; }
+  #firstrun.on { display:flex; }
+  #firstrun .mbox { width:640px; max-width:96vw; }
+  #firstrun h2 { font-size:30px; margin-bottom:8px; }
+  #firstrun .frlead { font-size:19px; line-height:1.4; margin-bottom:14px; }
+  #firstrun .stin { margin-top:0; margin-bottom:10px; }
+  #fr-msg { min-height:24px; margin:2px 0 8px; font-size:17px; font-weight:700; color:var(--txt); }
+  #fr-msg:not(:empty) { border-left:5px solid var(--amber); padding-left:10px; }
+  #firstrun .frskip { margin-top:16px; width:100%; font-size:15px; min-height:48px; background:transparent; }
   .colorgrid { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; }
   .toggle { display:flex; align-items:center; gap:10px; font-size:18px; font-weight:600;
             padding:12px; background:var(--card2); border-radius:12px; margin:14px 0; }
@@ -445,6 +455,26 @@
 </div>
 
 <div id="modal"><div class="mbox" id="mbody"></div></div>
+
+<div id="firstrun" role="dialog" aria-modal="true" aria-labelledby="fr-title">
+  <div class="mbox">
+    <div id="fr-main">
+      <h2 id="fr-title">Protect your printers</h2>
+      <div class="frlead">Anyone on your network who opens this page could start, stop or heat your printers. Choose a password so only you can.</div>
+      <input id="fr-pw1" class="stin" type="password" autocomplete="new-password" autocapitalize="off" spellcheck="false" aria-label="Choose a password (8 or more characters)" placeholder="Choose a password (8 or more characters)">
+      <input id="fr-pw2" class="stin" type="password" autocomplete="new-password" autocapitalize="off" spellcheck="false" aria-label="Type the password again" placeholder="Type it again" onkeydown="if(event.key==='Enter')frSet()">
+      <div id="fr-msg" role="alert"></div>
+      <button id="fr-set" class="primary big" style="width:100%" data-act="frSet">Set password</button>
+      <div class="note">Wall screen? Pair it later from Settings &rarr; Security.</div>
+      <button class="frskip" data-act="frSkip">Skip &mdash; I understand anyone on my network can control my printers</button>
+    </div>
+    <div id="fr-skip" hidden>
+      <h2>Skip without a password?</h2>
+      <div class="frlead"><b>Sign-in will stay off.</b> Anyone on your network can open this page and start, stop or heat your printers. You can set a password at any time in Settings &rarr; Security.</div>
+      <div class="row" style="margin-top:12px"><button class="big grow" data-act="frBack">Go back and set a password</button><button class="big grow" data-act="frSkipYes">Yes, skip: no password</button></div>
+    </div>
+  </div>
+</div>
 
 <!-- ===== file backup UI (self-contained: style + script; server side is app/backup.py) ===== -->
 <style>
@@ -2062,14 +2092,50 @@ async function authInit(){
   }
   // A password sign-in gets a Sign out button; a trusted device (the wall screen) does not - a stray touch must not unpair it (revoke it in Settings > Security).
   if(me.login_required && me.signed_in_with === 'session'){ const b = document.getElementById('signout-btn'); if(b) b.hidden = false; }
-  if(me.offer_login){
-    $('mbody').innerHTML = `<h2>Set an admin password?</h2>
-      <div class="note" style="font-size:17px;color:var(--txt)">Right now anyone who can reach this Hub's address can open the dashboard and operate the printers. An <b>admin password</b> does not change that &mdash; the dashboard still opens without one &mdash; but it stops anyone else from creating API keys, switching the key check off or turning on sign-in. Until you set one, keys and security settings stay locked. Strongly recommended; it takes a moment. You can also ask for a dashboard password later, in Settings, Security.</div>
-      <div class="row" style="margin-top:12px"><button class="big grow" onclick="secOfferNo()">Not now, don't ask again</button><button class="big primary grow" onclick="closeModal();openSecurity()">Set it up</button></div>`;
-    $('modal').classList.add('on');
-  }
+  if(me.offer_login) frShow();
 }
-async function secOfferNo(){ closeModal(); await pmCall('POST', '/api/auth/dismiss-offer'); }
+
+// ---- first run: "Protect your printers". A new install has no dashboard password, so until the owner answers this the
+// whole network could drive the printers. Set password = dashboard password + sign-in ON + this browser stays signed in
+// (a trusted device); Skip (two taps) is recorded and the step does not come back. The Hub also refuses browser writes
+// until one of the two happened (server: AuthMiddleware, FIRST_RUN_MSG). All text from the Hub goes in with textContent.
+const FR = { busy:false };
+function frShow(){
+  FR.busy = false; frMsg('');
+  $('fr-main').hidden = false; $('fr-skip').hidden = true;
+  $('firstrun').classList.add('on');
+  setTimeout(() => { const e = $('fr-pw1'); if(e) e.focus(); }, 60);
+}
+function frMsg(t){ $('fr-msg').textContent = t || ''; }
+function frDone(){
+  $('firstrun').classList.remove('on');
+  if(window.ME){ ME.offer_login = false; }
+  fleet(); secBannerRefresh();
+}
+async function frSet(){
+  if(FR.busy) return;
+  const a = $('fr-pw1').value, b = $('fr-pw2').value, min = (window.ME && ME.min_password) || 8;
+  if(a.length < min || !a.trim()){ frMsg('Not saved: a password needs ' + min + ' or more characters.'); return; }
+  if(a !== b){ frMsg('Not saved: the two passwords are not the same. Type them again.'); return; }
+  FR.busy = true; $('fr-set').disabled = true; frMsg('Saving\u2026');
+  const r = await pmCall('POST', '/api/auth/first-run', {password:a, confirm:b});
+  FR.busy = false; $('fr-set').disabled = false;
+  if(r.status === 409){ $('fr-pw1').value = $('fr-pw2').value = ''; frDone(); return; }       // answered somewhere else meanwhile
+  if(!r.ok){ frMsg('Not saved: ' + (r.body.error || 'the Hub did not accept that.')); return; }
+  $('fr-pw1').value = $('fr-pw2').value = '';
+  if(window.ME){ ME.login_required = true; }
+  frDone();
+}
+function frSkip(){ $('fr-main').hidden = true; $('fr-skip').hidden = false; }
+function frBack(){ $('fr-skip').hidden = true; $('fr-main').hidden = false; frMsg(''); const e = $('fr-pw1'); if(e) e.focus(); }
+async function frSkipYes(){
+  if(FR.busy) return;
+  FR.busy = true;
+  const r = await pmCall('POST', '/api/auth/dismiss-offer');
+  FR.busy = false;
+  if(!r.ok){ frBack(); frMsg('Not skipped: ' + (r.body.error || 'the Hub did not accept that.')); return; }
+  frDone();
+}
 
 // ---- a 401 on /api/* = the session ended (a password was set elsewhere, or you signed out): go back to /dashboard, which shows the sign-in page.
 (function(){
@@ -3122,7 +3188,7 @@ async function act(action){
 // ---------------------------------------------------------------- display preferences (from Settings)
 // hub name, temperature unit, time zone and date style come from GET /api/settings. Display only:
 // the API and the printers always work in degrees Celsius.
-const PREFS = { hub_name:'Print Hub', temp_unit:'C', timezone:'', datetime_format:'iso', thumb_refresh_s:5 };
+const PREFS = { hub_name:'Fabrica', temp_unit:'C', timezone:'', datetime_format:'iso', thumb_refresh_s:5 };
 function tzOpt(){
   if(!PREFS.timezone) return {};
   try{ new Intl.DateTimeFormat(undefined, {timeZone:PREFS.timezone}); return {timeZone:PREFS.timezone}; }catch(e){ return {}; }
@@ -3146,7 +3212,7 @@ const tpair = (n, b) => tnum(n) + ' / ' + tnum(b) + ' ' + tunit();
 // Header: the mark, then the Hub name from Settings > General. Unset (or still the old default "Print Hub")
 // shows the fabrica_ wordmark instead. The name goes in with textContent, never as HTML.
 function setHubTitle(){
-  const n = (PREFS.hub_name || '').trim(), custom = n && n !== 'Print Hub';
+  const n = (PREFS.hub_name || '').trim(), custom = n && n !== 'Print Hub' && n !== 'Fabrica';
   const t = $('hub-title'); t.textContent = '';
   const b = document.createElement('span'); b.className = 'brand';
   const img = document.createElement('img'); img.src = '/static/brand/mark.svg'; img.alt = '';
@@ -3159,7 +3225,7 @@ function setHubTitle(){
 function applyPrefsFrom(doc){
   const v = {};
   ((doc && doc.sections) || []).forEach(s => s.fields.forEach(f => { v[f.key] = f.value; }));
-  PREFS.hub_name = v['general.hub_name'] || 'Print Hub';
+  PREFS.hub_name = v['general.hub_name'] || 'Fabrica';
   PREFS.temp_unit = v['general.temp_unit'] === 'F' ? 'F' : 'C';
   PREFS.timezone = v['general.timezone'] || '';
   PREFS.datetime_format = v['general.datetime_format'] || 'iso';
@@ -3560,6 +3626,10 @@ const ACT = {
   trayColor: b => doTray(Number(b.dataset.tray), b.dataset.mat, b.dataset.color),
   trayBack:  b => askTray(Number(b.dataset.tray), b.dataset.cur),
   pickSpool: b => pickSpool(Number(b.dataset.tray)),
+  frSet:     () => frSet(),
+  frSkip:    () => frSkip(),
+  frBack:    () => frBack(),
+  frSkipYes: () => frSkipYes(),
   start:     () => startSelected(),
   delete:    () => doDelete(),
   bkStart:   b => bkStart(b.dataset.name),

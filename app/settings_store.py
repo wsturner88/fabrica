@@ -130,7 +130,7 @@ SCHEMA = [
     {"id": "general", "label": "General", "group": "general",
      "description": "How the Hub presents itself and shows times and temperatures.",
      "fields": [
-         _field("hub_name", "Hub name", "string", "Print Hub",
+         _field("hub_name", "Hub name", "string", "Fabrica",
                 "Shown in the dashboard header and at the top of every notification.",
                 max_len=60),
          _field("timezone", "Time zone", "timezone", "UTC",
@@ -193,14 +193,14 @@ SCHEMA = [
     {"id": "ntfy", "label": "ntfy", "group": "channels", "test": "ntfy",
      "description": "Push notifications through ntfy (the public ntfy.sh or your own server).",
      "help": ("Install the ntfy app, subscribe to a topic name nobody will guess "
-              "(e.g. printhub-7f3k2x9q), and type the same topic here. Anyone who knows the topic on "
+              "(e.g. fabrica-7f3k2x9q), and type the same topic here. Anyone who knows the topic on "
               "a public server can read it, so use a long random name or an access token."),
      "fields": [
          _field("enabled", "Enabled", "bool", False, "Send notifications to this ntfy topic."),
          _field("server_url", "Server URL", "url", "https://ntfy.sh",
                 "https://ntfy.sh, or your own server.", placeholder="https://ntfy.sh"),
          _field("topic", "Topic", "string", "", "The topic to publish to.", max_len=64,
-                placeholder="printhub-7f3k2x9q"),
+                placeholder="fabrica-7f3k2x9q"),
          _field("token", "Access token (optional)", "secret", "",
                 "Only for protected topics. Stored write-only.", secret=True),
      ]},
@@ -225,7 +225,7 @@ SCHEMA = [
          _field("password", "Password", "secret", "", "SMTP password or app password. Stored write-only.",
                 secret=True),
          _field("from_addr", "From address", "string", "", "e.g. hub@example.com or "
-                "Print Hub <hub@example.com>", max_len=200),
+                "Fabrica <hub@example.com>", max_len=200),
          _field("to_addr", "To address(es)", "emails", "", "One or more addresses, comma separated.",
                 max_len=500),
      ]},
@@ -1000,7 +1000,7 @@ class SettingsStore:
             raise SettingsError("Expected a settings export (a JSON object).")
         vals = doc.get("values") if isinstance(doc.get("values"), dict) else doc
         if doc.get("format") not in (None, "print-hub-settings"):
-            raise SettingsError("This file is not a Print Hub settings export.")
+            raise SettingsError("This file is not a Fabrica settings export.")
         apply, skipped = {}, {}
         for k, v in self._flatten(vals).items():
             f = FIELDS.get(k)

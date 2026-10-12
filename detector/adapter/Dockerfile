@@ -1,4 +1,4 @@
-# Print Hub detector adapter (MIT). Stdlib only: no pip install, nothing to pin.
+# Fabrica detector adapter (MIT). Stdlib only: no pip install, nothing to pin.
 # Multi-arch: builds natively on amd64 and arm64 (docker buildx --platform linux/amd64,linux/arm64).
 FROM python:3.12-slim
 

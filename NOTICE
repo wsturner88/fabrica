@@ -1,0 +1,16 @@
+Fabrica
+Copyright (c) 2026 Fabrica contributors
+
+This product is licensed under the MIT License (see LICENSE).
+
+It depends on third-party software and names that remain the property of
+their respective owners. In particular, the optional spaghetti detector runs
+an unmodified, separately licensed (AGPL-3.0) Obico model container that is
+pulled from its upstream registry at install time and is NOT distributed
+with this project.
+
+Not affiliated with Bambu Lab, Prusa Research, OctoPrint, Klipper or Obico;
+names are trademarks of their owners.
+
+See THIRD_PARTY.md for the full list of dependencies, licences and
+trademark notices.

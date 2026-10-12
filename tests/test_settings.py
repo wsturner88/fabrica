@@ -69,7 +69,7 @@ class SchemaTests(Base):
 
     def test_defaults(self):
         s = self.store()
-        self.assertEqual(s.get("general.hub_name"), "Print Hub")
+        self.assertEqual(s.get("general.hub_name"), "Fabrica")
         self.assertEqual(s.get("general.timezone"), "UTC")
         self.assertEqual(s.get("general.temp_unit"), "C")
         self.assertTrue(s.get("notifications.enabled"))
@@ -168,7 +168,7 @@ class ValidationTests(Base):
         with self.assertRaises(ss.SettingsError) as cm:
             s.update({"general.hub_name": "Shop", "camera.thumb_refresh_s": 0})
         self.assertEqual(list(cm.exception.errors), ["camera.thumb_refresh_s"])
-        self.assertEqual(s.get("general.hub_name"), "Print Hub")
+        self.assertEqual(s.get("general.hub_name"), "Fabrica")
         self.assertFalse(os.path.exists(os.path.join(self.dir, "settings.json")))
 
     def test_presets_validation_and_edit(self):
@@ -319,7 +319,7 @@ class EnvAndPersistenceTests(Base):
         with open(os.path.join(self.dir, "settings.json"), "w") as fh:
             fh.write("{ not json")
         s = self.store()
-        self.assertEqual(s.get("general.hub_name"), "Print Hub")
+        self.assertEqual(s.get("general.hub_name"), "Fabrica")
         self.assertTrue([f for f in os.listdir(self.dir) if f.startswith("settings.json.corrupt-")])
 
     def test_bad_saved_value_falls_back_to_default(self):
@@ -340,7 +340,7 @@ class EnvAndPersistenceTests(Base):
         self.assertEqual(seen[0], ["general.hub_name"])
         self.assertEqual(seen[1], ["telegram.bot_token"])
         self.assertEqual(s.reset(), ["general.hub_name"])
-        self.assertEqual(s.get("general.hub_name"), "Print Hub")
+        self.assertEqual(s.get("general.hub_name"), "Fabrica")
         s.subscribe(lambda k: 1 / 0)       # a broken listener must not break a save
         s.update({"general.hub_name": "B"})
 
@@ -352,7 +352,7 @@ class EnvAndPersistenceTests(Base):
             self.skipTest("cannot make the directory read-only here (running as root?)")
         with self.assertRaises(OSError):
             s.update({"general.hub_name": "Nope"})
-        self.assertEqual(s.get("general.hub_name"), "Print Hub")
+        self.assertEqual(s.get("general.hub_name"), "Fabrica")
 
 
 class ExportImportTests(Base):
@@ -398,7 +398,7 @@ class ExportImportTests(Base):
         s = self.store()
         res = s.import_settings({"values": {"general.hub_name": "Dry"}}, dry_run=True)
         self.assertEqual(res["applied"], ["general.hub_name"])
-        self.assertEqual(s.get("general.hub_name"), "Print Hub")
+        self.assertEqual(s.get("general.hub_name"), "Fabrica")
 
 
 class FormatTests(unittest.TestCase):

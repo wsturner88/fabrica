@@ -1,0 +1,57 @@
+name: Feature request
+description: Suggest an improvement or a new capability
+title: "[Feature]: "
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the idea. For a **new printer model or family**, please use the *Printer support request* form instead.
+        Please do not paste secrets, serial numbers or IP addresses.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Describe the situation and why it is hard today, before describing the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like Fabrica to do?
+      description: Dashboard behaviour, a new MCP tool, a setting, a notification... Sketches are welcome.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+    validations:
+      required: false
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Dashboard
+        - MCP tools / agents
+        - REST API
+        - Notifications
+        - History / costs
+        - Backups
+        - Cameras
+        - Spaghetti detection
+        - Security / authentication
+        - Docs / install
+        - Other
+    validations:
+      required: false
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and discussions for this idea.
+          required: true
+        - label: I would be willing to help test it or send a pull request.
+          required: false

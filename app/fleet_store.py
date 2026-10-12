@@ -622,7 +622,7 @@ OCTOPRINT_FIELDS = [
              "connected inside OctoPrint (its Connect button) before the Hub can print."},
     {"name": "api_key", "label": "API key", "type": "password", "required": True, "secret": True,
      "guide_step": "apikey",
-     "help": "In OctoPrint: Settings > Application Keys - type 'Print Hub' as the name, tap Generate and "
+     "help": "In OctoPrint: Settings > Application Keys - type 'Fabrica' as the name, tap Generate and "
              "copy the long key (recommended: it can be revoked on its own). Older versions: Settings > "
              "API shows the global key."},
     {"name": "model", "label": "Model", "type": "text", "required": False,

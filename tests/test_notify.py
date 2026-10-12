@@ -457,7 +457,7 @@ class EmailTests(unittest.TestCase):
 
     def chan(self, srv, **kw):
         cfg = {"host": "127.0.0.1", "port": srv.port, "tls": "none", "username": "", "password": "",
-               "from_addr": "Print Hub <hub@example.com>", "to_addr": "me@example.com, you@example.com",
+               "from_addr": "Fabrica <hub@example.com>", "to_addr": "me@example.com, you@example.com",
                "verify_cert": False}
         cfg.update(kw)
         return notify.EmailChannel(cfg, timeout=5)
@@ -473,7 +473,7 @@ class EmailTests(unittest.TestCase):
         self.assertFalse(m["tls"])
         msg = parsed(m)
         self.assertEqual(msg["Subject"], "P1S: print FINISHED")
-        self.assertIn("Print Hub", msg["From"])
+        self.assertIn("Fabrica", msg["From"])
         self.assertIn("Benchy done.", msg.get_body(("plain",)).get_content())
         atts = list(msg.iter_attachments())
         self.assertEqual(len(atts), 1)

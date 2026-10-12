@@ -1,4 +1,4 @@
-"""API-key authentication for the Print Hub.
+"""API-key authentication for Fabrica.
 
 Threat: anything that can reach the Hub's port (malware, a guest laptop, a prompt-injected
 agent) can drive the printers. This module puts a key check in front of BOTH faces of the Hub:
@@ -42,6 +42,13 @@ it behaves exactly as described above):
   * Rate limits on sign-in and pairing, security headers (CSP, frame, nosniff, referrer) on every page.
   * Offline recovery: `python security.py disable-dashboard-login | reset-dashboard-password |
     list-devices | revoke-device ID` (state lives in <data>/dashboard_auth.json, re-read when it changes).
+
+First run (2026-10): a FRESH install is asked once, by the dashboard's full-screen "Protect your printers" step, to
+choose a dashboard password (POST /api/auth/first-run: password set, sign-in ON, that browser becomes a trusted device;
+the dashboard password stands in for the admin password) or to skip (POST /api/auth/dismiss-offer, recorded as
+`offer_dismissed`). While neither happened - `AuthManager.first_run_required()`: fresh install, no password, not skipped,
+key check ON - AuthMiddleware refuses state-changing requests that rely on the dashboard cookie (403, first_run: true).
+API keys, reads and MCP are never affected; an upgrade is never asked. `python security.py reset-first-run` asks again.
 
 Admin password (2026-10, second security review N-1): the admin actions - API keys, the key-check mode, trusted
 devices, pairing, sessions, the dashboard / view-only / admin passwords and every `security.*` setting - need an
@@ -140,6 +147,12 @@ PUBLIC_PAGES = ("/", "/dashboard", "/api/ui-version", "/api/health",       # GET
                 "/favicon.ico", "/favicon.svg", "/apple-touch-icon.png", "/manifest.webmanifest")
 PUBLIC_PREFIXES = ("/static/brand/",)                                      # GET / HEAD: the files in app/static/brand/
 PUBLIC_POSTS = ("/api/auth/login", "/api/auth/logout", "/api/auth/pair")   # POST
+# While a fresh install is waiting for its first-run "Protect your printers" step, a dashboard browser (cookie, no key) may
+# change nothing except these two: choose the password, or skip the step.
+FIRST_RUN_POSTS = ("/api/auth/first-run", "/api/auth/dismiss-offer")
+FIRST_RUN_MSG = ("This Hub is new and has no dashboard password yet. Open the dashboard in a browser and finish the "
+                 "'Protect your printers' step (set a password, or skip it) before changing anything. API keys are "
+                 "not affected.")
 
 
 # ---------------------------------------------------------------- scope tables
@@ -174,7 +187,8 @@ REST_SCOPES = [
     ("GET", "/api/auth/me", "read"),                          # who am I (role, view-only?) - lets the page hide buttons
     ("POST", "/api/auth/admin-unlock", "control"),            # type the admin password (the handler refuses API keys)
     ("POST", "/api/auth/admin-lock", "control"),
-    ("POST", "/api/auth/dismiss-offer", "control"),           # "not now" on the first-run prompt
+    ("POST", "/api/auth/dismiss-offer", "control"),           # "skip" on the first-run step
+    ("POST", "/api/auth/first-run", "control"),               # first-run "Protect your printers": choose the dashboard password
     ("POST", "/api/security/admin-password", "control"),      # first admin password: any same-origin dashboard browser; later ones: the handler checks
     # --- control: anything that acts, spends, sends or reconfigures
     ("POST", "/api/printer/{name}/start", "control"),
@@ -1267,6 +1281,7 @@ class AuthManager:
         self.admin_limiter = LoginLimiter(clock=clock, reset_file=reset)              # admin unlock
         self._pair = None                  # the one active pairing code (memory only)
         self._lock = threading.Lock()
+        self._first_run_lock = threading.Lock()
         self._callers = collections.OrderedDict()
         self.stats = collections.Counter()
         self.last_unauthenticated = None
@@ -1327,6 +1342,8 @@ class AuthManager:
                 h = self.settings.get_secret("security.dashboard_password") if \
                     self.settings.is_secret_set("security.dashboard_password") else None
                 self.dash.set_fields(owner_hash=h or None)
+                if h:
+                    self.dash.set_fields(offer_dismissed=True)      # decided: the first-run step never comes back
                 if not h:                           # no owner password = no sign-in, no view-only password
                     self.dash.set_fields(login_enabled=None, viewer_hash=None)
             except Exception as e:
@@ -1850,9 +1867,36 @@ class AuthManager:
         return True if en is None else bool(en)
 
     def offer_login(self) -> bool:
-        """First-run prompt: a brand-new install is asked once whether to protect the dashboard."""
+        """A brand-new install that has not yet decided about a dashboard password (set one, or skip)."""
         return (self.keys.meta.get("install") == "fresh" and not self.dash.offer_dismissed
                 and self.dash.login_enabled is None and not self.dash.owner_hash and not self.dash.admin_hash)
+
+    def first_run_required(self) -> bool:
+        """Is this Hub waiting for the first-run "Protect your printers" step? Only a FRESH install that has no
+        dashboard password and has not skipped the step. Never on an upgrade (its owner chose how it is protected),
+        and not while the API key check is Warn / Off (the owner lowered it on purpose, and dashboard sign-in
+        cannot be switched on then - it would only be decoration)."""
+        return self.offer_login() and self.mode() == "on"
+
+    def complete_first_run(self, password, ip="", ua="", device_name=None) -> tuple:
+        """The first-run step: this password becomes the dashboard password, sign-in is switched ON, and the browser
+        that asked is made a trusted device (-> public device record, cookie value, max_age). The dashboard password
+        also stands in for the admin password (see admin_state) - no separate admin password is created, so the
+        owner can still choose a different one later. Raises AuthError (409 when the step is not pending)."""
+        with self._first_run_lock:
+            if not self.first_run_required():
+                raise AuthError("There is nothing to set up: this Hub already has its first-run answer.", 409)
+            if not isinstance(password, str) or not (MIN_PASSWORD <= len(password) <= 200) or not password.strip():
+                raise AuthError(f"The password needs {MIN_PASSWORD}-200 characters.", 400)
+            self.settings.update({"security.dashboard_password": password})     # _settings_changed stores the hash
+            if not self.dash.owner_hash:
+                raise AuthError("The password could not be saved.", 500)
+            self.dash.set_fields(login_enabled=True, offer_dismissed=True)
+            return self.add_device("control", device_name, ip, ua)
+
+    def skip_first_run(self):
+        """'Skip' on the first-run step: recorded, so the step does not come back. Sign-in stays off."""
+        self.dash.set_fields(offer_dismissed=True)
 
     def session_config(self) -> dict:
         return self.dash.config()
@@ -2317,6 +2361,13 @@ class AuthMiddleware:
         scope["auth"] = ident
         who[0] = self._principal(ident)
 
+        # A fresh install that has not yet answered "Protect your printers": a browser (the no-password dashboard
+        # cookie) may not change anything until it has - API keys and reads are unaffected.
+        if (ident.kind == "cookie" and method not in SAFE_METHODS and not is_mcp
+                and not (method == "POST" and path in FIRST_RUN_POSTS) and auth.first_run_required()):
+            auth.count_forbidden()
+            return await _json_response({"error": FIRST_RUN_MSG, "first_run": True}, 403)(scope, receive, send)
+
         if admin:
             verdict = auth.admin_verdict(headers, ident)
             if verdict == "anonymous":
@@ -2548,12 +2599,13 @@ def _read_new_password(args, label):
 def _cli(argv):
     """python security.py create-key NAME [--scope read|control]   |   list-keys
        python security.py disable-dashboard-login | reset-dashboard-password [--password-stdin] | list-devices | revoke-device ID
+       python security.py reset-first-run
        python security.py reset-admin-password [--password-stdin] | clear-admin-password
     Works on the same data directory as the server (BAMBU_MCP_CACHE's folder); the running server picks the
     change up on its next request (and forgets its failed-sign-in records). This is also the way back in if every
     key, or the dashboard / admin password, was lost."""
     import argparse
-    ap = argparse.ArgumentParser(prog="security.py", description="Manage Print Hub API keys and dashboard sign-in offline.")
+    ap = argparse.ArgumentParser(prog="security.py", description="Manage Fabrica API keys and dashboard sign-in offline.")
     sub = ap.add_subparsers(dest="cmd", required=True)
     c = sub.add_parser("create-key", help="make a key and print it once")
     c.add_argument("name")
@@ -2568,6 +2620,8 @@ def _cli(argv):
     ra.add_argument("--password", help="the new password - NOT recommended: it shows in `ps` and shell history")
     ra.add_argument("--password-stdin", action="store_true", help="read the new password from standard input")
     sub.add_parser("clear-admin-password", help="remove the admin password (admin actions are then refused until a new one is set)")
+    sub.add_parser("reset-first-run", help="show the first-run 'Protect your printers' step again (only on a new install "
+                                           "that has no dashboard password)")
     sub.add_parser("list-devices", help="list trusted devices (never shows a token)")
     d = sub.add_parser("revoke-device", help="forget one trusted device (or 'all')")
     d.add_argument("device_id", metavar="ID")
@@ -2606,7 +2660,7 @@ def _cli(argv):
         if len(pw) < MIN_PASSWORD or len(pw) > 200:
             print(f"error: a password needs {MIN_PASSWORD}-200 characters.", file=sys.stderr)
             return 1
-        dash.set_fields(owner_hash=hash_password(pw))
+        dash.set_fields(owner_hash=hash_password(pw), offer_dismissed=True)
         store.rotate_session_secret()
         dash.clear_sessions()
         gone = dash.remove_devices_where(lambda r: r.get("role") == "control")
@@ -2616,6 +2670,18 @@ def _cli(argv):
         print(f"Dashboard password changed; every signed-in browser must sign in again and {gone} full-access trusted "
               f"device(s) were forgotten. Sign-in is {state}. View-only devices were not touched - revoke them with "
               "revoke-device if needed.")
+        return 0
+    if args.cmd == "reset-first-run":
+        dash.set_fields(offer_dismissed=False)
+        if store.meta.get("install") != "fresh":
+            print("Noted, but this Hub was an existing install when it first started, so it never shows the first-run "
+                  "step. Set a dashboard password in Settings > Security instead.")
+        elif dash.owner_hash:
+            print("Noted, but a dashboard password is already set, so the first-run step stays hidden.")
+        else:
+            print("The first-run step ('Protect your printers') will show again the next time the dashboard is opened "
+                  "(it needs the API key check to be On).")
+        touch_limiter_reset(data_dir)
         return 0
     if args.cmd == "reset-admin-password":
         pw = _read_new_password(args, "admin password")

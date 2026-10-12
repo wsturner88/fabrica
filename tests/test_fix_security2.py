@@ -95,7 +95,9 @@ class Base(T.Base):
         super().setUp()
         a = server.AUTH
         a.clock = time.time
-        a.dash.set_fields(login_enabled=None, owner_hash=None, viewer_hash=None, admin_hash=None, offer_dismissed=False)
+        # offer_dismissed=True: this fixture models an owner who skipped the first-run "Protect your printers" step
+        # (while that step is pending, a bare-cookie browser may not change anything - tests/test_first_run_password.py)
+        a.dash.set_fields(login_enabled=None, owner_hash=None, viewer_hash=None, admin_hash=None, offer_dismissed=True)
         a.dash.clear_sessions()
         a.dash.remove_devices_where(lambda r: True)
         a.cancel_pairing()
@@ -344,6 +346,7 @@ class AdminBoundaryTests(Base):
 
     def test_the_first_run_prompt_asks_for_the_admin_password_and_goes_away(self):
         self.assertEqual(self.a.keys.meta["install"], "fresh")
+        self.a.dash.set_fields(offer_dismissed=False)          # the step has not been answered yet
         h = self.browser()
         me = self.c.get("/api/auth/me", headers=h).json()
         self.assertTrue(me["offer_login"])

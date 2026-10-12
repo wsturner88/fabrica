@@ -1,0 +1,185 @@
+name: Release
+
+# Push a tag vX.Y.Z (or vX.Y.Z-rc.1 for a prerelease) and this does everything:
+#   validate tag -> tests (ci.yml) -> build + push both images (amd64 + arm64) -> GitHub Release
+# Nothing is published unless the tests pass. Owner guide: docs/release-process.md
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+# Never cancel a release half-way.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: validate tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.v.outputs.version }}          # 1.0.0 or 1.0.0-rc.1 (no leading v)
+      prerelease: ${{ steps.v.outputs.prerelease }}    # 'true' | 'false'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Tag is semver and matches the VERSION file
+        id: v
+        shell: bash
+        run: |
+          set -eu
+          tag="$GITHUB_REF_NAME"
+          re='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          [[ "$tag" =~ $re ]] || { echo "::error::tag '$tag' is not vMAJOR.MINOR.PATCH[-rc.N]"; exit 1; }
+          version="${tag#v}"
+          base="${version%%-*}"
+          if [[ "$version" == *-* ]]; then pre=true; else pre=false; fi
+          [ "$(tr -d '[:space:]' < VERSION)" = "$base" ] || { echo "::error::VERSION file ($(cat VERSION)) does not match tag base $base - bump VERSION first"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$pre" >> "$GITHUB_OUTPUT"
+
+      # Only commits that are on main can be released.
+      - name: Tagged commit is on main
+        run: |
+          git branch -r --contains "$GITHUB_SHA" | grep -Eq '^\s*origin/main$' \
+            || { echo "::error::$GITHUB_SHA is not on origin/main. Merge first, then tag."; exit 1; }
+
+  tests:
+    needs: prepare
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: publish ${{ matrix.title }}
+    needs: [prepare, tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write           # push to GHCR with the built-in GITHUB_TOKEN
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suffix: ""            # ghcr.io/<owner>/<repo>            = the Hub
+            context: .
+            title: Fabrica Hub
+            description: Self-hosted 3D printer fleet manager with a web dashboard and an MCP server
+          - suffix: "-detector"   # ghcr.io/<owner>/<repo>-detector   = the spaghetti-detection adapter
+            context: detector/adapter
+            title: Fabrica detector adapter
+            description: Stdlib-only adapter between the Fabrica Hub and the Obico ML API
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-qemu-action@v4          # lets one runner build linux/arm64
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image tags and OCI labels
+        id: meta
+        uses: docker/metadata-action@v6
+        env:
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index
+        with:
+          images: ghcr.io/${{ github.repository }}${{ matrix.suffix }}
+          flavor: |
+            latest=false
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ needs.prepare.outputs.prerelease == 'false' }}
+            type=raw,value=latest,enable=${{ needs.prepare.outputs.prerelease == 'false' }}
+          labels: |
+            org.opencontainers.image.title=${{ matrix.title }}
+            org.opencontainers.image.description=${{ matrix.description }}
+            org.opencontainers.image.licenses=MIT
+          annotations: |
+            org.opencontainers.image.title=${{ matrix.title }}
+            org.opencontainers.image.description=${{ matrix.description }}
+            org.opencontainers.image.licenses=MIT
+
+      - name: Build and push (linux/amd64 + linux/arm64)
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ matrix.context }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          build-args: BUILD_REV=${{ github.ref_name }}      # shown as the version in Settings
+          cache-from: type=gha,scope=release${{ matrix.suffix }}
+          cache-to: type=gha,scope=release${{ matrix.suffix }},mode=max,ignore-error=true
+
+      - name: Show the published manifest
+        run: docker buildx imagetools inspect "ghcr.io/${GITHUB_REPOSITORY,,}${{ matrix.suffix }}:${{ needs.prepare.outputs.version }}"
+
+  github-release:
+    name: GitHub Release
+    needs: [prepare, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write           # create the release
+    steps:
+      - uses: actions/checkout@v7
+
+      # Notes = the "## [X.Y.Z] ..." section of CHANGELOG.md (Keep a Changelog). For a prerelease
+      # (1.0.0-rc.1) the section of the same base version (1.0.0) is used. Not found -> empty file
+      # -> GitHub's auto-generated notes are used instead.
+      - name: Extract release notes from CHANGELOG.md
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          python3 - <<'PY'
+          import os, re
+          ver = os.environ["VERSION"]
+          wanted = {ver, ver.split("-")[0]}
+          head = re.compile(r"^##\s+\[?v?([^\]\s]+)\]?(\s|$)")
+          out, found = [], False
+          try:
+              lines = open("CHANGELOG.md", encoding="utf-8").read().splitlines()
+          except FileNotFoundError:
+              lines = []
+          for line in lines:
+              if line.startswith("## "):
+                  if found:
+                      break
+                  m = head.match(line)
+                  if m and m.group(1) in wanted:
+                      found = True
+                  continue
+              if found:
+                  out.append(line)
+          while out and (not out[-1].strip() or re.match(r"^\[[^\]]+\]:\s", out[-1])):
+              out.pop()          # trailing blank lines / link-reference definitions
+          text = "\n".join(out).strip()
+          open("release-notes.md", "w", encoding="utf-8").write(text + ("\n" if text else ""))
+          print("CHANGELOG section for %s: %s" % (ver, "found" if text else "NOT FOUND"))
+          PY
+
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+        run: |
+          set -eu
+          args=(--repo "$GITHUB_REPOSITORY" --title "Fabrica $TAG" --verify-tag)
+          if [ -s release-notes.md ]; then
+            args+=(--notes-file release-notes.md)
+          else
+            echo "::warning::no CHANGELOG.md section for $TAG - using GitHub's generated notes"
+            args+=(--generate-notes)
+          fi
+          if [ "$PRERELEASE" = true ]; then args+=(--prerelease); fi
+          gh release create "$TAG" "${args[@]}"

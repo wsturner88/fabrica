@@ -233,7 +233,7 @@ class TestSettingsRoutes(Base):
         ids = [s["id"] for s in d["sections"]]
         self.assertEqual(ids[:2], ["general", "notifications"])
         f = next(x for s in d["sections"] for x in s["fields"] if x["key"] == "general.hub_name")
-        self.assertEqual((f["value"], f["source"]), ("Print Hub", "default"))
+        self.assertEqual((f["value"], f["source"]), ("Fabrica", "default"))
         sch = self.client.get("/api/settings/schema").json()
         self.assertNotIn("value", sch["sections"][0]["fields"][0])
         self.assertIn("telegram", sch["channels"])
@@ -313,7 +313,7 @@ class TestSettingsRoutes(Base):
         server.SETTINGS.reset()
         r = self.client.post("/api/settings/import?dry_run=1", json=doc)
         self.assertEqual(r.status_code, 200, r.text)
-        self.assertEqual(server.SETTINGS.get("general.hub_name"), "Print Hub")     # dry run changed nothing
+        self.assertEqual(server.SETTINGS.get("general.hub_name"), "Fabrica")     # dry run changed nothing
         r = self.client.post("/api/settings/import", json=doc)
         self.assertIn("general.hub_name", r.json()["applied"])
         self.assertEqual(server.SETTINGS.get("general.hub_name"), "Exported")

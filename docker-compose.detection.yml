@@ -1,8 +1,9 @@
-# Spaghetti detection add-on for the Print Hub ("Full" and "Split" editions).
+# Spaghetti detection add-on for Fabrica ("Full" and "Split" editions).
 #
 # Full edition (Hub + detector on one machine) - COMBINE with the normal file:
 #     docker compose -f docker-compose.yml -f docker-compose.detection.yml --profile detection up -d
-#   (or with docker-compose.ghcr.yml in place of docker-compose.yml)
+#   (or with docker-compose.ghcr.yml in place of docker-compose.yml). The adapter image is pulled
+#   from GHCR; add --build to build it from this clone instead.
 # Detector-only machine (Split edition) - this file ALONE:
 #     DETECTOR_BIND=0.0.0.0 docker compose -f docker-compose.detection.yml --profile detection up -d
 #
@@ -47,8 +48,11 @@ services:
 
   detector:
     profiles: ["detection"]
+    # Pulled from GHCR by default. From a clone, add --build to build ./detector/adapter instead.
+    # (pull_policy: without it Compose would build, because a `build:` section is present.)
+    image: ghcr.io/wsturner88/fabrica-detector:latest   # amd64 + arm64
+    pull_policy: always
     build: ./detector/adapter
-    image: fabrica-detector:local
     restart: unless-stopped
     depends_on:
       detector-ml:

@@ -52,8 +52,8 @@ echo "DETECTOR_TOKEN=$(openssl rand -hex 32)" >> .env
 # 2. check the combined file parses
 docker compose -f docker-compose.yml -f docker-compose.detection.yml --profile detection config -q
 
-# 3. start the Hub + detector (first start pulls ~330 MB and builds the small adapter)
-docker compose -f docker-compose.yml -f docker-compose.detection.yml --profile detection up -d --build
+# 3. start the Hub + detector (first start pulls ~330 MB)
+docker compose -f docker-compose.yml -f docker-compose.detection.yml --profile detection up -d          # pulls the published images; add --build to build the adapter from source
 ```
 
 (Using the pre-built Hub image? Use `docker-compose.ghcr.yml` in place of `docker-compose.yml`.)
@@ -102,7 +102,7 @@ and the `detector/adapter/` folder (or clone this repo), then:
 ```bash
 echo "DETECTOR_TOKEN=$(openssl rand -hex 32)" > .env      # note this token: the Hub needs it
 echo "DETECTOR_BIND=0.0.0.0" >> .env                      # listen on the network, not just localhost
-docker compose -f docker-compose.detection.yml --profile detection up -d --build
+docker compose -f docker-compose.detection.yml --profile detection up -d
 curl http://localhost:8090/healthz                        # {"status":"ok","ml_api":"ok",...}
 ```
 

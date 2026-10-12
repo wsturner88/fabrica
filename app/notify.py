@@ -50,7 +50,7 @@ import security                      # standalone (stdlib only): scrub_text stri
 import settings_store as ss
 
 DEFAULT_TIMEOUT = 10.0
-USER_AGENT = "PrintHub-Notify/1.0"
+USER_AGENT = "Fabrica-Notify/1.0"
 LEVELS = ("info", "warning", "failure")
 TELEGRAM_API = "https://api.telegram.org"
 
@@ -122,7 +122,7 @@ def http_request(method, url, headers=None, data=None, timeout=DEFAULT_TIMEOUT):
 
 def multipart(fields: dict, files: list):
     """files: [(field_name, filename, content_type, bytes)]. Returns (body, content_type)."""
-    boundary = "----PrintHub" + uuid.uuid4().hex
+    boundary = "----Fabrica" + uuid.uuid4().hex
     parts = []
     for k, v in fields.items():
         parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n'.encode()
@@ -297,7 +297,7 @@ class EmailChannel(Channel):
         if not recipients:
             raise ChannelError("no recipient address")
         msg = EmailMessage()
-        msg["Subject"] = _one_line(title) or "Print Hub"
+        msg["Subject"] = _one_line(title) or "Fabrica"
         msg["From"] = cfg["from_addr"].strip()
         msg["To"] = ", ".join(recipients)
         msg["Date"] = email.utils.formatdate(localtime=True)
@@ -352,7 +352,7 @@ class DiscordChannel(Channel):
     def _send(self, title, body, image, level, meta):
         text = _clip((f"**{title}**\n{body}" if title else body), 2000)
         url = self.cfg["webhook_url"].strip()
-        payload = {"content": text, "username": meta.get("hub_name") or "Print Hub"}
+        payload = {"content": text, "username": meta.get("hub_name") or "Fabrica"}
         if image:
             blob, ctype = multipart({"payload_json": json.dumps(payload)},
                                     [("files[0]", "snapshot.jpg", "image/jpeg", image)])
@@ -504,7 +504,7 @@ class Notifier:
         return ch
 
     def _hub_name(self):
-        return self.settings.get("general.hub_name") or "Print Hub"
+        return self.settings.get("general.hub_name") or "Fabrica"
 
     def enabled_channels(self) -> list:
         out = []
@@ -747,7 +747,7 @@ class Notifier:
         stamp = ss.format_datetime(self.clock(), self.settings.get("general.timezone"),
                                    self.settings.get("general.datetime_format"))
         ok, err = ch.send(f"{self._hub_name()}: test message",
-                          f"This is a test from your Print Hub, sent at {stamp}. "
+                          f"This is a test from your Fabrica hub, sent at {stamp}. "
                           "If you can read this, notifications to this channel work.",
                           None, "info", {"event": "test", "printer": "", "hub_name": self._hub_name()})
         with self._lock:

@@ -971,7 +971,7 @@ class SetupGuideTests(unittest.TestCase):
         for needle in ("Settings > Network", "maker", "Generate Password", "API key", "pre-heat", "camera"):
             self.assertIn(needle, p)
         o = text("octoprint")
-        for needle in ("Application Keys", "Print Hub", "Connect", "webcam"):
+        for needle in ("Application Keys", "Fabrica", "Connect", "webcam"):
             self.assertIn(needle, o)
         m = text("moonraker")
         for needle in ("7125", "trusted_clients", "output_pin", "UNLOAD_FILAMENT", "LOAD_FILAMENT", "webcam"):

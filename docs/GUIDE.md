@@ -7,7 +7,7 @@
 
 # Fabrica — the full guide
 
-> **Naming:** the product is **Fabrica** (a.k.a. "the Print Hub"); the repository, Docker image and container are all `fabrica` now.
+> **Naming:** the product is **Fabrica**; the repository, Docker image and container are all `fabrica` now.
 > Environment variables keep their `BAMBU_MCP_` prefix for compatibility.
 
 **Give any AI agent hands on your Bambu Lab printers — over your own LAN, no cloud.**
@@ -304,9 +304,19 @@ login rate limits behind a reverse proxy) · `BAMBU_MCP_ALLOW_LOOPBACK_DETECTOR=
 
 ### Securing the dashboard (optional)
 
-All of this is **opt-in and off by default**. An install that never turned it on behaves exactly as described
-above: the page opens without a password and hands the browser the session cookie. A brand-new install is offered
-it once, in a first-run prompt (*Not now, don't ask again* is fine); an upgraded Hub is never asked.
+Sign-in is a switch you control. An install that never turned it on behaves exactly as described above: the
+page opens without a password and hands the browser the session cookie. A **brand-new install asks first** (below);
+an upgraded Hub is never asked and nothing about it changes.
+
+**First-run step: "Protect your printers".** The first time the dashboard opens on a new install it shows a full-screen
+step before anything else: *Anyone on your network who opens this page could start, stop or heat your printers.* Type a
+password twice and press **Set password** — sign-in is switched on, this browser stays signed in (it becomes a trusted
+device) and the password also does the admin work until you choose a separate admin password. Wall screen? Pair it later
+from Settings → Security (**Add a device**). **Skip — I understand anyone on my network can control my printers** needs a
+second tap to confirm, is remembered (the step does not return) and leaves sign-in off; Settings → Security keeps saying
+*SIGN-IN: NOT REQUIRED*. Until one of the two happened the Hub refuses changes from a browser (`403`, pointing to the
+dashboard); reads, the dashboard itself and agents with API keys are unaffected. Not asked while the key check is Warn or
+Off. To see the step again: `docker exec fabrica python /app/security.py reset-first-run`.
 
 **Settings → Security → Dashboard sign-in.** *Require sign-in to open the dashboard* needs a password in the same
 step (so you cannot lock yourself out). Turning it on signs every other browser and screen out — this one stays

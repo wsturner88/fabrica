@@ -1,4 +1,4 @@
-"""Klipper / Moonraker driver for the Print Hub (Voron, Ender-with-Klipper, Creality K1, Sovol, ...).
+"""Klipper / Moonraker driver for Fabrica (Voron, Ender-with-Klipper, Creality K1, Sovol, ...).
 
 Moonraker is the HTTP/JSON API server that sits in front of Klipper. This driver
 mirrors the public surface of `OctoPrintPrinter` in bambu.py so server.py /
