@@ -4,6 +4,6 @@
 #   tested with: mcp 1.30.0 | paho-mqtt 2.1.0 | PyYAML 6.0.3
 # starlette, httpx, pydantic, uvicorn, ... arrive through `mcp`.
 # Raise the floors after running the full test suite against a newer set.
-mcp>=1.30,<2
+mcp>=2.3.0,<3
 paho-mqtt>=2.1,<3
 PyYAML>=6.0,<7
