@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 460 120" width="460" height="120" role="img" aria-labelledby="t">
+  <title id="t">Fabrica - printer management, agent-first.</title>
+  <!-- for light backgrounds; darker amber on the cursor keeps it visible on white. Text is live &lt;text&gt; (not outlines): IBM Plex Mono 700 when installed, otherwise the
+       system monospace; textLength pins the width so the layout is identical either way. -->
+  <g transform="translate(12 12)">
+    <rect width="96" height="96" rx="21" fill="#0f3b66"/>
+    <g transform="scale(0.96)">
+      <g stroke="#e8f2fb" stroke-width="4" stroke-linecap="round">
+        <line x1="50" y1="50" x2="24" y2="24"/><line x1="50" y1="50" x2="76" y2="24"/>
+        <line x1="50" y1="50" x2="24" y2="76"/><line x1="50" y1="50" x2="76" y2="76"/>
+      </g>
+      <g fill="#e8f2fb">
+        <rect x="15" y="15" width="18" height="18" rx="4"/><rect x="67" y="15" width="18" height="18" rx="4"/>
+        <rect x="15" y="67" width="18" height="18" rx="4"/><rect x="67" y="67" width="18" height="18" rx="4"/>
+      </g>
+      <circle cx="50" cy="50" r="14" fill="#ffb020"/>
+      <path d="M45 44h10v4l-3 4h-4l-3-4z" fill="#0f3b66"/>
+    </g>
+  </g>
+  <text x="128" y="64" font-family="'IBM Plex Mono','SF Mono',ui-monospace,Menlo,Consolas,'DejaVu Sans Mono',monospace" font-weight="700" font-size="52" textLength="250" lengthAdjust="spacing" fill="#0f3b66">fabrica<tspan fill="#c77d00">_</tspan></text>
+  <text x="130" y="94" font-family="'IBM Plex Mono','SF Mono',ui-monospace,Menlo,Consolas,'DejaVu Sans Mono',monospace" font-weight="500" font-size="15" textLength="288" lengthAdjust="spacing" fill="#1a4f84">printer management, agent-first.</text>
+</svg>

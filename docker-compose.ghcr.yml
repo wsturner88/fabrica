@@ -1,0 +1,18 @@
+# Pull-and-run deployment - no build needed:  docker compose -f docker-compose.ghcr.yml up -d
+# Needs Docker Compose >= 2.24 (optional env_file below). Nothing else to set up:
+# no .env and no config.yml required - add printers in the dashboard.
+services:
+  fabrica:
+    image: ghcr.io/wsturner88/fabrica:latest   # amd64 + arm64
+    container_name: fabrica
+    restart: unless-stopped
+    ports:
+      - "8271:8271"
+    env_file:
+      - path: .env          # optional: only for BACKUP_KEEP or a legacy printer import
+        required: false
+    volumes:
+      - ./data:/data        # printers, secrets, metadata cache, backups
+      # Upgrading from the old config.yml setup? Uncomment to import its printers once
+      # (the colour palette / part-colour conventions in it are still read every start):
+      # - ./config.yml:/app/config.yml:ro

@@ -1,0 +1,82 @@
+# Spaghetti detection add-on for the Print Hub ("Full" and "Split" editions).
+#
+# Full edition (Hub + detector on one machine) - COMBINE with the normal file:
+#     docker compose -f docker-compose.yml -f docker-compose.detection.yml --profile detection up -d
+#   (or with docker-compose.ghcr.yml in place of docker-compose.yml)
+# Detector-only machine (Split edition) - this file ALONE:
+#     DETECTOR_BIND=0.0.0.0 docker compose -f docker-compose.detection.yml --profile detection up -d
+#
+# Without `--profile detection` nothing in this file starts, so adding the file is harmless.
+# Needs Docker Compose >= 2.24. Full guide: docs/detection.md
+#
+# Settings go in `.env` next to this file (see docs/detection.md):
+#   DETECTOR_TOKEN   REQUIRED. A long random token; the adapter will not start without one.
+#                    Generate:  openssl rand -hex 32
+#                    (Full edition: the Hub container reads it from the same .env.)
+#   DETECTOR_BIND    address to publish the adapter on. Default 127.0.0.1 (this machine only).
+#                    Split detector box: 0.0.0.0, and keep it on your LAN / a VPN, never the internet.
+#   DETECTOR_PORT    published port, default 8090
+#   DETECTOR_INTERNAL_TOKEN   optional; token between the adapter and the model container
+#                    (defaults to DETECTOR_TOKEN; that hop never leaves the private network)
+#
+# The model container is the UNMODIFIED upstream Obico `ml_api` image (AGPL-3.0, pulled from the
+# upstream registry on first start - we do not redistribute it; source:
+# https://github.com/TheSpaghettiDetective/obico-server). The adapter next to it is this
+# repository's own MIT code. They talk plain HTTP over a private Docker network.
+
+services:
+  detector-ml:
+    profiles: ["detection"]
+    # Pinned by digest: the tag alone could be re-pointed upstream. To move to a newer version,
+    # change both the tag and the digest (see docs/detection.md, "Upgrading the model image").
+    image: ghcr.io/thespaghettidetective/obico-ml-api-cpu:2026.10.2@sha256:e1b1c5b4cfc517ed884cad24e4a709d31b935ea49dab45ff60d31a62f4cb86ee
+    restart: unless-stopped
+    # NO `ports:` on purpose. ml_api fetches whatever URL it is given and has no auth unless a
+    # token is set; it must only ever be reachable from the adapter, over the internal network.
+    environment:
+      ML_API_TOKEN: ${DETECTOR_INTERNAL_TOKEN:-${DETECTOR_TOKEN:-}}
+      # Leave SENTRY_DSN and DEBUG unset: SENTRY_DSN would send error reports to a third party.
+    mem_limit: 1536m          # guard so a leak cannot starve the Hub; tune after `docker stats`
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:3333/hc/', timeout=5).read()==b'ok' else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s      # the model is loaded when the server boots
+    networks: [detector-net]
+
+  detector:
+    profiles: ["detection"]
+    build: ./detector/adapter
+    image: fabrica-detector:local
+    restart: unless-stopped
+    depends_on:
+      detector-ml:
+        condition: service_healthy
+    environment:
+      DETECTOR_TOKEN: ${DETECTOR_TOKEN:-}          # empty -> the adapter exits with a clear message
+      ML_API_URL: http://detector-ml:3333
+      ML_API_TOKEN: ${DETECTOR_INTERNAL_TOKEN:-${DETECTOR_TOKEN:-}}
+      IMAGE_HOST: detector                          # the name ml_api uses to fetch each picture
+      MAX_BYTES: "5242880"
+    # Published for the Hub / other machines. Default: this machine only.
+    ports:
+      - "${DETECTOR_BIND:-127.0.0.1}:${DETECTOR_PORT:-8090}:8080"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    # `default` is the network the Hub is on (Full edition); `detector-net` is private to the
+    # two detector containers.
+    networks: [detector-net, default]
+
+networks:
+  detector-net:
+    internal: true            # no route out: ml_api cannot reach the internet or the LAN
