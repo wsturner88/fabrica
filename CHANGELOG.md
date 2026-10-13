@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-13
+
 ### Fixed
 
 - **Two-filament prints: you can now choose the spools.** The start-print confirm used to offer the spool grid only for single-filament
@@ -21,7 +23,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   those spools, even if they moved to another slot, and says so ("Same spools as your last print of this file (Oct 13)"); if one is no
   longer loaded the normal proposal is used. Agents see the same note. It only changes the proposal: nothing starts without the human.
 
-## [1.0.0] - 2026-10-13
 - **Name: Fabrica** (title "Fabrica — Print Farm"). README, About screen and the Home Screen app name; repository, image and container stay `fabrica`.
 
 ### Changed
