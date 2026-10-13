@@ -272,6 +272,25 @@ def _period_seconds(period):
     raise ValueError(f"unknown period {period!r}: use day, week, month, year, all or <N>d")
 
 
+def _printer_clause(printer):
+    """SQL for a printer filter -> (sql, args), or None for "no filter". `printer` is one name (a string; "" = no
+    filter) or a collection of names (any of them; an EMPTY collection matches nothing - a group with no printers
+    must not silently mean "everything"). Names compare case-insensitively."""
+    if printer is None:
+        return None
+    if isinstance(printer, str):
+        return ("LOWER(printer)=LOWER(?)", [printer]) if printer else None
+    names = sorted({str(p) for p in printer if p})
+    if not names:
+        return ("0=1", [])
+    return ("LOWER(printer) IN (" + ",".join("LOWER(?)" for _ in names) + ")", names)
+
+
+def _printer_echo(printer):
+    """The filter as it is reported back in a result (JSON-safe)."""
+    return printer if printer is None or isinstance(printer, str) else sorted({str(p) for p in printer if p})
+
+
 class JobLog:
     """One row per print attempt. Never lets a storage problem escape into the Hub:
 
@@ -874,10 +893,129 @@ class JobLog:
         ended = max(seen, start or 0)
         return "finished", ended, (ended - start) if start is not None and ended > start else None
 
+    # ==== rename ====
+    # ---- renamed files stay one file --------------------------------------
+    # A file renamed through the Hub's rename flow leaves a row here (old_file_key -> new_file_key, where, when). Old job
+    # rows are NEVER rewritten: the links are applied when rows are read, so `recent_jobs`, `stats` (By file),
+    # `file_costs` and the print count treat the old and the new name as one file and show the newest name.
+    # The table is created on first use (CREATE TABLE IF NOT EXISTS), outside the numbered migrations.
+
+    RENAME_HOPS = 25
+
+    def _ensure_renames(self):
+        self._exec("CREATE TABLE IF NOT EXISTS renames ("
+                   "id INTEGER PRIMARY KEY AUTOINCREMENT, scope TEXT NOT NULL, location TEXT, "
+                   "old_file TEXT, new_file TEXT, old_key TEXT NOT NULL, new_key TEXT NOT NULL, at REAL NOT NULL)")
+
+    def _has_renames(self) -> bool:
+        return bool(self._q("SELECT 1 FROM sqlite_master WHERE type='table' AND name='renames'"))
+
+    def record_rename(self, scope, location, old_file, new_file):
+        """Remember that `old_file` became `new_file` on a printer (scope "printer", location = its name) or in the
+        library (scope "library", location "library"). Returns how many link rows were written (0 when the two
+        names are the same file as far as the log is concerned, e.g. only the capitals or the extension case changed)."""
+        if scope not in ("printer", "library"):
+            raise ValueError("scope must be printer or library")
+        pairs = {(_costs.file_key(old_file), _costs.file_key(new_file), str(old_file), str(new_file))}
+        ob, nb = str(old_file).replace("\\", "/").rsplit("/", 1)[-1], str(new_file).replace("\\", "/").rsplit("/", 1)[-1]
+        pairs.add((_costs.file_key(ob), _costs.file_key(nb), ob, nb))       # the log may hold the name without its folder
+        n = 0
+        for ok, nk, of, nf in sorted(pairs):
+            if not ok or not nk or ok == nk:
+                continue
+            self._ensure_renames()
+            self._exec("INSERT INTO renames (scope, location, old_file, new_file, old_key, new_key, at) VALUES (?,?,?,?,?,?,?)",
+                       (scope, "library" if scope == "library" else str(location or ""), of, nf, ok, nk, self.clock()))
+            n += 1
+        return n
+
+    def renames(self, limit=200) -> list:
+        """The recorded renames, newest first (for the dashboard / tools)."""
+        if not self._has_renames():
+            return []
+        return self._q("SELECT * FROM renames ORDER BY id DESC LIMIT ?", (int(limit),))
+
+    def _renames_map(self) -> dict:
+        """{(location lower or "*", old_key): (new_key, new_file)}. A library rename applies to every printer ("*")."""
+        try:
+            if not self._has_renames():
+                return {}
+            rows = self._q("SELECT * FROM renames ORDER BY id")
+        except Exception:
+            return {}
+        out = {}
+        for r in rows:
+            loc = "*" if r["scope"] == "library" else str(r["location"] or "").lower()
+            out[(loc, r["old_key"])] = (r["new_key"], r["new_file"])
+        return out
+
+    def _canonical(self, printer, key, rmap):
+        """(newest key, newest file name or None) for `key` as seen on `printer`, following old -> new links."""
+        loc, cur, name, seen = str(printer or "").lower(), key, None, set()
+        for _ in range(self.RENAME_HOPS):
+            hit = rmap.get((loc, cur)) or rmap.get(("*", cur))
+            if not hit or hit[0] in seen or hit[0] == cur:
+                break
+            seen.add(cur)
+            cur, name = hit
+        return cur, name
+
+    def _family(self, key, rmap) -> set:
+        """Every key linked to `key` through any rename (either direction), including itself."""
+        edges = {}
+        for (_loc, ok), (nk, _nf) in rmap.items():
+            edges.setdefault(ok, set()).add(nk)
+            edges.setdefault(nk, set()).add(ok)
+        fam, todo = {key}, [key]
+        while todo:
+            for n in edges.get(todo.pop(), ()):
+                if n not in fam:
+                    fam.add(n)
+                    todo.append(n)
+        return fam
+
+    def _rows_for_file(self, name, printer=None, rmap=None):
+        """Public job rows for a file under any of its names (the whole rename family), optionally on given printers."""
+        key = _costs.file_key(name)
+        if not key:
+            raise ValueError("file name required")
+        rmap = self._renames_map() if rmap is None else rmap
+        fam = sorted(self._family(key, rmap))
+        where, args = ["file_key IN (" + ",".join("?" for _ in fam) + ")"], list(fam)
+        pc = _printer_clause(printer)
+        if pc:
+            where.append(pc[0])
+            args.extend(pc[1])
+        out = []
+        for r in self._q("SELECT * FROM jobs WHERE " + " AND ".join(where), tuple(args)):
+            rk = r.get("file_key") or _costs.file_key(r.get("file"))
+            if self._canonical(r["printer"], rk, rmap)[0] == self._canonical(r["printer"], key, rmap)[0]:
+                out.append(self._public(r, with_cost=False, rmap=rmap))
+        return out, key, rmap
+
+    def times_printed(self, name, printer=None) -> dict:
+        """How often a file was printed, under any of its names: {"attempts", "finished", "failed", "cancelled",
+        "running", "names"} (names = every name the log knows it by)."""
+        rows, key, rmap = self._rows_for_file(name, printer)
+        fam = self._family(key, rmap)
+        names = sorted({nf for (_l, _ok), (nk, nf) in rmap.items() if nk in fam and nf} |
+                       {r["file"] for r in rows if r.get("file")}, key=str.casefold)
+        count = lambda res: sum(1 for r in rows if r["result"] == res)
+        return {"attempts": sum(1 for r in rows if r["result"] in ("finished", "failed", "cancelled")),
+                "finished": count("finished"), "failed": count("failed"), "cancelled": count("cancelled"),
+                "running": count("running"), "names": names}
+    # ==== end rename ====
+
     # ---- queries ----------------------------------------------------------
 
-    def _public(self, r: dict, with_cost=True) -> dict:
+    def _public(self, r: dict, with_cost=True, rmap=None) -> dict:
         d = dict(r)
+        # ==== rename ====
+        if rmap:                                # a renamed file shows its newest name (the stored row is untouched)
+            ck, nf = self._canonical(d.get("printer"), d.get("file_key") or _costs.file_key(d.get("file")), rmap)
+            if nf and ck != (d.get("file_key") or _costs.file_key(d.get("file"))):
+                d["renamed_from"], d["file"], d["file_key"] = d.get("file"), nf, ck
+        # ==== end rename ====
         fil = d.get("filaments")
         if not isinstance(fil, list):          # a row from the database holds JSON text; a row already made public holds the list
             try:
@@ -907,9 +1045,10 @@ class JobLog:
         """Newest first. `printer` filters (case-insensitive); `result` is one of RESULTS."""
         limit = max(1, min(int(limit or 50), 1000))
         where, args = [], []
-        if printer:
-            where.append("LOWER(printer)=LOWER(?)")
-            args.append(printer)
+        pc = _printer_clause(printer)
+        if pc:
+            where.append(pc[0])
+            args.extend(pc[1])
         if result:
             if result not in RESULTS:
                 raise ValueError(f"result must be one of {', '.join(RESULTS)}")
@@ -917,11 +1056,12 @@ class JobLog:
             args.append(result)
         sql = "SELECT * FROM jobs" + (" WHERE " + " AND ".join(where) if where else "") + \
               " ORDER BY COALESCE(started_at, ended_at) DESC, id DESC LIMIT ?"
-        return [self._public(r) for r in self._q(sql, (*args, limit))]
+        rmap = self._renames_map()      # ==== rename ====
+        return [self._public(r, rmap=rmap) for r in self._q(sql, (*args, limit))]
 
     def job(self, job_id):
         rows = self._q("SELECT * FROM jobs WHERE id=?", (int(job_id),))
-        return self._public(rows[0]) if rows else None
+        return self._public(rows[0], rmap=self._renames_map()) if rows else None
 
     def _window(self, period, printer=None, now=None):
         secs = _period_seconds(period)
@@ -931,21 +1071,23 @@ class JobLog:
         if since is not None:
             where.append("COALESCE(ended_at, started_at) >= ?")
             args.append(since)
-        if printer:
-            where.append("LOWER(printer)=LOWER(?)")
-            args.append(printer)
+        pc = _printer_clause(printer)
+        if pc:
+            where.append(pc[0])
+            args.extend(pc[1])
         rows = self._q("SELECT * FROM jobs" + (" WHERE " + " AND ".join(where) if where else "")
                        + " ORDER BY COALESCE(started_at, ended_at)", tuple(args))
-        return since, now, [self._public(r, with_cost=False) for r in rows]
+        rmap = self._renames_map()      # ==== rename ====
+        return since, now, [self._public(r, with_cost=False, rmap=rmap) for r in rows]
 
-    def stats(self, period="month", printer=None, now=None, series_bucket=None) -> dict:
+    def stats(self, period="month", printer=None, now=None, series_bucket=None, group_members=None) -> dict:
         """Totals for the trailing `period` (day = 24 h, week = 7 d, month = 30 d, year, all, or
         '<N>d'), optionally one printer: counts, success rate, hours, grams, cost split, clean and
         true cost per part, and breakdowns by printer, material and file (with the material
         series per day / week / month)."""
         since, until, rows = self._window(period, printer, now)
         rates = self.rates()
-        out = {"period": period, "since": since, "until": until, "printer": printer,
+        out = {"period": period, "since": since, "until": until, "printer": _printer_echo(printer),
                "currency": rates.currency}
         out.update(_costs.aggregate(rows, rates))
         by_printer, by_file, by_mat = {}, {}, {}
@@ -972,6 +1114,41 @@ class JobLog:
         bucket = series_bucket or ("month" if str(period).lower() in ("year", "all") else "day")
         out["material_series"] = _costs.material_series(rows, bucket, self.tz)
         out["series_bucket"] = bucket
+        if group_members is not None:         # [{"name", "printers"}]: the By-group summary, over the same filtered rows
+            out["by_group"] = self.by_group(rows, rates, group_members, keep_empty=printer is None or printer == "")
+        return out
+
+    # ---- printer groups ---------------------------------------------------
+
+    @staticmethod
+    def by_group(rows, rates, group_members, keep_empty=True) -> list:
+        """Summary per group over `rows` (already filtered): prints, success, hours, material, cost. A printer in two
+        groups counts in BOTH, so the rows do not add up to the total; printers in no group are summed on a
+        last row with "group": None (only shown when at least one group exists). Groups with no prints in the
+        window are listed only when `keep_empty` (no filter is active)."""
+        slim = ("jobs", "finished", "failed", "cancelled", "running", "unknown", "success_rate", "hours",
+                "grams_used", "good_parts", "true_cost_per_part", "clean_cost_per_part")
+
+        def summary(sub):
+            a = _costs.aggregate(sub, rates)
+            mats = {}
+            for r in sub:
+                if r["result"] in ("finished", "failed", "cancelled"):
+                    for t, g in _costs.material_grams(r).items():
+                        mats[t] = round(mats.get(t, 0.0) + g, 2)
+            return {**{k: a[k] for k in slim}, "cost_total": a["cost"]["total"],
+                    "wasted_on_failures": a["cost"]["wasted_on_failures"], "by_material": mats}
+
+        out, grouped = [], set()
+        for g in group_members or []:
+            low = {str(p).lower() for p in g.get("printers", [])}
+            grouped |= low
+            sub = [r for r in rows if str(r["printer"]).lower() in low]
+            if sub or keep_empty:
+                out.append({"group": g["name"], "printers": list(g.get("printers", [])), **summary(sub)})
+        loose = [r for r in rows if str(r["printer"]).lower() not in grouped]
+        if out and loose:
+            out.append({"group": None, "printers": sorted({r["printer"] for r in loose}, key=str.lower), **summary(loose)})
         return out
 
     def material_usage(self, bucket="day", period="month", printer=None, now=None) -> list:
@@ -983,17 +1160,12 @@ class JobLog:
 
     def file_costs(self, name, last_n=None, printer=None) -> dict:
         """Cost per part for one file over its last N attempts (default: the Costs 'window_n')."""
-        key = _costs.file_key(name)
-        if not key:
-            raise ValueError("file name required")
-        where, args = ["file_key=?"], [key]
-        if printer:
-            where.append("LOWER(printer)=LOWER(?)")
-            args.append(printer)
-        rows = [self._public(r, with_cost=False)
-                for r in self._q("SELECT * FROM jobs WHERE " + " AND ".join(where), tuple(args))]
+        rows, key, rmap = self._rows_for_file(name, printer)     # ==== rename ==== (every name the file has had)
         rates = self.rates()
-        out = {"file": name, "file_key": key, "printer": printer, "currency": rates.currency}
+        out = {"file": name, "file_key": key, "printer": _printer_echo(printer), "currency": rates.currency}
+        fam = self._family(key, rmap)
+        if len(fam) > 1:
+            out["names"] = sorted({nf for (_l, _ok), (nk, nf) in rmap.items() if nk in fam and nf}, key=str.casefold)
         out.update(_costs.file_costs(rows, rates, last_n))
         out["running"] = sum(1 for r in rows if r["result"] == "running")
         return out

@@ -44,7 +44,7 @@ import urllib.request
 import http.client
 
 from bambu import (PrinterError, PrinterBusy, make_opener, is_redirect, REDIRECT_MSG, strip_userinfo, scrub_text,
-                   _require_idle_for_delete)
+                   _require_idle_for_delete, read_capped, FILE_MAX_BYTES)   # read_capped, FILE_MAX_BYTES: rename
 import controls as _controls
 from controls import ControlUnsupported
 from camera import PollingCameraStream, _Done
@@ -629,6 +629,29 @@ class PrusaLinkPrinter:
         Sends a Range header; if the printer ignores it only nbytes+1 are ever read."""
         with self.open_file(filename, timeout=15, headers={"Range": f"bytes=0-{nbytes - 1}"}) as r:
             return r.read(nbytes + 1)[:nbytes]
+
+    # ==== rename ====
+    def download(self, filename: str, max_bytes: int = FILE_MAX_BYTES) -> bytes:
+        """The whole file (capped at `max_bytes`; PrinterError beyond it). Refused while a print is running
+        (open_file's own guard: the USB stick is in use)."""
+        with self.open_file(filename, timeout=60) as r:
+            try:
+                return read_capped(r, max_bytes)
+            except (socket.timeout, OSError, http.client.HTTPException) as e:
+                raise PrinterError(f"Could not read the file from PrusaLink at {self.url}: {scrub_text(e)}") from e
+
+    def upload(self, filename: str, data, timeout: float = 300):
+        """BETA - not yet verified on real hardware. Upload a file to the printer's storage:
+        PUT /api/v1/files/<storage>/<path>, the file's bytes as the body (application/octet-stream), with
+        `Overwrite: ?0` (an existing file is NEVER replaced; the older spelling `Overwrite-File: ?0` is sent as well)
+        and `Print-After-Upload: ?0` (it never starts a print). Same Digest / API-key authentication as every other call.
+        Refused unless the printer is positively idle right now. The caller makes sure the name is free."""
+        _require_idle_for_delete(self, "uploaded")
+        body = bytes(data)
+        self._call("PUT", self._file_path(filename), body=body, timeout=timeout, what="upload the file",
+                   headers={"Content-Type": "application/octet-stream", "Overwrite": "?0", "Overwrite-File": "?0",
+                            "Print-After-Upload": "?0", "Content-Length": str(len(body))})
+    # ==== end rename ====
 
     # ---- job control --------------------------------------------------------
 

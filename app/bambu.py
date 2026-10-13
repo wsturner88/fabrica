@@ -94,11 +94,12 @@ def is_redirect(e) -> bool:
 NET_ERRORS = (urllib.error.URLError, OSError, http.client.HTTPException)
 
 
-def _require_idle_for_delete(prn):
+def _require_idle_for_delete(prn, what="deleted"):
     """Driver-level guard for destructive file operations on HTTP printers: a FRESH reading (not the
     3 s cache) must show the printer connected, positively IDLE / FINISH / FAILED, with no start pending.
     Raises PrinterBusy("printer is busy ...") otherwise, so a delete that raced a print start is refused
-    here even if the caller checked a moment earlier (review N-12)."""
+    here even if the caller checked a moment earlier (review N-12). `what` only words the message
+    ("nothing was deleted" / "nothing was uploaded")."""
     fn = getattr(prn, "fresh_snapshot", None) or prn.snapshot
     s = fn()
     state = s.get("state")
@@ -107,7 +108,76 @@ def _require_idle_for_delete(prn):
     raise PrinterBusy(f"printer is busy ({getattr(prn, 'name', '?')}: "
                       f"{'state ' + str(state) if s.get('connected') else 'not connected'}"
                       f"{': ' + scrub_text(s['error']) if s.get('error') else ''}"
-                      f"{', a print start was just sent' if s.get('start_pending') else ''}) - nothing was deleted.")
+                      f"{', a print start was just sent' if s.get('start_pending') else ''}) - nothing was {what}.")
+
+
+# ==== rename ====
+# Whole-file download with a size cap and multipart upload bodies, shared by the OctoPrint, PrusaLink and Moonraker
+# drivers (file renaming downloads a file and uploads it again under the new name; see app/renamer.py).
+FILE_MAX_BYTES = 500 * 1024 * 1024
+_DL_CHUNK = 1024 * 1024
+
+
+def read_capped(resp, max_bytes=FILE_MAX_BYTES) -> bytes:
+    """The whole body of an HTTP response, refusing one bigger than `max_bytes` (a declared Content-Length is
+    checked first; otherwise the read stops as soon as the cap is passed, so a huge or endless body is never buffered)."""
+    cap = int(max_bytes)
+    try:
+        declared = int(resp.headers.get("Content-Length"))
+    except Exception:
+        declared = None
+    if declared is not None and declared > cap:
+        raise PrinterError(f"The file is larger than the {cap // 1048576} MB limit for a download.")
+    buf = bytearray()
+    while True:
+        chunk = resp.read(_DL_CHUNK)
+        if not chunk:
+            break
+        buf += chunk
+        if len(buf) > cap:
+            raise PrinterError(f"The file is larger than the {cap // 1048576} MB limit for a download.")
+    return bytes(buf)
+
+
+class _ChainReader:
+    """A read()-able body made of several byte strings, without joining them into one more copy of the file."""
+
+    def __init__(self, parts):
+        self._parts = [memoryview(p) for p in parts]
+        self._i = 0
+        self.length = sum(len(p) for p in self._parts)
+
+    def __len__(self):
+        return self.length
+
+    def read(self, n=-1):
+        out = bytearray()
+        while self._i < len(self._parts) and (n is None or n < 0 or len(out) < n):
+            p = self._parts[self._i]
+            take = len(p) if (n is None or n < 0) else n - len(out)
+            out += p[:take]
+            if take >= len(p):
+                self._i += 1
+            else:
+                self._parts[self._i] = p[take:]
+        return bytes(out)
+
+
+def multipart_form(fields: dict, file_field: str, filename: str, data):
+    """(content_type, body, length) for a multipart/form-data upload: the text `fields`, then one file part. `body` has
+    .read(); the file bytes are not copied."""
+    boundary = "----fabrica" + os.urandom(12).hex()
+    parts = []
+    for k, v in fields.items():
+        parts.append((f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n').encode("utf-8"))
+    safe = str(filename).replace("\\", "_").replace('"', "_")
+    parts.append((f'--{boundary}\r\nContent-Disposition: form-data; name="{file_field}"; filename="{safe}"\r\n'
+                  "Content-Type: application/octet-stream\r\n\r\n").encode("utf-8"))
+    parts.append(data)
+    parts.append(f"\r\n--{boundary}--\r\n".encode("utf-8"))
+    body = _ChainReader(parts)
+    return f"multipart/form-data; boundary={boundary}", body, len(body)
+# ==== end rename ====
 
 
 # ---------------------------------------------------------------- FTPS (implicit)
@@ -1023,6 +1093,17 @@ class BambuPrinter:
         c = self._sd_cache
         return c[0] if c else None
 
+    # ==== library ====
+    def sd_listing_cached(self) -> list:
+        """The SD-card listing the Hub already holds (memory, else the copy kept on disk) - NO network traffic and no
+        FTPS session, whatever state the printer is in. [] when no listing was ever taken. Used by the file library
+        to show what is on a printer without ever disturbing it."""
+        c = self._sd_cache
+        if c is None:
+            c = self._sd_cache = self._sd_load_persisted()
+        return [dict(r) for r in c[1]] if c else []
+    # ==== end library ====
+
     def sd_list(self) -> list:
         """The `.3mf` files in the SD card root. While the printer is not positively idle no FTPS session is
         opened: the last listing taken while it WAS idle is returned, however old (nothing on the card can
@@ -1434,6 +1515,40 @@ class OctoPrintPrinter:
         except NET_ERRORS as e:
             raise PrinterError(f"Could not reach OctoPrint at {self.url}: {scrub_text(e)}") from e
         return data[:nbytes]
+
+    # ==== rename ====
+    def download(self, filename: str, max_bytes: int = FILE_MAX_BYTES) -> bytes:
+        """The whole file (capped at `max_bytes`; PrinterError beyond it)."""
+        path = "/downloads/files/local/" + urllib.parse.quote(filename, safe="/")
+        try:
+            with self._get_raw(path, timeout=60) as r:
+                return read_capped(r, max_bytes)
+        except urllib.error.HTTPError as e:
+            raise PrinterError(f"OctoPrint refused the file download ({e.code} {e.reason}).") from e
+        except NET_ERRORS as e:
+            raise PrinterError(f"Could not reach OctoPrint at {self.url}: {scrub_text(e)}") from e
+
+    def upload(self, filename: str, data, timeout: float = 300):
+        """BETA - not yet verified on real hardware. Upload a file to OctoPrint's local storage:
+        POST /api/files/local (multipart: file, select=false, print=false, path=<folder>). Refused unless the printer
+        is positively idle right now. It never selects or prints the file. The caller makes sure the name is free."""
+        _require_idle_for_delete(self, "uploaded")
+        folder, _sep, base = filename.rpartition("/")
+        fields = {"select": "false", "print": "false"}
+        if folder:
+            fields["path"] = folder
+        ctype, body, length = multipart_form(fields, "file", base, data)
+        req = urllib.request.Request(self.url + "/api/files/local", method="POST", data=body,
+                                     headers={"X-Api-Key": self.api_key, "Content-Type": ctype,
+                                              "Content-Length": str(length)})
+        try:
+            with self._open(req, timeout) as r:
+                r.read(65536)
+        except urllib.error.HTTPError as e:
+            raise PrinterError(f"OctoPrint refused the upload ({e.code} {e.reason}).") from e
+        except NET_ERRORS as e:
+            raise PrinterError(f"Could not reach OctoPrint at {self.url}: {scrub_text(e)}") from e
+    # ==== end rename ====
 
     def start_print(self, filename, ams_mapping=None, origin="local"):
         # OctoPrint file paths are folder/name and routinely contain spaces; urllib

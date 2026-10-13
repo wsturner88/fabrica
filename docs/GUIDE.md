@@ -84,6 +84,10 @@ prints from anywhere on earth without exposing anything to the internet.
 - 🍝 **Spaghetti detection (optional add-on)** — watches every running print through its camera and
   alerts you; starts in learn-only mode and never pauses or stops a print. Tools: `detection_status`,
   `score_snapshot`. Setup: Settings → Detection, [docs/detection.md](detection.md)
+- 🗂️ **File library** — one library on the Hub for every print file across the fleet: folders, search,
+  grid or list, plate previews and full details; send a file to any idle printer, then print it through the
+  normal confirm. Tools: `library_list`, `library_file`, `library_send`, `library_save_from_printer`.
+  [docs/library.md](library.md)
 - ⚙️ Everything above is configurable on the dashboard; the settings reference is in
   [docs/settings.md](settings.md)
 
@@ -206,6 +210,14 @@ unchanged; remove them whenever you like once the import has happened.
   `echo | openssl s_client -connect <printer-ip>:8883 2>/dev/null | openssl x509 -noout -subject`
 - **IP:** your router's client list. Set a DHCP reservation — Bambu printers
   don't do static IPs well.
+
+### Use it on your phone
+Open the dashboard in Safari on your iPhone, tap **Share → Add to Home Screen**, and it opens full-screen like an app:
+one printer per row with its camera, finish time and progress, then the printer screen to start, pause or cancel, plus
+History, Backups and Settings. It works in portrait and landscape and needs no pinch-zoom. The ↻ button in the header
+reloads it (a Home Screen app has no browser reload). Push alerts to the phone are not built in yet: they need a secure
+(HTTPS) address, which a plain `http://` LAN address is not. When you want them, put the Hub behind HTTPS with
+`tailscale serve`, and a later release can add notifications on top of that.
 
 ### Connect an agent
 First make an API key for it (dashboard **Settings → Security**, or
@@ -403,6 +415,37 @@ Same capabilities as MCP tools: `list_printer_types`, `test_printer_connection`,
 and permanent. Edits swap the connection safely: the old MQTT session is fully closed before the new
 one opens, so a Bambu printer never sees two clients from the Hub. The Bambu connection test opens one
 short MQTT session (login + one status request), then closes it.
+
+### Groups
+
+A **group** is a label you put on printers, for example `Production` for the printers that earn money and
+`Workshop` or `Prototypes` for the ones you experiment on. A printer can be in several groups, or none.
+History and costs can then be filtered by a group, or by any hand-picked set of printers, and summed
+(see [History and costs](joblog.md#filtering-by-group-or-printers)). A group exists while at least one
+printer is in it; it has no settings of its own.
+
+- **Dashboard:** *Printers → Edit* has a **Groups** field: type a name and press Enter (or tap an
+  existing group under "Existing groups"), tap × to remove one. **Save groups now** applies the change at
+  once - no connection test, and it works while the printer is printing, because a group never changes how the
+  printer connects. Below the printer list, a **Groups** section lets you **Rename** a group on every
+  printer at once (renaming onto another group merges the two) or **Delete** it (the label goes; the printers
+  and their history stay). The fleet (home) screen is unchanged.
+- **Rules:** at most 8 groups per printer, 32 characters each, any printable text except `/` `\` `,`.
+  Names match without regard to case (`production` and `Production` are one group; the first spelling used wins).
+  Groups are saved with the printer in `printers.json` (no secret is involved). A Hub from before this
+  feature loads as if every printer had no groups.
+
+| Endpoint | Scope | Purpose |
+|---|---|---|
+| `GET /api/groups` | read | `[{"name", "printers": [...]}]` for every group in use. Groups also appear as `groups` in `GET /api/printers` and `GET /api/fleet` |
+| `PUT /api/printers/{name}/groups` | control | `{"groups": ["Production", ...]}` replaces the printer's groups (`[]` clears). `PUT /api/printers/{name}` with `{"values": {"groups": [...]}}` does the same, and also accepts `groups` on `POST /api/printers` |
+| `POST /api/groups/rename` | control | `{"from": "Old", "to": "New"}` - on every printer; `404` if no such group |
+| `DELETE /api/groups/{name}` | control | Takes the label off every printer |
+
+Group changes are fleet changes, so they need the same `control` level as editing a printer; reading groups
+needs only `read`. MCP: `list_groups` (read) and `set_printer_groups(printer, groups)` (control);
+`list_printers` shows each printer's groups. Groups are not part of Settings export / import (those carry
+settings only, never the fleet).
 
 ## Camera (Bambu P1 / A1 and OctoPrint webcams)
 

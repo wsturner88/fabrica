@@ -39,7 +39,8 @@ import urllib.request
 
 import http.client
 
-from bambu import PrinterError, make_opener, REDIRECT_MSG, strip_userinfo, scrub_text, _require_idle_for_delete
+from bambu import (PrinterError, make_opener, REDIRECT_MSG, strip_userinfo, scrub_text, _require_idle_for_delete,
+                   read_capped, multipart_form, FILE_MAX_BYTES)   # read_capped, multipart_form, FILE_MAX_BYTES: rename
 import controls as _controls
 from controls import ControlUnsupported
 from camera import PollingCameraStream
@@ -461,6 +462,46 @@ class MoonrakerPrinter:
         server ignores it, only nbytes+1 are ever read."""
         with self.open_file(filename, timeout=15, headers={"Range": f"bytes=0-{nbytes - 1}"}) as r:
             return r.read(nbytes + 1)[:nbytes]
+
+    # ==== rename ====
+    def download(self, filename: str, max_bytes: int = FILE_MAX_BYTES) -> bytes:
+        """The whole file (capped at `max_bytes`; PrinterError beyond it)."""
+        with self.open_file(filename, timeout=60) as r:
+            try:
+                return read_capped(r, max_bytes)
+            except (socket.timeout, OSError, http.client.HTTPException) as e:
+                raise _perr(f"Could not read the file from Moonraker at {self.url}: {scrub_text(e)}") from e
+
+    def upload(self, filename: str, data, timeout: float = 300):
+        """BETA - not yet verified on real hardware. Upload a file to the `gcodes` root:
+        POST /server/files/upload (multipart: file, root=gcodes, path=<folder>). `print` is never sent, so the file
+        is only stored. Refused unless the printer is positively idle right now. The caller makes sure the name is free."""
+        _require_idle_for_delete(self, "uploaded")
+        folder, _sep, base = filename.lstrip("/").rpartition("/")
+        fields = {"root": "gcodes"}
+        if folder:
+            fields["path"] = folder
+        ctype, body, length = multipart_form(fields, "file", base, data)
+        h = {"User-Agent": _UA, "Content-Type": ctype, "Content-Length": str(length)}
+        if self.api_key:
+            h["X-Api-Key"] = self.api_key
+        try:
+            req = urllib.request.Request(self.url + "/server/files/upload", data=body, method="POST", headers=h)
+        except ValueError as e:
+            raise _perr(f"invalid address {self.url!r}") from e
+        try:
+            with _OPENER.open(req, timeout=timeout) as r:
+                r.read(65536)
+        except urllib.error.HTTPError as e:
+            try:
+                if e.code in (401, 403):
+                    raise _perr("Moonraker requires authentication (HTTP %d)." % e.code, e.code) from e
+                raise _perr(f"Moonraker refused to upload the file ({_http_msg(e)}).", e.code) from e
+            finally:
+                e.close()
+        except (urllib.error.URLError, socket.timeout, OSError, http.client.HTTPException) as e:
+            raise _perr(f"Could not reach Moonraker at {self.url}: {scrub_text(e)}") from e
+    # ==== end rename ====
 
     # ---- job control --------------------------------------------------------
 

@@ -12,6 +12,28 @@ Replace `<host>` with the machine's address (`localhost` on the same machine). K
 URL query string. After connecting, ask the agent "list my printers". A 401 means the key is missing or
 wrong: see [Troubleshooting](troubleshooting.md#401-api-key-required).
 
+## Agent kit
+
+An agent needs only the MCP address (and a key). Everything else it needs comes from Fabrica itself:
+
+- **Server instructions**, sent to every client on connect: what Fabrica is, the safety rules (a human confirms the
+  plate is clear before every print, prints start only through `suggest_mapping` then `start_print`, no
+  pause/cancel unless asked, file actions only on idle printers), and the current kit version.
+- **`fabrica_guide(topic, since)`** (read scope): short guides for `start`, `printing`, `library`, `history`,
+  `renaming` and `changes`. Each reply begins with `Fabrica kit <version> · build <revision>`. The same text is
+  available as the resource template `fabrica://guide/{topic}`. The guides are files in `app/agent_guides/`.
+- **Workflows** (MCP prompts, which many clients show as slash commands): `print_a_file`, `fleet_status`,
+  `print_history_report`.
+
+**How an agent notices an update.** The kit version (`k-` and 8 hex digits) is a hash of the guides, every tool name
+and description, and the prompt names, worked out when the Hub starts, so nobody has to bump it. `list_printers`
+repeats the version on its first line. When an agent sees a version other than the one it knows, it calls
+`fabrica_guide('changes', since=<its version>)`: tools added or removed, descriptions or guides changed, workflows
+added or removed, plus the one-line release notes in `app/agent_guides/changelog.md` (add a line there per release).
+The Hub keeps the last 50 versions in `agent_kit.json` in its data folder. `GET /api/agent-kit` (read scope) and
+Settings > Agents / MCP show the current version. Tools do not change while the Hub runs (an update restarts it), so
+the MCP `tools/list_changed` notification is not needed.
+
 ## Which key scope to give
 
 | Scope | The agent can | Use it for |
@@ -29,14 +51,16 @@ The scope of every tool is defined in `TOOL_SCOPES` in `app/security.py`.
 
 | Group | Scope | Tools |
 |---|---|---|
-| Look | read | `list_printers`, `printer_status`, `ams_state`, `list_sd_files`, `get_camera_snapshot`, `printer_controls`, `list_printer_types`, `get_settings` |
+| Guide | read | `fabrica_guide` |
+| Look | read | `list_printers`, `list_groups`, `printer_status`, `ams_state`, `list_sd_files`, `get_camera_snapshot`, `printer_controls`, `list_printer_types`, `get_settings` |
 | Plan | read | `suggest_mapping` |
+| File facts | read | `file_facts` (what you need to choose a file name; the Hub has no naming rules) |
 | History and cost | read | `recent_jobs`, `job_stats`, `cost_per_part` |
 | Backups and detection (status) | read | `backup_status`, `detection_status` |
 | Print | control | `start_print`, `pause_print`, `resume_print`, `cancel_print`, `connect_printer` |
 | Printer controls | control | `set_light` (alias `chamber_light`), `preheat`, `cooldown`, `unload_filament`, `load_filament`, `set_tray` |
-| Files and backups | control | `delete_sd_file`, `backup_printer_files` |
-| Fleet | control | `test_printer_connection`, `add_printer`, `update_printer`, `remove_printer`, `discover_printers` |
+| Files and backups | control | `delete_sd_file`, `backup_printer_files`, `rename_preview`, `rename_apply` (see [Renaming files](renaming.md): preview, show the human, apply with their yes) |
+| Fleet | control | `test_printer_connection`, `add_printer`, `update_printer`, `remove_printer`, `set_printer_groups`, `discover_printers` |
 | Settings and alerts | control | `update_settings`, `send_test_notification`, `list_api_keys` (list only), `score_snapshot` |
 
 ## Example prompts
@@ -61,6 +85,10 @@ The agent cannot start a job it has not described to you first:
    printer is busy or not connected.
 4. `delete_sd_file` needs `confirm` equal to the file name. `update_printer` and `remove_printer` refuse
    while a job is running unless the agent passes `force`, which it should only do after you say yes.
+
+Renaming works the same way: `rename_preview` returns the before -> after table and a single-use ticket, and `rename_apply` is
+refused without that ticket and without `approved_by_human=true`, the human's yes to the table. The MCP prompt `rename_files`
+explains the flow to an agent. Details: [Renaming files](renaming.md).
 
 Tell your agent: "Never call `start_print` without my explicit yes in this conversation, and always ask
 whether the plate is clear."

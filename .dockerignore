@@ -17,3 +17,4 @@ detector/
 app/config.yml
 docker-compose*.yml
 *.md
+!app/agent_guides/*.md

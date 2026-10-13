@@ -127,9 +127,12 @@ class TestAutoOffSafety(AutoOffBase):
         self.assertIsNotNone(controls.auto_off_remaining(p))  # still pending: it will retry
         p.connected = True
         self.assertTrue(wait_for(lambda: p.sent == [(0, 0)]), "never cooled once the printer was back")
+        # the "cooled" hook and the result line are written just AFTER the command is sent: wait for them too
+        self.assertTrue(wait_for(lambda: len(self.cooled) >= 1 and controls.auto_off_remaining(p) is None))
         self.assertIn("cooled down", controls._last_auto_off["shop"]["result"])
+        time.sleep(0.3)
         self.assertEqual(len(self.cooled), 1)                                   # the hook fired exactly once
-        self.assertIsNone(controls.auto_off_remaining(p))
+        self.assertEqual(p.sent, [(0, 0)])                                      # and only one cool-down was sent
 
     def test_unknown_state_is_never_cooled_and_the_failure_is_announced(self):
         p = FakePrn(state="UNKNOWN", connected=True)

@@ -25,6 +25,7 @@ import socket
 import threading
 import time
 from urllib.parse import urlsplit
+import urllib.parse  # library
 
 import yaml
 from mcp.server.fastmcp import Context, FastMCP
@@ -46,6 +47,7 @@ import joblog
 import costs
 import discovery
 import detection
+import agentkit  # ==== agent kit ====
 
 # Every file the Hub creates is private to its owner (0600): settings.json holds a webhook URL / ntfy topic that act
 # like passwords, jobs.sqlite holds file names that can carry customer information. (Second security review.)
@@ -874,13 +876,18 @@ def _tool(fn):
     return fn
 
 
+def _kit_line() -> str:      # ==== agent kit ==== one line so a running agent notices a new kit version
+    return f"Fabrica kit {KIT.version}\n" if KIT.version else ""
+
+
 @_tool
 def list_printers() -> str:
-    """List all printers with live state (idle/printing, job, progress)."""
+    """List all printers with live state (idle/printing, job, progress) and the groups each is in (see list_groups)."""
     if not PRINTERS:
-        return ("No printers added yet. Use list_printer_types to see what can be added, "
+        return (_kit_line() + "No printers added yet. Use list_printer_types to see what can be added, "
                 "then add_printer (or ask the human to use the dashboard's Printers button).")
     out = []
+    group_of = FLEET.store.groups_by_printer()
     for prn in list(PRINTERS.values()):
         s = prn.snapshot()
         line = f'{s["printer"]}: {s["state"]}'
@@ -888,8 +895,11 @@ def list_printers() -> str:
             line += f' — "{s["job"]}" {s["percent"]}% (~{s["remaining_min"]} min left)'
         if not s["connected"]:
             line += "  [MQTT DISCONNECTED]"
+        gl = group_of.get(s["printer"]) or next((v for k, v in group_of.items() if k.lower() == str(s["printer"]).lower()), [])
+        if gl:
+            line += f'  [groups: {", ".join(gl)}]'
         out.append(line)
-    return "\n".join(out)
+    return _kit_line() + "\n".join(out)
 
 
 @_tool
@@ -1805,6 +1815,1121 @@ async def _api_backup_download(request: Request):
 # ============================================================= end file backup
 
 
+# ==== library ====
+# Global File Library: one file store on the Hub for the whole fleet (see library.py and docs/library.md).
+# Everything that touches a printer is here, and only through the guards the printer pages already use:
+#   * no FTPS session on a Bambu unless it is positively idle (_printer_is_idle + the driver's own _require_idle),
+#   * the printer's FTPS lock around every session,
+#   * sending a file NEVER starts a print - the print itself stays in suggest_mapping / start_print (ticket,
+#     bed-clear confirm, spool mapping). Nothing in this block calls start_print.
+
+import library as _library
+from bambu import PrinterBusy
+
+LIB = _library.Library(os.path.join(DATA_DIR, "library"))
+LIB.sweep_incoming()
+LIBRARY_MAX_FILES_PER_SEND = 20
+LIBRARY_MAX_PRINTERS_PER_SEND = 12
+
+
+def _library_error(e):
+    return JSONResponse({"error": str(e)}, status_code=getattr(e, "status", 400))
+
+
+def _library_printer_files() -> dict:
+    """{printer name: [{name, size, meta, thumb}]} from listings the Hub already holds. NO printer traffic: a Bambu's
+    last idle listing (memory / disk), a file-based printer's last live listing, plus the metadata cache."""
+    with _cache_lock:
+        cache = _cache_load()
+    out = {}
+    for prn in list(PRINTERS.values()):
+        try:
+            if _is_octo(prn):
+                rows = list((_FILES_SEEN.get(prn.name.lower()) or {}).values())
+            elif hasattr(prn, "sd_listing_cached"):
+                rows = prn.sd_listing_cached()
+            else:
+                rows = []
+        except Exception:
+            rows = []
+        files = []
+        for f in rows:
+            if not isinstance(f, dict) or not f.get("name"):
+                continue
+            meta = cache.get(f"{prn.name}|{f['name']}|{f.get('size') or 0}")
+            files.append({"name": f["name"], "size": int(f.get("size") or 0), "meta": meta if isinstance(meta, dict) else None,
+                          "thumb": (meta or {}).get("thumb") if isinstance(meta, dict) else None})
+        out[prn.name] = files
+    return out
+
+
+def _library_printers_info() -> list:
+    out = []
+    for prn in list(PRINTERS.values()):
+        try:
+            s = prn.snapshot()
+            idle = _printer_is_idle(prn)
+        except Exception:
+            s, idle = {}, False
+        out.append({"name": prn.name, "kind": getattr(prn, "kind", ""), "state": s.get("state"),
+                    "idle": bool(idle),
+                    "can_receive": (hasattr(prn, "upload") if _is_octo(prn) else hasattr(prn, "sd_upload")),   # ==== rename ==== (upload for HTTP printers is beta)
+                    "beta": bool(_is_octo(prn)),
+                    "model": modelcheck.check("", modelcheck.target_model_for(prn))["target_model"]})
+    return out
+
+
+def _library_rows(query="", folder="", hide_printer_only=False) -> list:
+    rows = _library.merge_rows(LIB.entries(), _library_printer_files(), color_name=color_name)
+    return _library.filter_rows(rows, query, folder, hide_printer_only)
+
+
+def _library_snapshot(query="", folder="", hide_printer_only=False) -> dict:
+    rows = _library_rows(query, folder, hide_printer_only)
+    allrows = rows if not (query or folder or hide_printer_only) else _library_rows()
+    return {"rows": rows, "folders": LIB.folders(), "printers": _library_printers_info(),
+            "limits": {"max_file_mb": LIB.max_bytes // 1048576},
+            "counts": {"library": sum(1 for r in allrows if r["in_library"]),
+                       "printer_only": sum(1 for r in allrows if not r["in_library"])}}
+
+
+def _library_seed_meta(prn, entry: dict):
+    """After a file was sent to a Bambu: put what the library already knows about it into the metadata cache under the
+    printer's own key, so the start-print confirm does not have to download the file back off the printer."""
+    meta = entry.get("meta") or {}
+    if entry.get("kind") != "3mf" or meta.get("error"):
+        return
+    key = f"{prn.name}|{entry['name']}|{entry['size']}"
+    with _cache_lock:
+        cache = _cache_load()
+        if key in cache:
+            return
+    png = None
+    tp = LIB.thumb_path(entry.get("thumb") or "")
+    if tp:
+        try:
+            with open(tp, "rb") as fh:
+                png = fh.read()
+        except OSError:
+            png = None
+    seeded = {k: meta.get(k) for k in ("printer_model_id", "printer_model", "print_seconds", "print_time", "weight_g",
+                                       "filaments", "plates", "parts")}
+    seeded["thumb"] = _save_thumb(key, png)
+    with _cache_lock:
+        cache = _cache_load()
+        cache.setdefault(key, seeded)
+        _cache_save(cache)
+
+
+def _library_send_one(entry: dict, prn, model_override: bool) -> dict:
+    """Upload one library file to one printer. Refuses (never forces) a printer that is not positively idle, a printer
+    type the Hub cannot upload to, a file sliced for another model (unless the human overrode), and a name that
+    is already taken on the card by a different file. Returns a result row; never raises."""
+    name = entry["name"]
+    r = {"name": name, "printer": prn.name, "ok": False, "status": "refused", "code": "", "reason": ""}
+
+    def refuse(code, reason):
+        r.update(status="refused", code=code, reason=reason)
+        return r
+    http_up = _is_octo(prn) and hasattr(prn, "upload")          # ==== rename ==== OctoPrint / PrusaLink / Klipper upload: beta
+    if not (http_up or (not _is_octo(prn) and hasattr(prn, "sd_upload"))):
+        return refuse("unsupported", f"{prn.name} cannot receive files from the Hub yet (only Bambu LAN printers can, for now).")
+    if http_up:
+        if entry.get("kind") not in ("gcode", "bgcode"):
+            return refuse("wrong_type", f"{prn.name} prints .gcode / .bgcode files; '{name}' is a {entry.get('kind') or 'different'} file.")
+        r["note"] = "Sending to this printer type is " + BETA_NOTE + "."
+    elif entry.get("kind") != "3mf":
+        return refuse("wrong_type", f"{prn.name} prints .3mf / .gcode.3mf files; '{name}' is a {entry.get('kind') or 'different'} file.")
+    mc = modelcheck.check(_library.sliced_for_name(entry.get("meta")), modelcheck.target_model_for(prn))
+    r["model_match"], r["sliced_for"], r["target_model"] = mc["model_match"], mc["sliced_for"], mc["target_model"]
+    if mc["model_match"] is False and not model_override:
+        return refuse("model_mismatch", mc["model_warning"] + " It was not sent.")
+    if mc["model_match"] == "unknown":
+        r["note"] = (r.get("note", "") + " " + mc["model_warning"]).strip()
+    if not _printer_is_idle(prn):
+        return refuse("busy", f"{prn.name} is busy (printing, paused, preparing or not connected). Nothing was sent.")
+    try:
+        path = LIB.file_path(name)
+        with (_octo_lock(prn.name) if http_up else _ftps_lock(prn.name)):
+            if not _printer_is_idle(prn):               # a print may have started while we waited for the lock
+                return refuse("busy", f"{prn.name} became busy. Nothing was sent.")
+            there = {f["name"]: f for f in (_rn_listing(prn)[0] if http_up else prn.sd_list())}       # the driver refuses (no FTPS) if it is not idle
+            cur = there.get(name)
+            if cur is not None and int(cur.get("size") or 0) == entry["size"]:
+                r.update(ok=True, status="already_there", reason=f"'{name}' is already on {prn.name}.")
+                return r
+            if cur is not None:
+                return refuse("name_taken", f"A different file called '{name}' is already on {prn.name}. "
+                                            "Delete or rename it on the printer's page first - the Hub never overwrites a file there.")
+            with open(path, "rb") as fh:
+                data = fh.read()
+            (prn.upload if http_up else prn.sd_upload)(name, data)       # the driver checks "positively idle" again before it connects
+    except PrinterBusy as e:
+        return refuse("busy", str(e))
+    except _library.LibraryError as e:
+        return refuse("missing", str(e))
+    except Exception as e:
+        r.update(status="failed", code="failed", reason=security.scrub_text(f"Sending to {prn.name} failed: {e}"))
+        return r
+    try:
+        _library_seed_meta(prn, entry)
+    except Exception:
+        pass
+    print(f"[library] sent {name} to {prn.name}", flush=True)
+    r.update(ok=True, status="sent", reason=f"Sent to {prn.name}. It is on the printer's file list; nothing was started.",
+             next_step="To print it: open the printer's file list and tap Print (or suggest_mapping, then ask the human). "
+                       "The bed-clear confirm and the spool mapping are still required.")
+    return r
+
+
+def _library_send(names, printers, model_override=False) -> list:
+    if isinstance(names, str):
+        names = [names]
+    if isinstance(printers, str):
+        printers = [printers]
+    if not isinstance(names, list) or not names or not all(isinstance(n, str) for n in names):
+        raise _library.LibraryError("Say which library file(s) to send.")
+    if not isinstance(printers, list) or not printers or not all(isinstance(n, str) for n in printers):
+        raise _library.LibraryError("Say which printer(s) to send to.")
+    if len(names) > LIBRARY_MAX_FILES_PER_SEND or len(printers) > LIBRARY_MAX_PRINTERS_PER_SEND:
+        raise _library.LibraryError("Too many files or printers in one request.")
+    entries = [LIB.get(n) for n in dict.fromkeys(names)]                  # NotFound before anything is sent
+    targets = []
+    for pn in dict.fromkeys(printers):
+        prn = PRINTERS.get(pn.lower())
+        if prn is None:
+            raise _library.NotFound(f"Unknown printer '{pn}'.")
+        targets.append(prn)
+    out = []
+    for prn in targets:
+        for e in entries:
+            out.append(_library_send_one(e, prn, model_override is True))
+    return out
+
+
+def _library_save(printer: str, filename: str, folder: str = "", replace: bool = False) -> dict:
+    """Copy one file off a printer into the library. A Bambu is only asked when it is positively idle (and its
+    listing is read under the FTPS lock); a PrusaLink printer follows the backup rule (idle only); OctoPrint and
+    Moonraker read the host's own storage and are fine mid-print."""
+    prn = _pick(printer)
+    if not isinstance(filename, str) or not filename.strip():
+        raise _library.InvalidName("Say which file on the printer to save.")
+    clean = _library.name_from_printer_path(filename)
+    folder = _library.sanitize_folder(folder)
+    LIB.check_can_add(clean, replace)
+    cap = LIB.max_bytes
+    src = f"printer:{prn.name}"
+    if _is_octo(prn):
+        reason = _backup.BackupManager._busy_reason(prn)       # the backup rules: which drivers may be read mid-print
+        if reason:
+            raise _library.LibraryError(reason)
+        row = next((f for f in prn.files() if f.get("name") == filename), None)
+        if row is None:
+            raise _library.NotFound(f"'{filename}' is not on {prn.name}'s file list.")
+        if row.get("origin", "local") != "local":
+            raise _library.LibraryError(f"'{filename}' is stored on '{row.get('origin')}', not downloadable.")
+        if int(row.get("size") or 0) > cap:
+            raise _library.TooLarge(f"The file is larger than the {cap // 1048576} MB limit for one library file.")
+        LIB.ensure_dirs()
+        try:
+            if getattr(prn, "kind", "") == "octoprint":
+                resp = prn._get_raw("/downloads/files/local/" + urllib.parse.quote(filename, safe="/"), timeout=30)
+            else:
+                resp = prn.open_file(filename, timeout=30)
+            tmp, _none, size, sha = _backup._stream_to_temp(resp, LIB.incoming)
+        except PrinterBusy as e:
+            raise _library.LibraryError(str(e))
+        except _library.LibraryError:
+            raise
+        except Exception as e:
+            raise _library.LibraryError(security.scrub_text(f"Could not download '{filename}' from {prn.name}: {e}"))
+        return LIB.add_streamed_file(tmp, clean, sha, size, folder, src, replace)
+    if not _printer_is_idle(prn):
+        raise _library.LibraryError(f"{prn.name} is busy (printing, paused, preparing or not connected). The Hub does not "
+                                    "read a printer's SD card then; try again when it is idle.")
+    with _ftps_lock(prn.name):
+        if not _printer_is_idle(prn):
+            raise _library.LibraryError(f"{prn.name} became busy. Nothing was downloaded.")
+        listing = {f["name"]: f for f in prn.sd_list()}
+        if filename not in listing:
+            raise _library.NotFound(f"'{filename}' is not on {prn.name}'s SD card.")
+        if int(listing[filename].get("size") or 0) > cap:
+            raise _library.TooLarge(f"The file is larger than the {cap // 1048576} MB limit for one library file.")
+        try:
+            data = prn.sd_download(filename)
+        except PrinterBusy as e:
+            raise _library.LibraryError(str(e))
+    inc = LIB.begin_incoming()
+    inc.write(data)
+    return LIB.ingest(inc, clean, folder, src, replace)
+
+
+def _library_scan() -> list:
+    """Re-read what the printers hold: HTTP printers are listed live; a Bambu only when positively idle (one FTPS
+    listing under its lock) - a busy one keeps the last listing the Hub saw. Then the metadata pre-warm (the same
+    one opening a printer's page starts) fills in details and previews of idle printers, in the background."""
+    def one(prn):
+        try:
+            if _is_octo(prn):
+                files = prn.files()
+                _remember_files(prn, files)
+                return {"printer": prn.name, "ok": True, "files": len(files)}
+            if not _printer_is_idle(prn):
+                return {"printer": prn.name, "ok": True, "skipped": "busy - showing the last list the Hub saw"}
+            return {"printer": prn.name, "ok": True, "files": len(_sd_list(prn))}
+        except PrinterBusy as e:
+            return {"printer": prn.name, "ok": True, "skipped": str(e)}
+        except Exception as e:
+            return {"printer": prn.name, "ok": False, "error": security.scrub_text(f"{type(e).__name__}: {e}")[:200]}
+    prns = list(PRINTERS.values())
+    if not prns:
+        return []
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=min(8, len(prns))) as ex:
+        res = list(ex.map(one, prns))
+    for prn in prns:
+        threading.Thread(target=_prewarm, args=(prn.name,), daemon=True).start()
+    return res
+
+
+def _library_public(entry: dict) -> dict:
+    """An index entry as the API shows it (no disk paths)."""
+    rows = [r for r in _library_rows() if r["in_library"] and r["name"] == entry["name"]]
+    return rows[0] if rows else {"name": entry["name"]}
+
+
+# ---- MCP tools (an agent can look, save and send; it can never start a print from here)
+
+def _library_words(rows) -> list:
+    out = []
+    for r in rows:
+        out.append({"name": r["name"], "size_mb": round(r["size"] / 1048576, 2), "folder": r["folder"] or None,
+                    "in_library": r["in_library"], "on_printers": r["printers"], "print_time": r["print_time"],
+                    "weight_g": r["weight_g"], "sliced_for": r["sliced_for"],
+                    "filaments": [f"{f['color_name']} {f['type']}" + (f" {round(f['used_g'])} g" if f.get("used_g") else "")
+                                  for f in r["filaments"]]})
+    return out
+
+
+@_tool
+def library_list(query: str = "", folder: str = "") -> str:
+    """List the Hub's file library: files stored on the Hub plus the files the printers are known to hold (from cached
+    listings - this never contacts a printer). `query` matches the file name, folder, printer, 'sliced for' model and
+    filament colour/type words; `folder` limits to one library folder. Each row says whether the file is
+    `in_library` and which printers it is `on_printers`. Colours are WORDS."""
+    try:
+        rows = _library_rows(query, _library.sanitize_folder(folder))
+    except _library.LibraryError as e:
+        return f"REFUSED: {e}"
+    return json.dumps({"files": _library_words(rows), "folders": LIB.folders()}, indent=2)
+
+
+@_tool
+def library_file(name: str) -> str:
+    """Details of one library file: print time, weight, layer height, layers, nozzle, temperatures, infill, supports,
+    slicer, the printer model it was sliced for, per-filament colour words + grams, and which printers hold it."""
+    try:
+        LIB.get(name)
+    except _library.LibraryError as e:
+        return f"REFUSED: {e}"
+    row = next((r for r in _library_rows() if r["in_library"] and r["name"].lower() == name.strip().lower()), None)
+    if row is None:
+        return f"REFUSED: '{name}' is not in the library."
+    keep = ("name", "size", "folder", "added", "source", "printers", "print_time", "weight_g", "layer_height", "layers",
+            "nozzle", "nozzle_temp", "bed_temp", "infill", "supports", "slicer", "sliced_for", "parts", "details_error")
+    d = {k: row[k] for k in keep}
+    d["filaments"] = [{"colour": f["color_name"], "type": f["type"], "grams": f.get("used_g")} for f in row["filaments"]]
+    return json.dumps(d, indent=2)
+
+
+@_tool
+def library_send(name: str, printers: list[str], model_override: bool = False) -> str:
+    """UPLOAD a library file to one or more printers' storage. It does NOT start a print - after it, the normal flow
+    applies: suggest_mapping, the human's go-ahead and bed-clear statement, then start_print. Only idle printers accept
+    a file (a printing, paused or offline one is refused, per printer, and nothing is sent to it); only Bambu LAN
+    printers can receive files for now; a file that was sliced for a different printer model is refused unless the
+    human has read the warning and said it is safe - only then pass model_override=True (never on your own).
+    A file already on the printer is not overwritten. Returns one result per printer."""
+    try:
+        res = _library_send([name], printers, model_override is True)
+    except _library.LibraryError as e:
+        return f"REFUSED: {e}"
+    return json.dumps({"results": [{k: v for k, v in r.items() if k != "name"} for r in res],
+                       "note": "Nothing was started. To print: suggest_mapping, ask the human, then start_print."}, indent=2)
+
+
+@_tool
+def library_save_from_printer(printer: str, filename: str) -> str:
+    """Copy one file from a printer into the Hub's library (a download). A Bambu printer is only asked when it is idle
+    (the Hub never reads the SD card of a printing one); OctoPrint / Moonraker follow the backup rules. The copy keeps the
+    original file; it is listed in the library with its details and plate preview."""
+    try:
+        e = _library_save(printer, filename)
+    except _library.LibraryError as ex:
+        return f"REFUSED: {ex}"
+    except ValueError as ex:                    # unknown printer
+        return f"REFUSED: {ex}"
+    return json.dumps({"saved": e["name"], "size_mb": round(e["size"] / 1048576, 2)}, indent=2)
+
+
+# ---- REST
+
+@mcp.custom_route("/api/library", methods=["GET"])
+@_safe_route
+async def _api_library(request: Request):
+    q = request.query_params
+    try:
+        folder = _library.sanitize_folder(q.get("folder", ""))
+    except _library.LibraryError as e:
+        return _library_error(e)
+    snap = await _run(_library_snapshot, q.get("q", "")[:200], folder, q.get("hide_printer_only") == "1")
+    return JSONResponse(snap, headers={"Cache-Control": "no-store"})
+
+
+@mcp.custom_route("/api/library/files/{name}", methods=["GET"])
+@_safe_route
+async def _api_library_file(request: Request):
+    try:
+        e = await _run(LIB.get, request.path_params["name"])
+    except _library.LibraryError as ex:
+        return _library_error(ex)
+    return JSONResponse(await _run(_library_public, e), headers={"Cache-Control": "no-store"})
+
+
+@mcp.custom_route("/api/library/files/{name}/download", methods=["GET"])
+@_safe_route
+async def _api_library_download(request: Request):
+    try:
+        e = await _run(LIB.get, request.path_params["name"])
+        path = await _run(LIB.file_path, e["name"])
+    except _library.LibraryError as ex:
+        return _library_error(ex)
+    return FileResponse(path, media_type="application/octet-stream", filename=e["name"],
+                        headers={"Cache-Control": "no-store"})
+
+
+@mcp.custom_route("/api/library/thumb/{basename}", methods=["GET"])
+@_safe_route
+async def _api_library_thumb(request: Request):
+    p = LIB.thumb_path(request.path_params["basename"])
+    if not p:
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    def work():
+        with open(p, "rb") as fh:
+            return fh.read()
+    try:
+        data = await _run(work)
+    except OSError:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return Response(data, media_type="image/png", headers={"Cache-Control": "max-age=86400"})
+
+
+@mcp.custom_route("/api/library/files/{name}", methods=["PUT"])
+@_safe_route
+async def _api_library_upload(request: Request):
+    """The file's bytes as the body (Content-Type: application/octet-stream + X-Fabrica-Upload: 1, see
+    security.is_library_upload); ?folder=<label>&replace=1. Streamed to a private temp file with the size cap enforced as
+    it arrives, moved into the library only when complete."""
+    q = request.query_params
+    try:
+        clean = _library.sanitize_name(request.path_params["name"])
+        folder = _library.sanitize_folder(q.get("folder", ""))
+        replace = q.get("replace") == "1"
+        try:
+            declared = int(request.headers.get("content-length", ""))
+        except ValueError:
+            declared = None
+        await _run(LIB.check_can_add, clean, replace, declared)
+        inc = await _run(LIB.begin_incoming)
+    except _library.LibraryError as e:
+        return _library_error(e)
+    try:
+        async for chunk in request.stream():
+            inc.write(chunk)
+        entry = await _run(LIB.ingest, inc, clean, folder, "upload", replace)
+    except _library.LibraryError as e:
+        inc.discard()
+        return _library_error(e)
+    except BaseException:
+        inc.discard()
+        raise
+    return JSONResponse(await _run(_library_public, entry), status_code=201)
+
+
+@mcp.custom_route("/api/library/delete", methods=["POST"])
+@_safe_route
+async def _api_library_delete(request: Request):
+    """{"name", "confirm": <the same name>} - only a file in the LIBRARY; a printer's own files are deleted on its page."""
+    body = await _optional_json(request)
+    if not isinstance(body.get("name"), str) or body.get("confirm") != body.get("name"):
+        return JSONResponse({"error": "REFUSED: confirm must equal the file name exactly."}, status_code=409)
+    try:
+        gone = await _run(LIB.delete, body["name"])
+    except _library.LibraryError as e:
+        return _library_error(e)
+    return JSONResponse({"result": f"deleted {gone} from the library"})
+
+
+@mcp.custom_route("/api/library/save", methods=["POST"])
+@_safe_route
+async def _api_library_save(request: Request):
+    """{"printer", "filename", "folder"?, "replace"?}"""
+    body = await _optional_json(request)
+    try:
+        entry = await _run(_library_save, str(body.get("printer") or ""), body.get("filename"),
+                           body.get("folder") or "", body.get("replace") is True)
+    except ValueError as e:                       # unknown printer
+        return JSONResponse({"error": str(e)}, status_code=404)
+    except _library.LibraryError as e:
+        return _library_error(e)
+    return JSONResponse(await _run(_library_public, entry), status_code=201)
+
+
+@mcp.custom_route("/api/library/send", methods=["POST"])
+@_safe_route
+async def _api_library_send(request: Request):
+    """{"names": [..] | "name", "printers": [..], "model_override"?: true}. Uploads only - never starts a print.
+    -> 200 {results: [{name, printer, ok, status: sent|already_there|refused|failed, code, reason, ...}]}"""
+    body = await _optional_json(request)
+    try:
+        res = await _run(_library_send, body.get("names") or body.get("name"), body.get("printers"),
+                         body.get("model_override") is True)
+    except _library.LibraryError as e:
+        return _library_error(e)
+    return JSONResponse({"results": res, "sent": sum(1 for r in res if r["ok"]), "refused": sum(1 for r in res if not r["ok"])})
+
+
+@mcp.custom_route("/api/library/folder", methods=["POST"])
+@_safe_route
+async def _api_library_folder(request: Request):
+    """{"action": "create"|"delete"|"move", "folder", "name"?}  (move: put library file `name` into `folder`; "" = no folder)"""
+    body = await _optional_json(request)
+    act = body.get("action")
+    try:
+        if act == "create":
+            f = await _run(LIB.create_folder, body.get("folder"))
+            return JSONResponse({"result": f"created folder {f}", "folders": LIB.folders()}, status_code=201)
+        if act == "delete":
+            f = await _run(LIB.delete_folder, body.get("folder"))
+            return JSONResponse({"result": f"deleted folder {f}", "folders": LIB.folders()})
+        if act == "move":
+            e = await _run(LIB.move, body.get("name"), body.get("folder") or "")
+            return JSONResponse({"result": f"moved {e['name']}", "folder": e.get("folder", "")})
+    except _library.LibraryError as e:
+        return _library_error(e)
+    return JSONResponse({"error": "action must be create, delete or move"}, status_code=400)
+
+
+@mcp.custom_route("/api/library/scan", methods=["POST"])
+@_safe_route
+async def _api_library_scan(request: Request):
+    return JSONResponse({"printers": await _run(_library_scan)})
+
+# ==== end library ====
+
+
+# ==== rename ====
+# File renaming MECHANICS (see renamer.py and docs/renaming.md). The Hub knows no naming convention: an agent decides
+# the names (with file_facts to help), shows the human the before -> after table from rename_preview, and only after
+# the human's yes calls rename_apply with the single-use ticket. Everything that touches a printer is here, behind the
+# guards the other file operations use:
+#   * nothing is listed, downloaded, uploaded or deleted on a printer that is not positively idle RIGHT NOW,
+#   * a Bambu is only ever reached through its one FTPS session at a time (_ftps_lock) and never opens a second MQTT client,
+#   * a name that already exists on the printer is never overwritten, the old name is deleted only after the new one is
+#     verified there with the same size, and nothing in this block can start a print.
+
+import renamer as _renamer
+from bambu import _require_idle_for_delete
+
+RENAME_TICKETS = _renamer.RenameTickets()
+_RN_MAX_BYTES = 500 * 1024 * 1024        # largest file the rename flow moves (also bounded by the library's own cap)
+_RN_VERIFY_TRIES = 3                     # HTTP printers can take a moment to show a new upload in their listing
+_RN_VERIFY_WAIT_S = 1.0
+BETA_NOTE = "beta - not yet verified on real hardware"
+
+
+def _rn_target(location):
+    """("library", None) or ("printer", driver). ValueError for an unknown printer."""
+    loc = str(location or "").strip()
+    if loc.lower() == "library":
+        return "library", None
+    return "printer", _pick(loc)
+
+
+def _rn_lock(prn):
+    """The driver's file lock: the FTPS lock of a Bambu, the HTTP file lock of the others."""
+    return _octo_lock(prn.name) if _is_octo(prn) else _ftps_lock(prn.name)
+
+
+def _rn_can_move(prn) -> bool:
+    return (hasattr(prn, "upload") and hasattr(prn, "download")) if _is_octo(prn) else hasattr(prn, "sd_upload")
+
+
+def _rn_fresh_idle(prn):
+    """PrinterBusy unless the printer is positively idle right now (HTTP printers: a FRESH reading, not the 3 s cache)."""
+    if _is_octo(prn):
+        _require_idle_for_delete(prn, "changed")
+    elif not _printer_is_idle(prn):
+        raise PrinterBusy(f"printer is busy ({prn.name}) - no FTPS session was opened.")
+
+
+def _rn_listing(prn, live_ok=True):
+    """([{name, size, ...}], "live" | "cache"). A Bambu is only listed live when positively idle (the driver itself serves
+    its last idle listing otherwise); HTTP printers are listed live (their own storage, no FTPS)."""
+    if _is_octo(prn):
+        try:
+            rows = [dict(f) for f in _backup._files_for_backup(prn) if f.get("origin", "local") == "local"]
+            return rows, "live"
+        except Exception:
+            return [dict(f) for f in (_FILES_SEEN.get(prn.name.lower()) or {}).values()], "cache"
+    if live_ok and _printer_is_idle(prn):
+        try:
+            return [dict(f) for f in _sd_list(prn)], "live"
+        except PrinterBusy:
+            pass
+    return [dict(f) for f in prn.sd_listing_cached()], "cache"
+
+
+def _rn_find(rows, name):
+    for f in rows:
+        if f.get("name") == name:
+            return f
+    return None
+
+
+def _rn_taken(rows, target, ignore=None):
+    low = target.lower()
+    for f in rows:
+        n = str(f.get("name") or "")
+        if n.lower() == low and n != ignore:
+            return n
+    return None
+
+
+# ---------------------------------------------------------------- file_facts
+
+def _file_facts(location, filename, may_read) -> dict:
+    kind, prn = _rn_target(location)
+    base_note = None
+    if kind == "library":
+        e = LIB.get(filename)
+        name, size, meta = e["name"], int(e["size"]), e.get("meta") or {}
+        d = _library.describe_meta(meta, color_name)
+        folder, sha = e.get("folder") or "", e.get("sha256")
+        from_ = "library file"
+        if e.get("kind") == "3mf":
+            parts, psrc = (meta.get("parts"), "slice_info") if isinstance(meta.get("parts"), int) and meta.get("parts") > 0 else (None, "unknown")
+        else:
+            parts, psrc = 1, "assumed"
+        extra = {k: d.get(k) for k in ("layer_height", "layers", "nozzle", "infill", "supports", "slicer")}
+        where = "library"
+    else:
+        rows, src = _rn_listing(prn, True)
+        row = _rn_find(rows, filename)
+        if row is None:
+            raise _library.NotFound(f"'{filename}' is not on {prn.name}'s file list ({'live' if src == 'live' else 'last saved'} list).")
+        name, size, sha, folder = row["name"], int(row.get("size") or 0), None, _renamer.folder_of(row["name"])
+        busy = not _printer_is_idle(prn)
+        with _cache_lock:
+            entry = _cache_load().get(f"{prn.name}|{name}|{size}")
+        if _is_octo(prn):
+            meta = dict(entry) if isinstance(entry, dict) else {}
+            secs, mm = row.get("print_seconds"), row.get("filament_mm")
+            grams = costs.grams_from_mm(mm, "PLA") if mm else None
+            d = _library.describe_meta({**meta, "print_seconds": secs, "print_time": row.get("print_time"), "weight_g": grams}, color_name)
+            d["filaments"] = []
+            parts, psrc = 1, "assumed"
+            extra = {}
+            from_ = "live file list + cache"
+            base_note = "Gcode files do not say which filament they use; weight assumes PLA density."
+        else:
+            meta = _meta_for(prn, name, size, may_read and not busy)
+            d = _library.describe_meta(meta, color_name)
+            parts, psrc = (meta.get("parts"), "slice_info") if isinstance(meta, dict) and isinstance(meta.get("parts"), int) and meta.get("parts") > 0 else (None, "unknown")
+            extra = {}
+            from_ = "cache" if (busy or src == "cache") else "cache + live file list"
+        if busy or src == "cache":
+            base_note = ("facts from cache: " + prn.name + " is busy or its live list is not available, so nothing was read "
+                         "from the printer itself. " + (base_note or "")).strip()
+        where = prn.name
+    base = _renamer.basename(name)
+    ext = _renamer.file_ext(base)
+    others = []
+    fleet = _library_printer_files()
+    for pn, files in fleet.items():
+        for f in files:
+            if pn == where and f["name"] == name:
+                continue
+            if _renamer.basename(f["name"]).lower() == base.lower() and int(f["size"]) == size:
+                others.append({"location": pn, "name": f["name"], "match": "name and size"})
+    if kind != "library":
+        for e in LIB.entries():
+            if e["name"].lower() == base.lower() and int(e["size"]) == size:
+                others.append({"location": "library", "name": e["name"], "match": "name and size"})
+    if kind == "library":
+        for e in LIB.entries():
+            if e["name"] != name and sha and e.get("sha256") == sha:
+                others.append({"location": "library", "name": e["name"], "match": "same content (hash)"})
+    try:
+        printed = JOBLOG.times_printed(base)
+    except Exception:
+        printed = None
+    out = {"location": where, "name": name, "stem": base[:len(base) - len(ext)] if ext else base, "extension": ext,
+           "folder": folder or None, "size_bytes": size, "size_mb": round(size / 1048576, 2),
+           "parts": parts, "parts_source": psrc, "sliced_for": d.get("sliced_for"),
+           "print_time": d.get("print_time"), "print_seconds": d.get("print_seconds"), "weight_g": d.get("weight_g"),
+           "filaments": [{"material": f["type"], "colour": f["color_name"], "grams": f.get("used_g")} for f in d.get("filaments") or []],
+           **{k: v for k, v in extra.items() if v is not None},
+           "also_on": others, "times_printed": printed, "facts_from": from_,
+           "note": base_note or None}
+    return out
+
+
+@_tool
+def file_facts(location: str, filename: str) -> str:
+    """The facts you need to choose a good file name - the Hub has NO naming rules of its own; yours decide. `location` is
+    a printer name or "library". Returns the current name, the extension to keep (`.gcode.3mf` counts as one), size, how
+    many OBJECTS are on the plate (`parts`, with `parts_source`: slice_info = counted in the file, assumed = a gcode file
+    cannot say so 1 is assumed, unknown), the printer model it was sliced for, print time, grams, the filaments as
+    material + colour WORDS, where else the same file exists (other printers / the library), and how often it was
+    printed (job history, under any of its names). Reads cached information; a printer that is busy is never contacted
+    ("facts from cache" says so)."""
+    try:
+        return json.dumps(_file_facts(location, filename, not security.caller_read_only()), indent=2)
+    except (ValueError, _library.LibraryError) as e:
+        return f"REFUSED: {e}"
+
+
+# ---------------------------------------------------------------- rename_preview
+
+def _rn_table_text(rows) -> str:
+    lines = ["| # | Where | Before | After | Result |", "|---|---|---|---|---|"]
+    for r in rows:
+        res = "OK" if r["status"] == "ok" else "PROBLEM: " + "; ".join(r["problems"])
+        if r["status"] == "ok" and r["warnings"]:
+            res += " (warning: " + "; ".join(r["warnings"]) + ")"
+        lines.append(f"| {r['n']} | {r['location']} | {r['old_name']} | {r['target']} | {res} |")
+    return "\n".join(lines)
+
+
+def _rename_preview(renames) -> dict:
+    items = _renamer.parse_items(renames)
+    listings, rows, used_old, used_target = {}, [], {}, {}
+    batch_old = {(i["location"].lower(), i["old_name"].lower()) for i in items}
+    for n, it in enumerate(items, 1):
+        row = {"n": n, "location": it["location"], "old_name": it["old_name"], "new_name": it["new_name"],
+               "target": _renamer.target_path(it["old_name"], it["new_name"]), "extension": _renamer.file_ext(it["new_name"]),
+               "problems": [], "warnings": [], "status": "ok", "printer_idle": None, "method": "", "size": None}
+        rows.append(row)
+        probs, warns = row["problems"], row["warnings"]
+        try:
+            kind, prn = _rn_target(it["location"])
+        except ValueError as e:
+            probs.append(str(e))
+            row["status"] = "problem"
+            continue
+        row["location"] = "library" if kind == "library" else prn.name
+        key = (row["location"].lower(), it["old_name"].lower())
+        if key in used_old:
+            probs.append(f"The same file is listed twice (see #{used_old[key]}).")
+        used_old.setdefault(key, n)
+        probs.extend(_renamer.name_problems(it["old_name"], it["new_name"]))
+        tkey = (row["location"].lower(), row["target"].lower())
+        if tkey in used_target:
+            probs.append(f"Two files would get the same new name (see #{used_target[tkey]}).")
+        used_target.setdefault(tkey, n)
+        if tkey in batch_old and row["target"].lower() != it["old_name"].lower():
+            probs.append("The new name is the current name of another file in this list. Rename in separate steps (no swaps or chains).")
+        if kind == "library":
+            row["method"] = _renamer.METHOD_LIBRARY
+            try:
+                _library.sanitize_name(it["new_name"])
+            except _library.LibraryError as e:
+                probs.append(str(e))
+            try:
+                e = LIB.get(it["old_name"])
+                row["size"] = int(e["size"])
+                if e["name"] != it["old_name"]:
+                    probs.append(f"The Library file is called '{e['name']}' (names must match exactly).")
+            except _library.LibraryError as ex:
+                probs.append(str(ex))
+            else:
+                try:
+                    other = LIB.get(it["new_name"])
+                    if other["name"] != e["name"]:
+                        probs.append(f"'{other['name']}' is already in the library.")
+                except _library.LibraryError:
+                    pass
+        else:
+            row["method"] = _renamer.METHOD_PRINTER
+            if not _rn_can_move(prn):
+                probs.append(f"{prn.name} cannot receive files from the Hub, so it cannot be renamed this way.")
+            elif _is_octo(prn):
+                warns.append(BETA_NOTE)
+            if prn.name not in listings:
+                listings[prn.name] = _rn_listing(prn, True)
+            lrows, lsrc = listings[prn.name]
+            src = _rn_find(lrows, it["old_name"])
+            if src is None:
+                probs.append(f"'{it['old_name']}' is not on {prn.name}'s file list" + (" (last saved list)." if lsrc == "cache" else "."))
+            else:
+                row["size"] = int(src.get("size") or 0)
+                if row["size"] > min(_RN_MAX_BYTES, LIB.max_bytes):
+                    probs.append("The file is too large to keep a Library copy, so it cannot be renamed this way.")
+                try:
+                    _library.name_from_printer_path(it["old_name"])
+                except _library.LibraryError as e:
+                    probs.append("A Library copy of the original cannot be kept: " + str(e))
+            taken = _rn_taken(lrows, row["target"])
+            if taken is not None:
+                if taken.lower() == it["old_name"].lower():
+                    probs.append("Only the capital letters change; printers cannot do that safely. Pick a different name.")
+                else:
+                    probs.append(f"'{taken}' already exists on {prn.name}; nothing is ever overwritten.")
+            idle = _printer_is_idle(prn)
+            row["printer_idle"] = bool(idle)
+            if not idle:
+                warns.append(f"{prn.name} is busy now. The rename will be refused at apply unless it is idle then.")
+            try:
+                s = prn.snapshot()
+            except Exception:
+                s = {}
+            job = str(s.get("job") or "")
+            if job and not idle and (job == it["old_name"] or costs.file_key(job) == costs.file_key(_renamer.basename(it["old_name"]))):
+                probs.append(f"'{it['old_name']}' is the file {prn.name} is printing right now.")
+            if lsrc == "cache" and src is not None:
+                warns.append("checked against the last saved file list (the printer is busy); it is re-checked at apply")
+        if probs:
+            row["status"] = "problem"
+    good = [r for r in rows if r["status"] == "ok"]
+    ticket = None
+    if good:
+        items_ok = [{"location": r["location"], "old_name": r["old_name"], "new_name": r["new_name"], "size": r["size"]} for r in good]
+        prns = {}
+        for r in good:
+            if r["location"] != "library":
+                prns[r["location"].lower()] = PRINTERS.get(r["location"].lower())
+        ticket = RENAME_TICKETS.issue(items_ok, prns)
+    return {"ticket": ticket, "ticket_expires_in_s": _renamer.TICKET_TTL_S if ticket else None,
+            "count": len(rows), "ok": len(good), "problems": len(rows) - len(good), "table": rows,
+            "table_text": _rn_table_text(rows),
+            "next_step": ("Show the human the table (Before -> After). Only after they clearly say yes, call rename_apply with this "
+                          "ticket and approved_by_human=true. " + (f"The ticket covers the {len(good)} OK row(s) only; fix the "
+                          "PROBLEM rows and preview them again." if len(good) < len(rows) else "")) if ticket else
+                         "Nothing can be applied: fix the problems and preview again."}
+
+
+@_tool
+def rename_preview(renames: list[dict]) -> str:
+    """Check a batch of file renames and get the before -> after table plus a single-use ticket (valid 10 minutes, bound to
+    exactly this list). `renames` = [{"location": printer name or "library", "old_name": ..., "new_name": ...}] (up to 100;
+    new_name is the bare file name, the folder stays). The Hub checks only what a file system and a printer need: the
+    source exists, the new name KEEPS the same extension (`.gcode.3mf` stays `.gcode.3mf`), has no / \\ : * ? " < > | or
+    control characters, no leading/trailing space or dot, at most 200 characters, collides with no other file, and is not
+    the file being printed. It enforces NO naming convention - yours decide the names. A printer that is busy is a warning
+    here and a refusal at apply. Nothing is changed by a preview. Show the table to the human and wait for a clear yes
+    before rename_apply. Renaming on Octoprint / PrusaLink / Klipper printers is beta - not yet verified on real hardware."""
+    try:
+        return json.dumps(_rename_preview(renames), indent=2)
+    except _renamer.RenameError as e:
+        return f"REFUSED: {e}"
+
+
+# ---------------------------------------------------------------- rename_apply
+
+def _rn_result(item, status, message, step=None, **extra):
+    return {"location": item["location"], "old_name": item["old_name"], "new_name": item["new_name"],
+            "status": status, "message": message, **({"step": step} if step else {}), **extra}
+
+
+def _rn_keep_copy(prn, old_name, data) -> str:
+    """Make sure the Library holds the original: skip if a file with the same content is already there. Returns a note,
+    raises LibraryError when no copy could be kept."""
+    sha = hashlib.sha256(data).hexdigest()
+    have = LIB.find_by_sha(sha)
+    if have is not None:
+        return f"the Library already had an identical copy ('{have['name']}')"
+    clean = _library.name_from_printer_path(old_name)
+    ext = _library.ext_of(clean)
+    stem = clean[:len(clean) - len(ext)]
+    last = None
+    for i in range(1, 21):
+        cand = clean if i == 1 else f"{stem} ({i}){ext}"
+        try:
+            LIB.add_bytes(cand, data, folder=_renamer.ORIGINALS_FOLDER, source=f"printer:{prn.name}", replace=False)
+            return f"a copy was kept in the Library ('{cand}', folder '{_renamer.ORIGINALS_FOLDER}')"
+        except _library.Exists as e:
+            last = e
+    raise last or _library.LibraryError("no free name for the copy")
+
+
+def _rn_move_cache(prn, old, new, size):
+    """Carry the cached details and plate preview over to the new name, so the renamed file does not have to be read again."""
+    try:
+        with _cache_lock:
+            entry = (_cache_load().get(f"{prn.name}|{old}|{size}"))
+            entry = dict(entry) if isinstance(entry, dict) else None
+        png = None
+        if entry and entry.get("thumb"):
+            try:
+                with open(_thumb_path(entry["thumb"]), "rb") as fh:
+                    png = fh.read()
+            except OSError:
+                png = None
+        _cache_purge(prn.name, old)
+        if entry:
+            key = f"{prn.name}|{new}|{size}"
+            entry["thumb"] = _save_thumb(key, png)
+            with _cache_lock:
+                cache = _cache_load()
+                cache[key] = entry
+                _cache_save(cache)
+    except Exception:
+        pass
+
+
+def _rn_apply_library(it) -> dict:
+    try:
+        e = LIB.rename(it["old_name"], it["new_name"])
+    except _library.LibraryError as ex:
+        return _rn_result(it, "failed", f"failed at rename: {ex}", "rename")
+    note = ""
+    try:
+        JOBLOG.record_rename("library", "library", it["old_name"], e["name"])
+    except Exception as ex:
+        note = f" (the history link could not be saved: {type(ex).__name__})"
+    return _rn_result(it, "renamed", f"renamed in the Library{note}")
+
+
+def _rn_apply_printer(it, prn) -> dict:
+    old, new = it["old_name"], it["new_name"]
+    target = _renamer.target_path(old, new)
+    lock = _rn_lock(prn)
+    is_http = _is_octo(prn)
+    cap = min(_RN_MAX_BYTES, LIB.max_bytes)
+
+    def refuse_busy(extra=""):
+        return _rn_result(it, "refused", f"refused (busy): {prn.name} is not idle, so nothing was touched on it{extra}.")
+
+    def list_now():
+        """The printer's list RIGHT NOW (never a saved one): an HTTP printer's own listing, a Bambu's FTPS listing."""
+        if is_http:
+            return [dict(f) for f in _backup._files_for_backup(prn) if f.get("origin", "local") == "local"]
+        return [dict(f) for f in prn.sd_list()]
+
+    # ---- 1. check, list, download (under the file lock, only while positively idle)
+    try:
+        with lock:
+            try:
+                _rn_fresh_idle(prn)
+            except PrinterBusy:
+                return refuse_busy()
+            rows = list_now()
+            src = _rn_find(rows, old)
+            if src is None:
+                return _rn_result(it, "skipped", f"skipped: '{old}' is no longer on {prn.name}.")
+            if it.get("size") is not None and int(src.get("size") or 0) != int(it["size"]):
+                return _rn_result(it, "skipped", f"skipped: '{old}' changed since the preview (different size). Preview again.")
+            if _rn_taken(rows, target) is not None:
+                return _rn_result(it, "skipped", f"skipped: '{target}' already exists on {prn.name}; nothing is ever overwritten.")
+            try:
+                data = prn.download(old, max_bytes=cap) if is_http else prn.sd_download(old)
+            except PrinterBusy:
+                return refuse_busy()
+            except Exception as e:
+                return _rn_result(it, "failed", f"failed at download: {security.scrub_text(str(e))} (nothing was changed)", "download")
+            if len(data) != int(src.get("size") or 0):
+                return _rn_result(it, "failed", "failed at download: the downloaded size does not match the file list (nothing was changed)", "download")
+            if len(data) > cap:
+                return _rn_result(it, "failed", "failed at download: the file is too large (nothing was changed)", "download")
+    except Exception as e:
+        return _rn_result(it, "failed", f"failed at download: {security.scrub_text(f'{type(e).__name__}: {e}')} (nothing was changed)", "download")
+    # ---- 2. keep a copy of the original in the Library
+    try:
+        copy_note = _rn_keep_copy(prn, old, data)
+    except Exception as e:
+        return _rn_result(it, "failed", f"failed at library copy: {security.scrub_text(str(e))} (nothing was changed on the printer)", "library copy")
+    # ---- 3. upload under the new name, verify, delete the old name (under the lock again, idle re-checked)
+    partial_note = ""
+    try:
+        with lock:
+            try:
+                _rn_fresh_idle(prn)
+            except PrinterBusy:
+                return refuse_busy(f" ({copy_note})")
+            rows = list_now()
+            src = _rn_find(rows, old)
+            if src is None or int(src.get("size") or 0) != len(data):
+                return _rn_result(it, "skipped", f"skipped: '{old}' changed on {prn.name} while it was being copied; nothing was changed there.")
+            if _rn_taken(rows, target) is not None:
+                return _rn_result(it, "skipped", f"skipped: '{target}' appeared on {prn.name}; nothing is ever overwritten.")
+
+            def cleanup_new():
+                """Remove OUR half-written new file (it did not exist before this step)."""
+                try:
+                    cur = _rn_find(list_now(), target)
+                    if cur is not None:
+                        prn.sd_delete(target)
+                        return " The partly written new file was removed."
+                except Exception:
+                    return " The partly written new file could not be removed - check the printer's file list."
+                return ""
+            try:
+                if is_http:
+                    prn.upload(target, data)
+                else:
+                    prn.sd_upload(target, data)
+            except PrinterBusy:
+                return refuse_busy(f" ({copy_note})")
+            except Exception as e:
+                partial_note = cleanup_new()
+                return _rn_result(it, "failed", f"failed at upload: {security.scrub_text(str(e))}. The old name was NOT deleted.{partial_note}", "upload")
+            seen = None
+            for attempt in range(_RN_VERIFY_TRIES if is_http else 1):
+                if attempt:
+                    time.sleep(_RN_VERIFY_WAIT_S)
+                try:
+                    seen = _rn_find(list_now(), target)
+                except Exception:
+                    seen = None
+                if seen is not None and int(seen.get("size") or 0) == len(data):
+                    break
+            if seen is None or int(seen.get("size") or 0) != len(data):
+                why = "the new name is not on the printer's file list" if seen is None else \
+                    f"the new file has {int(seen.get('size') or 0)} bytes, expected {len(data)}"
+                if seen is not None:
+                    partial_note = cleanup_new()
+                return _rn_result(it, "failed", f"failed at verify: {why}. The old name was NOT deleted.{partial_note}", "verify")
+            try:
+                prn.sd_delete(old)
+            except PrinterBusy:
+                return _rn_result(it, "failed", "failed at delete old name: the printer became busy. The new file is in place and the old one "
+                                  "remains (both exist); delete the old one when it is idle.", "delete old name")
+            except Exception as e:
+                return _rn_result(it, "failed", f"failed at delete old name: {security.scrub_text(str(e))}. The new file is in place and the "
+                                  "old one remains (both exist).", "delete old name")
+    except Exception as e:
+        return _rn_result(it, "failed", f"failed at upload: {security.scrub_text(f'{type(e).__name__}: {e}')}. The old name was NOT deleted.", "upload")
+    # ---- 4. bookkeeping (never fails the rename)
+    _rn_move_cache(prn, old, target, len(data))
+    if is_http:
+        try:
+            seen_files = _FILES_SEEN.setdefault(prn.name.lower(), {})
+            seen_files.pop(costs.file_key(old), None)
+            seen_files[costs.file_key(target)] = {**(seen or {}), "name": target}
+        except Exception:
+            pass
+    note = ""
+    try:
+        JOBLOG.record_rename("printer", prn.name, old, target)
+    except Exception as ex:
+        note = f" (the history link could not be saved: {type(ex).__name__})"
+    print(f"[rename] {prn.name}: {old} -> {target}", flush=True)
+    return _rn_result(it, "renamed", f"renamed on {prn.name}; {copy_note}{note}", copy=copy_note)
+
+
+def _rename_apply(ticket, approved) -> dict:
+    if approved is not True:
+        return {"declined": True, "message": "REFUSED: approved_by_human is not true. That flag is the HUMAN's yes to the before -> after "
+                "table - show them the table from rename_preview and only when they clearly agree call again with approved_by_human=true."}
+    if not isinstance(ticket, str) or not ticket.strip():
+        return {"declined": True, "message": "REFUSED: no ticket. Run rename_preview, show the human the table, and use its ticket "
+                "(single use, valid 10 minutes)."}
+    t, why = RENAME_TICKETS.peek(ticket)
+    if t is None:
+        return {"declined": True, "message": f"REFUSED: ticket not accepted - {why}. Run rename_preview again."}
+    for loc, drv in t["printers"].items():
+        if drv is None or PRINTERS.get(loc) is not drv:
+            return {"declined": True, "message": "REFUSED: a printer in this list was edited, removed or re-added since the preview. Preview again."}
+    if not RENAME_TICKETS.consume(ticket):
+        return {"declined": True, "message": "REFUSED: ticket not accepted - it was already used. Run rename_preview again."}
+    results = []
+    for it in t["items"]:
+        try:
+            if it["location"] == "library":
+                results.append(_rn_apply_library(it))
+            else:
+                prn = PRINTERS.get(it["location"].lower())
+                results.append(_rn_apply_printer(it, prn) if prn is not None else _rn_result(it, "failed", "failed at check: unknown printer", "check"))
+        except Exception as e:                      # one item never stops the others
+            results.append(_rn_result(it, "failed", f"failed: {security.scrub_text(f'{type(e).__name__}: {e}')}", "unexpected"))
+    counts = {s: sum(1 for r in results if r["status"] == s) for s in ("renamed", "refused", "failed", "skipped")}
+    return {"results": results, **counts,
+            "summary": ", ".join(f"{v} {k}" for k, v in counts.items() if v) or "nothing to do",
+            "note": "Nothing was started. Renamed files keep one history: recent_jobs, job_stats and cost_per_part show the newest name."}
+
+
+@_tool
+def rename_apply(ticket: str, approved_by_human: bool = False) -> str:
+    """APPLY the renames of a rename_preview ticket. `approved_by_human=True` is THE HUMAN'S yes to the before -> after
+    table: only set it after you showed the table and the human clearly agreed in this conversation - never on your own,
+    never as a default. Without it, or with a wrong / expired / already used ticket, nothing happens. Items run one by one and
+    a failure never stops the others; each reports renamed / refused (busy) / failed at <step> / skipped. On a printer:
+    re-check idle -> download -> keep a copy in the Library (folder 'Renamed originals') -> upload under the new name ->
+    verify the same size is listed -> only then delete the old name. A busy printer is refused (no session is opened); an
+    existing file is never overwritten; if upload or verify fails the old name is NOT deleted. Library files are renamed
+    atomically. Nothing here can start a print. Printers other than Bambu are beta - not yet verified on real hardware."""
+    out = _rename_apply(ticket, approved_by_human)
+    return out["message"] if out.get("declined") else json.dumps(out, indent=2)
+
+
+@mcp.prompt(name="rename_files", description="How to rename print files safely with the Hub's rename tools.")
+def rename_files() -> str:
+    return (
+        "Renaming print files with Fabrica. The Hub has NO naming rules - yours decide the names; the Hub only gives facts "
+        "and a safe way to apply them.\n"
+        "1. file_facts(location, filename) for each file (location = printer name or \"library\"): parts on the plate, "
+        "filament material + colour, sliced-for model, time, grams, where else it exists, how often it was printed.\n"
+        "2. Decide each new name with YOUR OWN naming rules. Keep the extension (.gcode.3mf stays .gcode.3mf); give only "
+        "the file name, the folder stays.\n"
+        "3. rename_preview([{location, old_name, new_name}, ...]) -> a before/after table, per-row problems and a "
+        "single-use ticket (10 minutes).\n"
+        "4. Show the human the table. Wait for a clear yes in this conversation.\n"
+        "5. Only then rename_apply(ticket, approved_by_human=true). Busy printers are refused; a copy of each original is "
+        "kept in the Library; the old name is deleted only after the new one is verified. Report each row's result.\n"
+        "Never set approved_by_human on your own. Octoprint / PrusaLink / Klipper renames are beta (not yet verified on real hardware).")
+
+
+# ---- REST
+
+@mcp.custom_route("/api/files/facts", methods=["GET"])
+@_safe_route
+async def _api_file_facts(request: Request):
+    q = request.query_params
+    try:
+        d = await _run(_file_facts, q.get("location", ""), q.get("name", ""), not security.caller_read_only())
+    except _library.LibraryError as e:
+        return _library_error(e)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    return JSONResponse(d, headers={"Cache-Control": "no-store"})
+
+
+@mcp.custom_route("/api/rename/preview", methods=["POST"])
+@_safe_route
+async def _api_rename_preview(request: Request):
+    """{"renames": [{location, old_name, new_name}, ...]} -> the table + ticket. Changes nothing."""
+    body = await _optional_json(request)
+    try:
+        return JSONResponse(await _run(_rename_preview, body.get("renames")), headers={"Cache-Control": "no-store"})
+    except _renamer.RenameError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
+@mcp.custom_route("/api/rename/apply", methods=["POST"])
+@_safe_route
+async def _api_rename_apply(request: Request):
+    """{"ticket", "approved_by_human": true} - the dashboard sends it when the person taps Apply."""
+    body = await _optional_json(request)
+    out = await _run(_rename_apply, body.get("ticket"), body.get("approved_by_human"))
+    if out.get("declined"):
+        return JSONResponse({"error": out["message"]}, status_code=409)
+    return JSONResponse(out, headers={"Cache-Control": "no-store"})
+
+# ==== end rename ====
+
+
 # ============================================================= printer management
 # Add / edit / remove printers while the Hub runs (see fleet_store.py). Self-contained:
 # MCP tools + REST routes. Secrets (access codes, API keys, passwords) are write-only
@@ -1976,6 +3101,74 @@ async def _api_printers_remove(request: Request):
         return _fleet_json(e)
     return JSONResponse(res)
 
+# ============================================================= printer groups
+# A group is a label on printers ("Production", "Workshop"): metadata kept with the printer in printers.json
+# (fleet_store.py). Changing one never touches a printer connection. Reads need `read`, changes need `control` -
+# exactly like the printer routes above; History/cost filters on groups are in the job history block below.
+
+@_tool
+def list_groups() -> str:
+    """The printer groups in use (a label such as "Production" or "Workshop" that a printer can carry; a printer may
+    be in several) with the printers in each: [{name, printers: [...]}]. Use a group name as the `group` filter of
+    job_stats / recent_jobs / cost_per_part."""
+    return json.dumps(FLEET.list_groups(), indent=2)
+
+
+@_tool
+async def set_printer_groups(printer: str, groups: list[str]) -> str:
+    """Set which groups a printer is in (replaces its list; [] clears it). Up to 8 groups of at most 32 characters,
+    no slash or comma, matched without regard to case. Only a label: the printer's connection is not touched and
+    it works while a print is running. Returns the printer with its groups."""
+    try:
+        res = await _run(FLEET.set_groups, printer, groups)
+    except fleet_store.FleetError as e:
+        return f"REFUSED: {e}"
+    return json.dumps(res, indent=2)
+
+
+@mcp.custom_route("/api/groups", methods=["GET"])
+@_safe_route
+async def _api_groups(request: Request):
+    return JSONResponse(FLEET.list_groups())
+
+
+@mcp.custom_route("/api/printers/{name}/groups", methods=["PUT"])
+@_safe_route
+async def _api_printers_groups(request: Request):
+    try:
+        body = await _json_body(request)
+        res = await _run(FLEET.set_groups, request.path_params["name"], body.get("groups"))
+    except fleet_store.FleetError as e:
+        return _fleet_json(e)
+    return JSONResponse(res)
+
+
+@mcp.custom_route("/api/groups/rename", methods=["POST"])
+@_safe_route
+async def _api_groups_rename(request: Request):
+    try:
+        body = await _json_body(request)
+        old = body.get("from", body.get("name"))
+        new = body.get("to", body.get("new_name"))
+        if not isinstance(old, str) or not isinstance(new, str):
+            raise fleet_store.FleetError('Send {"from": "<current name>", "to": "<new name>"}.')
+        res = await _run(FLEET.rename_group, old, new)
+    except fleet_store.FleetError as e:
+        return _fleet_json(e)
+    return JSONResponse(res)
+
+
+@mcp.custom_route("/api/groups/{name}", methods=["DELETE"])
+@_safe_route
+async def _api_groups_delete(request: Request):
+    try:
+        res = await _run(FLEET.delete_group, request.path_params["name"])
+    except fleet_store.FleetError as e:
+        return _fleet_json(e)
+    return JSONResponse(res)
+
+# ============================================================= end printer groups
+
 # ============================================================= end printer management
 
 
@@ -2133,7 +3326,7 @@ async def _manifest(request: Request):
     short = BRAND_NAME if hub in ("", "Print Hub", "Fabrica") else hub[:12].strip()
     icon = lambda f, n, purpose="any": {"src": f"/static/brand/{f}", "sizes": f"{n}x{n}", "type": "image/png", "purpose": purpose}
     doc = {"name": BRAND_NAME, "short_name": short or BRAND_NAME, "description": BRAND_TAGLINE,
-           "start_url": "/dashboard", "scope": "/", "display": "standalone",
+           "id": "/dashboard", "start_url": "/dashboard", "scope": "/", "display": "standalone", "orientation": "any",
            "theme_color": BRAND_COLORS["blueprint"], "background_color": BRAND_COLORS["blueprint"],
            "icons": [icon("icon-192.png", 192), icon("icon-512.png", 512),
                      icon("icon-maskable-512.png", 512, "maskable"),
@@ -2170,7 +3363,9 @@ async def _api_thumb(request: Request):
 @_safe_route
 async def _api_fleet(request: Request):
     def work():
-        return [{**prn.snapshot(), **_camera_fields(prn)} for prn in list(PRINTERS.values())]
+        group_of = {k.lower(): v for k, v in FLEET.store.groups_by_printer().items()}
+        return [{**prn.snapshot(), **_camera_fields(prn), "groups": group_of.get(str(prn.name).lower(), [])}
+                for prn in list(PRINTERS.values())]
     out = await _run(work)
     return JSONResponse(out)
 
@@ -3239,23 +4434,45 @@ def _int_param(request, name, default):
         return default
 
 
+def _job_filter(groups, printers):
+    """History filter -> (printer argument for JobLog, description). `groups` / `printers` are lists of names; the
+    result is the UNION: a printer counts if it is named or is in any named group. (None, None) = no filter.
+    A group nobody is in (or that does not exist) selects nothing - it never falls back to "everything"."""
+    res = FLEET.store.resolve_filter(groups, printers)
+    if not res["active"]:
+        return None, None
+    info = {"groups": res["groups"], "unknown_groups": res["unknown_groups"],
+            "printers": [p for p in (printers or []) if isinstance(p, str) and p.strip()],
+            "resolved_printers": res["printers"]}
+    arg = res["printers"][0] if len(res["printers"]) == 1 and not groups else res["printers"]
+    return arg, info
+
+
+def _request_filter(request):
+    """?group=A&group=B&printer=X&printer=Y -> _job_filter(...)."""
+    q = request.query_params
+    return _job_filter(q.getlist("group"), q.getlist("printer"))
+
+
 @mcp.custom_route("/api/jobs", methods=["GET"])
 @_safe_route
 async def _api_jobs(request: Request):
     q = request.query_params
+    pf, info = _request_filter(request)
     try:
-        jobs = await _run(JOBLOG.recent_jobs, _int_param(request, "limit", 50), q.get("printer") or None, q.get("result") or None)
+        jobs = await _run(JOBLOG.recent_jobs, _int_param(request, "limit", 50), pf, q.get("result") or None)
     except ValueError as e:
         return _bad_request(e)
-    return JSONResponse({"jobs": jobs, "currency": JOBLOG.rates().currency})
+    return JSONResponse({"jobs": jobs, "currency": JOBLOG.rates().currency, **({"filter": info} if info else {})})
 
 
 @mcp.custom_route("/api/jobs.csv", methods=["GET"])
 @_safe_route
 async def _api_jobs_csv(request: Request):
     q = request.query_params
+    pf, _info = _request_filter(request)
     try:
-        text = await _run(JOBLOG.export_csv, q.get("printer") or None, q.get("period") or "all")
+        text = await _run(JOBLOG.export_csv, pf, q.get("period") or "all")
     except ValueError as e:
         return _bad_request(e)
     return Response(text, media_type="text/csv; charset=utf-8",
@@ -3278,10 +4495,12 @@ async def _api_job(request: Request):
 @_safe_route
 async def _api_stats(request: Request):
     q = request.query_params
+    pf, info = _request_filter(request)
     try:
-        return JSONResponse(await _run(JOBLOG.stats, q.get("period") or "month", q.get("printer") or None))
+        st = await _run(JOBLOG.stats, q.get("period") or "month", pf, None, None, FLEET.store.group_index())
     except ValueError as e:
         return _bad_request(e)
+    return JSONResponse({**st, **({"filter": info} if info else {})})
 
 
 @mcp.custom_route("/api/costs/file", methods=["GET"])
@@ -3289,44 +4508,75 @@ async def _api_stats(request: Request):
 async def _api_costs_file(request: Request):
     q = request.query_params
     last_n = _int_param(request, "last_n", 0) or None
+    pf, info = _request_filter(request)
     try:
-        return JSONResponse(await _run(JOBLOG.file_costs, q.get("name") or "", last_n, q.get("printer") or None))
+        d = await _run(JOBLOG.file_costs, q.get("name") or "", last_n, pf)
     except ValueError as e:
         return _bad_request(e)
+    return JSONResponse({**d, **({"filter": info} if info else {})})
 
 
 def _money(rates, v) -> str:
     return "n/a" if v is None else f"{rates.currency}{v:.2f}" if abs(v) >= 1 else f"{rates.currency}{v:.3f}"
 
 
+def _tool_job_filter(printer, printers, group):
+    """The history filter an MCP tool was given -> (printer argument, description) or a REFUSED text.
+    `printer` (one) + `printers` (a list) + `group` (one name, or several separated by commas) are a UNION."""
+    names = ([printer] if printer else []) + [p for p in (printers or []) if isinstance(p, str)]
+    groups = [g.strip() for g in str(group or "").split(",") if g.strip()]
+    pf, info = _job_filter(groups, names)
+    if info and info["unknown_groups"]:
+        known = [g["name"] for g in FLEET.store.group_index()]
+        return None, None, (f"REFUSED: no group named {', '.join(repr(g) for g in info['unknown_groups'])}. "
+                            f"Groups in use: {', '.join(known) or '(none - use set_printer_groups first)'}.")
+    return pf, info, None
+
+
 @_tool
-async def recent_jobs(limit: int = 20, printer: str = "") -> str:
+async def recent_jobs(limit: int = 20, printer: str = "", printers: list[str] | None = None, group: str = "") -> str:
     """The latest print attempts (newest first): printer, file, result (FINISHED / FAILED / CANCELLED /
-    UNKNOWN / RUNNING), parts, grams, duration and what each cost at the Costs settings. Optionally one printer."""
+    UNKNOWN / RUNNING), parts, grams, duration and what each cost at the Costs settings. Optionally filter to one
+    printer, a list of `printers`, and/or a `group` (several groups: comma-separated; see list_groups). Filters add
+    up (a print counts if it ran on any named printer or any printer in a named group)."""
+    pf, info, refused = _tool_job_filter(printer, printers, group)
+    if refused:
+        return refused
     try:
-        jobs = await _run(JOBLOG.recent_jobs, limit, printer or None)
+        jobs = await _run(JOBLOG.recent_jobs, limit, pf)
     except ValueError as e:
         return f"REFUSED: {e}"
-    return json.dumps({"currency": JOBLOG.rates().currency, "jobs": jobs}, indent=2)
+    return json.dumps({"currency": JOBLOG.rates().currency, **({"filter": info} if info else {}), "jobs": jobs}, indent=2)
 
 
 @_tool
-async def job_stats(period: str = "month", printer: str = "") -> str:
+async def job_stats(period: str = "month", printer: str = "", printers: list[str] | None = None, group: str = "") -> str:
     """Print totals for a period (day, week, month, year, all, or '<N>d'): jobs, success rate, hours, grams,
-    cost split, true and clean cost per part, and breakdowns by printer, material and file."""
+    cost split, true and clean cost per part, and breakdowns by printer, material and file - plus `by_group`
+    (prints, success, hours, grams and cost per printer group; a printer in two groups counts in both). Optionally
+    filter to one printer, a list of `printers`, and/or a `group` (several groups: comma-separated; see
+    list_groups): totals then cover only those printers (union). Handy for business-vs-hobby cost at tax time."""
+    pf, info, refused = _tool_job_filter(printer, printers, group)
+    if refused:
+        return refused
     try:
-        return json.dumps(await _run(JOBLOG.stats, period, printer or None), indent=2)
+        st = await _run(JOBLOG.stats, period, pf, None, None, FLEET.store.group_index())
+        return json.dumps({**st, **({"filter": info} if info else {})}, indent=2)
     except ValueError as e:
         return f"REFUSED: {e}"
 
 
 @_tool
-async def cost_per_part(file: str) -> str:
+async def cost_per_part(file: str, printers: list[str] | None = None, group: str = "") -> str:
     """What one part of this file really costs: TRUE cost per part (failed and cancelled attempts charged to the
     good parts) against the CLEAN cost per part (finished prints only), the success rate, and how many attempts
-    the figures are based on. `file` may be written with or without .gcode.3mf."""
+    the figures are based on. `file` may be written with or without .gcode.3mf. Optionally count only attempts on
+    a list of `printers` and/or a `group` (comma-separated for several; see list_groups)."""
+    pf, _info, refused = _tool_job_filter("", printers, group)
+    if refused:
+        return refused
     try:
-        d = await _run(JOBLOG.file_costs, file, None, None)
+        d = await _run(JOBLOG.file_costs, file, None, pf)
     except ValueError as e:
         return f"REFUSED: {e}"
     r = JOBLOG.rates()
@@ -3535,6 +4785,29 @@ async def score_snapshot(printer: str) -> str:
 # ============================================================= end spaghetti detection
 
 
+
+# ==== agent kit ==== (guides, version, change detection: app/agentkit.py). Keep this block LAST, after every tool.
+KIT = agentkit.Kit(DATA_DIR, BUILD_REV)
+
+
+@_tool
+def fabrica_guide(topic: str = "start", since: str = "") -> str:
+    """Fabrica's built-in guide for AI agents: what the tools are for and the rules you must follow. Call it with
+    no arguments first. Topics: start, printing, library, history, renaming, changes. Every reply begins with the
+    kit version; if any Fabrica reply shows a different version than you know, call topic 'changes' with
+    since=<the version you know> to see what is new."""
+    return KIT.guide(topic, since)
+
+
+@mcp.custom_route("/api/agent-kit", methods=["GET"])
+@_safe_route
+async def _api_agent_kit(request: Request):
+    return JSONResponse(KIT.summary())
+
+
+agentkit.register(mcp, KIT)
+# ==== end agent kit ====
+
 def _count_tools() -> int:
     try:
         return len(mcp._tool_manager.list_tools())
@@ -3543,7 +4816,11 @@ def _count_tools() -> int:
 
 
 # Everything above has registered its tools by now: tell the Agents section the real number.
-SETTINGS.set_runtime_info(tool_count=_count_tools(), mcp_path=mcp.settings.streamable_http_path, version=BUILD_REV)
+SETTINGS.set_runtime_info(tool_count=_count_tools(), mcp_path=mcp.settings.streamable_http_path, version=BUILD_REV,
+                          agent_kit=KIT.finish({t.name: t.description for t in mcp._tool_manager.list_tools()},
+                                               [p.name for p in mcp._prompt_manager.list_prompts()]))
+mcp._mcp_server.instructions = KIT.instructions()        # ==== agent kit ==== sent to every client on connect
+
 
 
 if __name__ == "__main__":

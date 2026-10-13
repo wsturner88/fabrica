@@ -130,6 +130,66 @@ def norm_host(h) -> str:
         return h
 
 
+# ---------------------------------------------------------------- printer groups (validation)
+# A group is a free-text label on a printer ("Production", "Workshop"). A printer may be in 0..8 of them. Groups are
+# fleet data: they live in printers.json beside the printer, hold no secret, and a group exists only while at least one
+# printer is in it. Matching is case-insensitive; the first spelling used fleet-wide wins, so "production" never forks "Production".
+
+GROUP_MAX_LEN = 32
+GROUPS_MAX_PER_PRINTER = 8
+_GROUP_FORBIDDEN = "/\\,"      # "/" would break /api/groups/{name}; "," is how a list is typed in one line
+
+
+def clean_group(name) -> str:
+    """One group name, tidied: surrounding/repeated whitespace collapsed. "" means 'nothing here' (skipped by callers)."""
+    if not isinstance(name, str):
+        raise FleetError("A group name must be text.")
+    n = " ".join(name.split())
+    if not n:
+        return ""
+    if not n.isprintable():
+        raise FleetError("A group name can only contain printable characters (no control or invisible characters).")
+    if len(n) > GROUP_MAX_LEN:
+        raise FleetError(f"A group name can be at most {GROUP_MAX_LEN} characters ('{n[:12]}...' is {len(n)}).")
+    bad = [c for c in _GROUP_FORBIDDEN if c in n]
+    if bad:
+        raise FleetError("A group name cannot contain a slash, a backslash or a comma.")
+    return n
+
+
+def normalize_groups(value, spellings=None) -> list:
+    """Validate a printer's group list -> cleaned list (order kept, case-insensitive duplicates dropped). Accepts a list
+    of names, or one string (several names may be separated by commas). `spellings` maps lower-case name -> the spelling
+    already used elsewhere in the fleet, which is adopted so a group is always spelled one way."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        value = value.split(",")
+    if not isinstance(value, (list, tuple)):
+        raise FleetError("Groups must be a list of names, for example [\"Production\", \"Workshop\"].")
+    out, seen = [], set()
+    for raw in value:
+        g = clean_group(raw)
+        if not g or g.casefold() in seen:
+            continue
+        seen.add(g.casefold())
+        out.append((spellings or {}).get(g.casefold(), g))
+    if len(out) > GROUPS_MAX_PER_PRINTER:
+        raise FleetError(f"A printer can be in at most {GROUPS_MAX_PER_PRINTER} groups (this is {len(out)}).")
+    return out
+
+
+def record_groups(rec) -> list:
+    """The groups of a stored record, read leniently (a hand-edited or older printers.json never breaks a page)."""
+    raw = rec.get("groups") if isinstance(rec, dict) else None
+    out, seen = [], set()
+    for g in raw if isinstance(raw, list) else []:
+        if isinstance(g, str) and g.strip() and g.strip().casefold() not in seen:
+            seen.add(g.strip().casefold())
+            out.append(g.strip())
+    return out
+
+
 _HOST_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$|^[0-9A-Fa-f:]+$")
 _SERIAL_RE = re.compile(r"^[A-Za-z0-9]{8,24}$")
 
@@ -345,6 +405,138 @@ class FleetStore:
                     self._secrets[rec["name"]] = sec
                 raise
             return rec
+
+    # ---- groups (metadata on the printer record; nothing here touches a connection) ------------------
+
+    def _spellings(self, skip=None) -> dict:
+        """lower-case group name -> the spelling in use in the fleet (first printer to use it wins)."""
+        out = {}
+        for r in self._records:
+            if skip and r["name"].lower() == skip.lower():
+                continue
+            for g in record_groups(r):
+                out.setdefault(g.casefold(), g)
+        return out
+
+    def group_spellings(self, skip=None) -> dict:
+        with self._lock:
+            return self._spellings(skip)
+
+    def groups_by_printer(self) -> dict:
+        """printer name (as stored) -> its groups."""
+        with self._lock:
+            return {r["name"]: record_groups(r) for r in self._records}
+
+    def group_index(self) -> list:
+        """Every group in use with its member printers: [{"name", "printers": [...]}], A-Z."""
+        with self._lock:
+            names, members = self._spellings(), {}
+            for r in self._records:
+                for g in record_groups(r):
+                    members.setdefault(g.casefold(), []).append(r["name"])
+            return [{"name": names[k], "printers": sorted(v, key=str.lower)}
+                    for k, v in sorted(members.items(), key=lambda kv: names[kv[0]].casefold())]
+
+    def _save_groups(self, changes: dict):
+        """Apply {record index: new group list} and save once; on a failed save the old records are put back."""
+        old = {i: dict(self._records[i]) for i in changes}
+        for i, gl in changes.items():
+            rec = {k: v for k, v in self._records[i].items() if k != "groups"}
+            if gl:
+                rec["groups"] = gl
+            self._records[i] = rec
+        try:
+            self._save(True)
+        except BaseException:
+            for i, r in old.items():
+                self._records[i] = r
+            raise
+
+    def set_groups(self, name: str, groups) -> list:
+        """Replace one printer's groups (validated). Returns the stored list."""
+        with self._lock:
+            n = (name or "").lower()
+            for i, r in enumerate(self._records):
+                if r["name"].lower() == n:
+                    break
+            else:
+                raise NotFound(f"No printer named '{name}'.")
+            gl = normalize_groups(groups, self._spellings(skip=r["name"]))
+            if gl != record_groups(r) or ("groups" in r) != bool(gl):
+                self._save_groups({i: gl})
+            return gl
+
+    def rename_group(self, old: str, new: str) -> dict:
+        """Rename a group on every printer that has it. Renaming onto an existing group merges the two."""
+        with self._lock:
+            old_c, new_c = clean_group(old), clean_group(new)
+            if not old_c:
+                raise FleetError("Say which group to rename.")
+            if not new_c:
+                raise FleetError("Give the group a new name.")
+            spell = self._spellings()
+            if old_c.casefold() not in spell:
+                raise NotFound(f"No group named '{old_c}'.")
+            target = new_c if new_c.casefold() == old_c.casefold() else spell.get(new_c.casefold(), new_c)
+            changes, hit = {}, []
+            for i, r in enumerate(self._records):
+                gl = record_groups(r)
+                if old_c.casefold() not in [g.casefold() for g in gl]:
+                    continue
+                out, seen = [], set()
+                for g in gl:
+                    g = target if g.casefold() == old_c.casefold() else g
+                    if g.casefold() not in seen:
+                        seen.add(g.casefold())
+                        out.append(g)
+                changes[i] = out
+                hit.append(r["name"])
+            if changes:
+                self._save_groups(changes)
+            return {"group": target, "renamed_from": spell[old_c.casefold()],
+                    "merged": new_c.casefold() != old_c.casefold() and new_c.casefold() in spell,
+                    "printers": sorted(hit, key=str.lower)}
+
+    def delete_group(self, name: str) -> dict:
+        """Take a group off every printer (the printers and their history are untouched)."""
+        with self._lock:
+            n = clean_group(name)
+            spell = self._spellings()
+            if not n or n.casefold() not in spell:
+                raise NotFound(f"No group named '{n or name}'.")
+            changes, hit = {}, []
+            for i, r in enumerate(self._records):
+                gl = record_groups(r)
+                keep = [g for g in gl if g.casefold() != n.casefold()]
+                if len(keep) != len(gl):
+                    changes[i] = keep
+                    hit.append(r["name"])
+            self._save_groups(changes)
+            return {"deleted": spell[n.casefold()], "printers": sorted(hit, key=str.lower)}
+
+    def resolve_filter(self, groups=None, printers=None) -> dict:
+        """Turn a history filter (group names and/or printer names) into printer names. Union: a printer is in the
+        result if it is named, or is in any named group. -> {"active": bool, "printers": [...], "groups": [...],
+        "unknown_groups": [...]}; `active` False means no filter was asked for (= everything)."""
+        groups = [g for g in (groups or []) if isinstance(g, str) and g.strip()]
+        printers = [p for p in (printers or []) if isinstance(p, str) and p.strip()]
+        if not groups and not printers:
+            return {"active": False, "printers": [], "groups": [], "unknown_groups": []}
+        idx = {g["name"].casefold(): g for g in self.group_index()}
+        names, known, unknown = {}, [], []
+        for g in groups:
+            hit = idx.get(" ".join(g.split()).casefold())
+            if hit is None:
+                unknown.append(g.strip())
+                continue
+            known.append(hit["name"])
+            for p in hit["printers"]:
+                names.setdefault(p.lower(), p)
+        for p in printers:
+            rec = self.get(p.strip())
+            names.setdefault((rec["name"] if rec else p.strip()).lower(), rec["name"] if rec else p.strip())
+        return {"active": True, "printers": sorted(names.values(), key=str.lower), "groups": known,
+                "unknown_groups": unknown}
 
     def import_legacy(self, printers_cfg, source="config.yml", env=None) -> list:
         """One-time import of the old config.yml `printers:` list. Runs only while the
@@ -913,7 +1105,8 @@ class FleetManager:
                 "address": self._address(rec), "model": rec.get("model", ""),
                 "added_at": rec.get("added_at"), "source": rec.get("source", "dashboard"),
                 "values": {k: v for k, v in plain.items()
-                           if k not in ("name", "type", "added_at", "updated_at", "source")},
+                           if k not in ("name", "type", "added_at", "updated_at", "source", "groups")},
+                "groups": record_groups(rec),
                 "secrets": secrets,
                 "loaded": rec["name"].lower() in self.printers,
                 "driver_available": fam is not None}
@@ -1079,6 +1272,9 @@ class FleetManager:
 
     def add(self, type_key, values, skip_test=False) -> dict:
         fam = family_for(type_key, self.families)
+        # groups ride along in `values` but are not a connection field: validated up front, stored with the record
+        groups = normalize_groups(values.get("groups") if isinstance(values, dict) else None,
+                                  self.store.group_spellings())
         vals = normalize_values(fam, values)
         if self.store.get(vals["name"]):
             raise Conflict(f"A printer named '{vals['name']}' already exists.")
@@ -1095,6 +1291,8 @@ class FleetManager:
         if fam.key == "bambu" and not plain.get("model"):   # remember what the serial told us
             plain["model"] = (result or {}).get("model") or bambu_model_from_serial(vals["serial"])
         rec = {"name": vals["name"], "type": fam.key, **plain, "source": "dashboard"}
+        if groups:
+            rec["groups"] = groups
         prn = fam.build({**vals, **{k: v for k, v in plain.items()}})
         with self.lock:
             if vals["name"].lower() in self.printers or self.store.get(vals["name"]):
@@ -1117,6 +1315,50 @@ class FleetManager:
         return {"printer": self.public(self.store.get(vals["name"])), "test": result}
 
     def update(self, name, values, skip_test=False, force=False) -> dict:
+        """Edit a printer. `values` may carry "groups": a groups-only edit never probes, never disconnects and is
+        allowed while the printer is printing (it is a label, not a connection setting)."""
+        values = dict(values) if isinstance(values, dict) else {}
+        if "groups" not in values:
+            return self._update_connection(name, values, skip_test, force)
+        rec = self.store.get(name)
+        if rec is None:
+            raise NotFound(f"No printer named '{name}'.")
+        groups = normalize_groups(values.pop("groups"), self.store.group_spellings(skip=rec["name"]))   # bad input: nothing changes
+        if set(values) - {"name"}:
+            res = self._update_connection(name, values, skip_test, force)
+        else:
+            res = {"printer": self.public(rec), "test": None, "changed": []}
+        if groups != record_groups(self.store.get(rec["name"])):
+            self.store.set_groups(rec["name"], groups)
+            res = {**res, "printer": self.public(self.store.get(rec["name"])),
+                   "changed": sorted({*res.get("changed", []), "groups"})}
+            self.log(f"[fleet] '{rec['name']}': groups now {', '.join(groups) or '(none)'}")
+        return res
+
+    def set_groups(self, name, groups) -> dict:
+        rec = self.store.get(name)
+        if rec is None:
+            raise NotFound(f"No printer named '{name}'.")
+        before = record_groups(rec)
+        after = self.store.set_groups(rec["name"], groups)
+        if after != before:
+            self.log(f"[fleet] '{rec['name']}': groups now {', '.join(after) or '(none)'}")
+        return {"printer": self.public(self.store.get(rec["name"])), "groups": after}
+
+    def list_groups(self) -> list:
+        return self.store.group_index()
+
+    def rename_group(self, old, new) -> dict:
+        res = self.store.rename_group(old, new)
+        self.log(f"[fleet] group '{res['renamed_from']}' renamed to '{res['group']}' ({len(res['printers'])} printer(s))")
+        return res
+
+    def delete_group(self, name) -> dict:
+        res = self.store.delete_group(name)
+        self.log(f"[fleet] group '{res['deleted']}' deleted ({len(res['printers'])} printer(s) lost the label)")
+        return res
+
+    def _update_connection(self, name, values, skip_test=False, force=False) -> dict:
         rec = self.store.get(name)
         if rec is None:
             raise NotFound(f"No printer named '{name}'.")

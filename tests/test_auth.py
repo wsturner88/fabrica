@@ -463,11 +463,13 @@ class TablesMatchTheAppTests(Base):
         read = {n for n, s in security.TOOL_SCOPES.items() if s == "read"}
         self.assertEqual(read, {"list_printers", "printer_status", "ams_state", "list_sd_files", "suggest_mapping",
                                 "printer_controls", "get_camera_snapshot", "backup_status", "list_printer_types",
-                                "get_settings", "recent_jobs", "job_stats", "cost_per_part", "detection_status"})
+                                "get_settings", "recent_jobs", "job_stats", "cost_per_part", "detection_status",
+                                "list_groups", "library_list", "library_file", "file_facts",
+                                "fabrica_guide"})
         for dangerous in ("start_print", "cancel_print", "pause_print", "resume_print", "preheat", "set_tray",
                           "delete_sd_file", "add_printer", "update_printer", "remove_printer", "update_settings",
                           "backup_printer_files", "send_test_notification", "list_api_keys", "discover_printers",
-                          "score_snapshot"):
+                          "score_snapshot", "library_send", "library_save_from_printer"):
             self.assertEqual(security.TOOL_SCOPES[dangerous], "control", dangerous)
 
     def test_there_is_no_tool_that_creates_or_revokes_keys(self):

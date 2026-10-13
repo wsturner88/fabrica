@@ -391,6 +391,8 @@ SCHEMA = [
          _field("tool_count", "MCP tools available", "info", None,
                 "Everything on the dashboard can also be done by an agent through these tools.",
                 readonly=True),
+         _field("agent_kit", "Agent kit", "info", None,       # ==== agent kit ====
+                "Agents connected to this Hub pick up guides and updates automatically.", readonly=True),
          _field("settings_api", "Settings API", "info", "/api/settings",
                 "GET/PUT /api/settings, GET /api/settings/schema; MCP tools get_settings / update_settings.",
                 readonly=True),

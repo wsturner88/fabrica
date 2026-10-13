@@ -165,6 +165,8 @@ REST_SCOPES = [
     ("GET", "/api/fleet", "read"),
     ("GET", "/api/printers", "read"),
     ("GET", "/api/printer-types", "read"),
+    ("GET", "/api/groups", "read"),                           # printer groups and their members
+    ("GET", "/api/agent-kit", "read"),                        # ==== agent kit ==== kit version, topics, workflows
     ("GET", "/api/printer/{name}", "read"),
     ("GET", "/api/printer/{name}/controls", "read"),
     ("GET", "/api/printer/{name}/snapshot", "read"),
@@ -173,6 +175,14 @@ REST_SCOPES = [
     ("POST", "/api/printer/{name}/suggest", "read"),         # computes a mapping, changes nothing
     ("GET", "/api/thumb/{basename}", "read"),
     ("GET", "/api/backups", "read"),                          # the list, not the zip files
+    # ==== library ====
+    ("GET", "/api/library", "read"),                          # the file library: list (library + cached printer listings)
+    ("GET", "/api/library/files/{name}", "read"),             # one library file's details
+    ("GET", "/api/library/thumb/{basename}", "read"),
+    # ==== end library ====
+    # ==== rename ====
+    ("GET", "/api/files/facts", "read"),                      # facts to choose a file name with (cached; a busy printer is not contacted)
+    # ==== end rename ====
     ("GET", "/api/settings", "read"),                         # secrets are already redacted
     ("GET", "/api/settings/schema", "read"),
     ("GET", "/api/settings/export", "read"),
@@ -197,11 +207,27 @@ REST_SCOPES = [
     ("POST", "/api/printer/{name}/tray", "control"),
     ("POST", "/api/printer/{name}/delete", "control"),
     ("POST", "/api/printer/{name}/backup", "control"),
+    # ==== library ====
+    ("PUT", "/api/library/files/{name}", "control"),          # upload into the library (raw body, see is_library_upload)
+    ("GET", "/api/library/files/{name}/download", "control"),  # the file itself = your design: same rule as backup downloads
+    ("POST", "/api/library/delete", "control"),
+    ("POST", "/api/library/save", "control"),                 # copy a printer's file into the library (downloads from the printer)
+    ("POST", "/api/library/send", "control"),                 # upload library files to idle printers (never starts a print)
+    ("POST", "/api/library/folder", "control"),               # create / delete / move
+    ("POST", "/api/library/scan", "control"),                 # re-read what the printers hold (never an FTPS session on a busy one)
+    # ==== end library ====
+    # ==== rename ====
+    ("POST", "/api/rename/preview", "control"),               # checks a batch of renames and issues a ticket; changes nothing
+    ("POST", "/api/rename/apply", "control"),                 # downloads, uploads and deletes files on idle printers; never starts a print
+    # ==== end rename ====
     ("GET", "/api/backups/{printer}/{filename}", "control"),  # downloading a backup = all your files
     ("POST", "/api/printers/test", "control"),                # makes the Hub contact an address
     ("POST", "/api/printers", "control"),
     ("PUT", "/api/printers/{name}", "control"),
     ("DELETE", "/api/printers/{name}", "control"),
+    ("PUT", "/api/printers/{name}/groups", "control"),        # group changes are fleet changes: same level as editing a printer
+    ("POST", "/api/groups/rename", "control"),
+    ("DELETE", "/api/groups/{name}", "control"),
     ("PUT", "/api/settings", "control"),
     ("POST", "/api/settings/import", "control"),
     ("POST", "/api/settings/test/{channel}", "control"),      # sends a message to a configured channel
@@ -240,11 +266,19 @@ TOOL_SCOPES = {
     "get_camera_snapshot": "read",
     "backup_status": "read",
     "list_printer_types": "read",
+    "list_groups": "read",
     "get_settings": "read",
     "recent_jobs": "read",
     "job_stats": "read",
     "cost_per_part": "read",
     "detection_status": "read",
+    "fabrica_guide": "read",               # ==== agent kit ==== static guides + the kit version; changes nothing
+    # ==== library ==== (listing and details only; nothing here can start a print)
+    "library_list": "read",
+    "library_file": "read",
+    # ==== rename ====
+    "file_facts": "read",                  # facts for choosing a name; cached, a busy printer is never contacted
+    # ==== end rename ====
     # control
     "start_print": "control",
     "cancel_print": "control",
@@ -264,11 +298,19 @@ TOOL_SCOPES = {
     "add_printer": "control",
     "update_printer": "control",
     "remove_printer": "control",
+    "set_printer_groups": "control",
     "update_settings": "control",
     "send_test_notification": "control",
     "list_api_keys": "control",
     "discover_printers": "control",        # scans networks
     "score_snapshot": "control",           # sends a camera picture to the detector
+    # ==== library ====
+    "library_send": "control",             # uploads a library file to idle printers; never starts a print
+    "library_save_from_printer": "control",  # downloads a file from a printer into the library
+    # ==== rename ====
+    "rename_preview": "control",           # validates a batch of renames, issues a single-use ticket; changes nothing
+    "rename_apply": "control",             # needs the ticket + the human's yes; never starts a print
+    # ==== end rename ====
 }
 
 
@@ -1742,7 +1784,8 @@ class AuthManager:
                 return 403, ("request refused: the Host name is not one of this Hub's own names. If you reach the Hub "
                              "by a custom name, add it to BAMBU_MCP_ALLOWED_HOSTS.")
             if method in ("POST", "PUT", "PATCH", "DELETE") and has_body(headers) \
-                    and not is_json_type(headers.get("content-type")):
+                    and not is_json_type(headers.get("content-type")) \
+                    and not is_library_upload(method, path, headers):
                 return 415, "the request body must be JSON (Content-Type: application/json)"
         elif mode != "on" and not self.is_exempt(method, path) and not self.host_ok(headers) \
                 and not self.valid_key(headers):
@@ -2110,6 +2153,20 @@ def same_origin_strict(headers: dict, trust_forwarded: bool = True) -> bool:
 def is_json_type(content_type) -> bool:
     ct = (content_type or "").split(";", 1)[0].strip().lower()
     return ct == "application/json" or (ct.startswith("application/") and ct.endswith("+json"))
+
+
+# ==== library ====
+def is_library_upload(method: str, path: str, headers: dict) -> bool:
+    """The ONE non-JSON write the Hub accepts: a library file upload (PUT /api/library/files/<name>, the file's bytes as
+    the body). It must be sent as application/octet-stream WITH the custom header X-Fabrica-Upload: 1 - a header a
+    cross-site HTML form cannot set (a browser would need a CORS preflight, which the Hub never grants), so the
+    reason for the JSON-only rule (blocking forged form posts) still holds. The same-origin / Host checks above
+    this one apply as usual."""
+    if method.upper() != "PUT" or not path.startswith("/api/library/files/"):
+        return False
+    ct = (headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+    return ct == "application/octet-stream" and headers.get("x-fabrica-upload") == "1"
+# ==== end library ====
 
 
 def has_body(headers: dict) -> bool:

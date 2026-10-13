@@ -1,0 +1,1 @@
+- 2026-10-13: Agent kit added: `fabrica_guide` with topics start, printing, library, history, renaming, changes; kit version in `list_printers`; workflows `print_a_file`, `fleet_status`, `print_history_report`.

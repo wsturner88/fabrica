@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Fabrica</title>
 <link rel="icon" href="/favicon.ico" sizes="any">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
@@ -12,7 +12,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Fabrica">
-<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <style>
   :root {
     --bg:#14161a; --card:#1e2228; --card2:#262c34; --line:#333a44;
@@ -210,7 +210,7 @@
     .cfdlg #spoolgrid button { min-height:56px !important; }
   }
   /* phones: the page is a fixed 1024x600 kiosk layout; below 760px let it flow instead */
-  @media (max-width:760px) {
+  @media (max-width:760px), (orientation:landscape) and (max-height:500px) and (max-width:932px) {
     body { width:auto; height:auto; min-height:100vh; overflow:auto; }
     .screen { height:auto; min-height:100vh; padding:10px; }
     .row { flex-wrap:wrap; }
@@ -329,7 +329,7 @@
   .recent .rn:first-child { border-top:0; }
   .recent .rn small { color:var(--dim); display:block; font-size:13px; }
   a.bkdl { text-decoration:none; }
-  @media (max-width:760px) {
+  @media (max-width:760px), (orientation:landscape) and (max-height:500px) and (max-width:932px) {
     .ctlrow { flex-wrap:wrap; }
     .ctlrow button { flex:1 1 45%; }
     .presetgrid { grid-template-columns:repeat(2,minmax(0,1fr)); }
@@ -361,6 +361,7 @@
   <div class="row"><h1 id="hub-title"><span class="brand"><img src="/static/brand/mark.svg" alt=""><span class="wordmark">fabrica<i>_</i></span></span></h1><span class="grow"></span><span id="vo-chip" class="chip idle" hidden title="This sign-in can look but not change anything">VIEW-ONLY</span><span id="clock" style="color:var(--dim);font-size:18px"></span>
     <button data-ctl onclick="openPrinters()" style="min-height:44px;font-size:16px;padding:8px 14px">Printers</button>
     <button onclick="openHistory()" style="min-height:44px;font-size:16px;padding:8px 14px">History</button>
+    <button onclick="openLibrary()" style="min-height:44px;font-size:16px;padding:8px 14px" title="Every print file on the Hub and the printers">Library</button><!-- ==== library ==== -->
     <button data-ctl onclick="openBackups()" style="min-height:44px;font-size:16px;padding:8px 14px">Backups</button>
     <button data-ctl onclick="openSettings()" style="min-height:44px;font-size:16px;padding:8px 14px">Settings</button>
     <button id="signout-btn" hidden onclick="secSignOut()" style="min-height:44px;font-size:16px;padding:8px 14px" title="Sign this browser out of the dashboard">Sign out</button>
@@ -440,6 +441,35 @@
   </div>
   <div id="hi-body" role="region" aria-label="Print history and costs"></div>
 </section>
+
+<!-- ==== library ==== -->
+<section id="library" class="screen">
+  <div class="row lbtop">
+    <button onclick="show('home')" aria-label="Back to the fleet">&#8592; Fleet</button>
+    <h1>Library</h1>
+    <span id="lb-count" class="chip idle"></span>
+    <span class="grow"></span>
+    <button data-ctl class="primary" data-act="lbUpload" title="Add files from this device to the library">Upload</button>
+    <button data-ctl data-act="lbScan" title="Re-read what the printers hold (a printing Bambu keeps its last list)">Refresh printers</button>
+    <input type="file" id="lb-file" multiple hidden accept=".3mf,.gcode,.bgcode" onchange="lbPicked(this)">
+  </div>
+  <div class="row lbtools">
+    <input id="lb-q" class="lbq" type="search" placeholder="Search names, printers, colours&hellip;" aria-label="Search the library" maxlength="200" oninput="lbSearch(this.value)">
+    <div class="seg lbseg" role="radiogroup" aria-label="View">
+      <button role="radio" id="lb-v-grid" aria-checked="true" data-act="lbView" data-v="grid">Grid</button>
+      <button role="radio" id="lb-v-list" aria-checked="false" data-act="lbView" data-v="list">List</button>
+    </div>
+    <label class="toggle lbhide"><input type="checkbox" id="lb-hide" onchange="lbHide(this.checked)"><span>Hide printer-only files</span></label>
+  </div>
+  <div id="lb-folders" class="lbchips" role="group" aria-label="Folders"></div>
+  <div id="lb-msg" class="lbmsg" role="status" aria-live="polite" hidden></div>
+  <div class="lbmain">
+    <div id="lb-list" role="region" aria-label="Files"></div>
+    <aside id="lb-detail" hidden aria-label="File details"></aside>
+  </div>
+  <div id="lb-bar" class="lbbar" hidden></div>
+</section>
+<!-- ==== end library ==== -->
 
 <div id="camfull">
   <div class="camtop">
@@ -595,6 +625,493 @@ async function bkStart(name){
 </script>
 
 
+<!-- ==== rename ==== -->
+<!-- ===== Rename: a small dialog on a Library file and on each printer file row. It only asks the Hub (rename_preview, then, on the
+     person's tap on Apply, rename_apply with approved_by_human). The Hub knows no naming rules; the person types the name. ===== -->
+<script>
+const RN = { loc:'', old:'', ext:'', ticket:'', busy:false };
+function rnBase(p){ return String(p == null ? '' : p).replace(/\\/g, '/').split('/').pop(); }
+function rnExt(n){
+  n = String(n);
+  if(/\.gcode\.3mf$/i.test(n)) return n.slice(-10);
+  const m = n.match(/\.[A-Za-z0-9]{1,10}$/);
+  return m ? m[0] : '';
+}
+function rnOpen(loc, old){
+  RN.loc = String(loc); RN.old = String(old); RN.ext = rnExt(rnBase(old)); RN.ticket = ''; RN.busy = false;
+  rnForm('', '');
+}
+function rnWhere(){ return RN.loc === 'library' ? 'In the Library' : 'On ' + RN.loc; }
+function rnForm(stem, msg){
+  const base = rnBase(RN.old), cur = RN.ext ? base.slice(0, base.length - RN.ext.length) : base;
+  $('mbody').innerHTML = `<h2>Rename file</h2>
+    <div class="note">${esc(rnWhere())}</div>
+    <div class="note" style="overflow-wrap:anywhere">Now: <b>${esc(base)}</b></div>
+    <div class="row" style="align-items:center;gap:6px;flex-wrap:nowrap"><input id="rn-stem" class="stin" maxlength="200" value="${esc(stem || cur)}" aria-label="New file name" style="flex:1 1 0;min-width:0;margin:0"><span class="chip idle" style="flex:none" title="The extension stays the same">${esc(RN.ext || '(no extension)')}</span></div>
+    <div class="note">The extension stays the same. ${RN.loc === 'library' ? 'The file is renamed inside the Library.' : 'The Hub keeps a copy of the original in the Library, uploads the file under the new name, checks it, and only then deletes the old name. It only works while the printer is idle.'}</div>
+    ${msg ? `<div class="warnbox">${esc(msg)}</div>` : ''}
+    <div class="row" style="margin-top:10px"><button class="big grow" onclick="closeModal()">Cancel</button><button class="big grow primary" data-act="rnPreview">Check</button></div>`;
+  $('modal').classList.add('on');
+}
+async function rnPreview(){
+  const stem = ($('rn-stem') || {}).value || '';
+  const neu = stem + RN.ext;
+  $('mbody').innerHTML = '<h2>Checking…</h2><button class="big" style="width:100%;margin-top:12px" onclick="closeModal()">Cancel</button>';
+  let d;
+  try{
+    d = await api('/api/rename/preview', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({renames:[{location:RN.loc, old_name:RN.old, new_name:neu}]})}, 60000);
+  }catch(e){ rnForm(stem, e.message); return; }
+  const row = (d.table || [])[0] || {};
+  const ok = row.status === 'ok' && d.ticket;
+  RN.ticket = ok ? d.ticket : '';
+  const msgs = (row.problems || []).concat(row.warnings || []).map(n => `<div>${esc(n)}</div>`).join('');
+  $('mbody').innerHTML = `<h2>Check the change</h2>
+    <div class="lbres ${ok ? 'ok' : 'no'}"><b>${ok ? 'OK' : 'PROBLEM'}</b>${esc(rnWhere())}
+      <div>Before: <b>${esc(row.old_name || RN.old)}</b></div><div>After: <b>${esc(row.target || neu)}</b></div>
+      ${msgs}</div>
+    <div class="note">${ok ? 'Tap Apply to rename. Tapping Apply is your approval.' : 'Change the name and check again.'}</div>
+    <div class="row" style="margin-top:10px"><button class="big grow" data-act="rnBack" data-stem="${esc(stem)}">Back</button>
+      ${ok ? '<button class="big grow primary" data-act="rnApply">Apply</button>' : ''}</div>`;
+}
+async function rnApply(){
+  if(!RN.ticket || RN.busy) return;
+  RN.busy = true;
+  $('mbody').innerHTML = '<h2>Renaming…</h2><div class="note">Large files take a while. Please keep this open.</div>';
+  let d;
+  try{
+    d = await api('/api/rename/apply', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ticket:RN.ticket, approved_by_human:true})}, 900000);
+  }catch(e){
+    RN.busy = false; RN.ticket = '';
+    $('mbody').innerHTML = `<h2>Not renamed</h2><div class="lbres no"><b>REFUSED</b>${esc(e.message)}</div>
+      <div class="row" style="margin-top:10px"><button class="big grow" onclick="closeModal()">Close</button></div>`;
+    return;
+  }
+  RN.busy = false; RN.ticket = '';
+  const r = (d.results || [])[0] || {};
+  const good = r.status === 'renamed';
+  const word = {renamed:'RENAMED', refused:'REFUSED', failed:'FAILED', skipped:'SKIPPED'}[r.status] || String(r.status || '').toUpperCase();
+  $('mbody').innerHTML = `<h2>${good ? 'Renamed' : 'Not renamed'}</h2>
+    <div class="lbres ${good ? 'ok' : 'no'}"><b>${esc(word)}</b>${esc(r.message || '')}</div>
+    <div class="row" style="margin-top:10px"><button class="big grow primary" onclick="closeModal()">Close</button></div>`;
+  if($('library').classList.contains('on')){ LB.open = null; lbLoad(); }
+  else if(RN.loc !== 'library' && typeof CUR !== 'undefined' && CUR === RN.loc) loadFiles(false);
+}
+const RN_ACT = {
+  rnOpenFile: b => rnOpen(b.dataset.loc, b.dataset.f),
+  rnOpenLb:   b => { const r = lbRow(b.dataset.id); if(!r) return; if(r.in_library) rnOpen('library', r.name); else if(r.on.length) rnOpen(r.on[0].printer, r.on[0].path); },
+  rnPreview:  () => rnPreview(),
+  rnBack:     b => rnForm(b.dataset.stem || '', ''),
+  rnApply:    () => rnApply(),
+};
+</script>
+<!-- ==== end rename ==== -->
+
+<!-- ==== library ==== -->
+<!-- ===== Global File Library: every print file on the Hub and on the printers in one place (server side: app/library.py + the library block in server.py) ===== -->
+<style>
+  #library { padding-bottom:10px; }
+  .lbtop { flex:none; flex-wrap:nowrap; gap:8px; }
+  .lbtop h1 { white-space:nowrap; }
+  .lbtop button { min-height:44px; font-size:15px; padding:6px 12px; white-space:nowrap; }
+  .lbtools { flex:none; margin-top:8px; gap:8px; flex-wrap:nowrap; }
+  .lbq { flex:1 1 0; min-width:0; font-family:inherit; font-size:17px; min-height:44px; padding:6px 12px; border-radius:12px;
+         border:1px solid var(--line); background:#0d0f12; color:var(--txt); -webkit-user-select:text; user-select:text; }
+  .lbseg { margin-top:0; flex:none; flex-wrap:nowrap; gap:4px; }
+  .lbseg button { min-width:0; flex:none; min-height:44px; font-size:15px; padding:6px 12px; }
+  .lbhide { flex:none; margin:0; padding:6px 10px; min-height:44px; font-size:15px; }
+  .lbhide input { width:22px; height:22px; }
+  .lbchips { flex:none; display:flex; gap:6px; margin-top:8px; overflow-x:auto; overflow-y:hidden; padding-bottom:2px; touch-action:pan-x; }
+  .lbchips:empty { display:none; }
+  .lbchips button { flex:none; min-height:40px; font-size:15px; padding:4px 14px; border-radius:20px; white-space:nowrap; }
+  .lbchips button[aria-pressed="true"] { background:var(--sel); border:2px solid var(--accent); font-weight:800; }
+  .lbchips button[aria-pressed="true"]::before { content:"\2714  "; }
+  .lbmsg { flex:none; margin-top:6px; padding:6px 12px; border-radius:10px; font-size:15px; background:var(--card2);
+           border:1px solid var(--line); overflow-wrap:anywhere; }
+  .lbmsg.bad { border-color:var(--bad); border-width:2px; }
+  .lbmsg.bad::before { content:"\26A0  "; }
+  .lbmain { flex:1; min-height:0; display:flex; gap:10px; margin-top:8px; }
+  #lb-list { flex:1 1 0; min-width:0; overflow-y:auto; overflow-x:hidden; overscroll-behavior:contain; -webkit-overflow-scrolling:touch;
+             touch-action:pan-y; padding:2px 4px 8px 2px; align-content:start; }
+  #lb-list.grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:8px; }
+  #lb-detail { flex:none; width:340px; max-width:100%; overflow-y:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch;
+               background:var(--card); border:1px solid var(--line); border-radius:12px; padding:10px 12px; touch-action:pan-y; }
+  .lbcard { position:relative; background:var(--card); border:2px solid var(--line); border-radius:12px; padding:6px; min-width:0; cursor:pointer; }
+  .lbcard.on { border-color:var(--accent); }
+  .lbcard.sel { background:var(--sel); border-color:var(--accent); }
+  .lbth { display:block; width:100%; aspect-ratio:1/1; max-height:110px; object-fit:contain; background:#0d0f12; border-radius:8px; }
+  .lbth.ph { border:1px dashed var(--line); }
+  .lbn { font-size:15px; font-weight:700; line-height:1.2; margin-top:4px; overflow-wrap:anywhere; max-height:2.4em; overflow:hidden; }
+  .lbm { font-size:13px; color:var(--dim); line-height:1.25; overflow-wrap:anywhere; }
+  .lbwhere { font-size:12px; line-height:1.3; margin-top:2px; overflow-wrap:anywhere; }
+  .lbck { position:absolute; top:4px; left:4px; width:44px; height:44px; min-height:44px; padding:0; border-radius:10px; font-size:22px; line-height:1;
+          background:rgba(20,22,26,.85); border:2px solid var(--dim); }
+  .lbcard.sel .lbck { background:var(--accent-bg); border-color:var(--txt); }
+  #lb-list.list { display:block; }
+  #lb-list.list .lbcard { display:flex; align-items:center; gap:10px; margin-bottom:6px; padding:5px 8px 5px 5px; }
+  #lb-list.list .lbck { position:static; flex:none; }
+  #lb-list.list .lbth { width:44px; height:44px; max-height:44px; flex:none; }
+  #lb-list.list .lbtxt { flex:1 1 0; min-width:0; }
+  #lb-list.list .lbn { margin-top:0; max-height:none; }
+  #lb-list.list .lbwhere { margin:0; max-width:40%; text-align:right; }
+  .lbbar { flex:none; display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:8px; padding:6px 10px; background:var(--card2);
+           border:2px solid var(--accent); border-radius:12px; }
+  .lbbar button { min-height:44px; font-size:15px; padding:6px 14px; }
+  .lbbar b { font-size:16px; }
+  #lb-detail h2 { font-size:18px; overflow-wrap:anywhere; margin:6px 0; -webkit-user-select:text; user-select:text; }
+  #lb-detail .lbth { max-height:120px; }
+  .lbdl { display:grid; grid-template-columns:max-content minmax(0,1fr); gap:3px 10px; font-size:14px; margin:8px 0; }
+  .lbdl dt { color:var(--dim); } .lbdl dd { margin:0; overflow-wrap:anywhere; -webkit-user-select:text; user-select:text; }
+  .lbfil { font-size:14px; margin:2px 0; overflow-wrap:anywhere; }
+  .lbact { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; }
+  .lbact button, .lbact a { min-height:44px; font-size:15px; padding:6px 12px; }
+  a.lbdlbtn { display:inline-flex; align-items:center; color:var(--txt); background:var(--card2); border:1px solid var(--line);
+              border-radius:12px; font-weight:600; text-decoration:none; }
+  .lbempty { text-align:center; padding:26px 12px; color:var(--dim); font-size:17px; grid-column:1 / -1; }
+  .lbsend { display:block; width:100%; text-align:left; margin-bottom:6px; min-height:56px; }
+  .lbsend[aria-pressed="true"] { background:var(--sel); border:2px solid var(--accent); }
+  .lbsend[aria-pressed="true"]::before { content:"\2714  "; }
+  .lbsend small { display:block; font-weight:400; color:var(--dim); font-size:13px; }
+  .lbres { border:1px solid var(--line); border-radius:10px; padding:6px 10px; margin:6px 0; font-size:15px; overflow-wrap:anywhere; }
+  .lbres b { margin-right:6px; }
+  .lbres.ok { border-left:6px solid var(--accent); }
+  .lbres.no { border-left:6px solid var(--warn); }
+  .lbpickbox { max-height:48vh; overflow-y:auto; }
+  @media (max-width:760px), (orientation:landscape) and (max-height:500px) and (max-width:932px) {
+    #library.on { padding:10px; }
+    .lbtop, .lbtools { flex-wrap:wrap; }
+    .lbtools .lbq { flex:1 1 100%; }
+    .lbmain { display:block; }
+    #lb-list { max-height:none; overflow:visible; }
+    #lb-list.grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
+    #lb-detail { position:fixed; left:0; right:0; bottom:0; width:auto; max-height:78vh; z-index:15; border-radius:16px 16px 0 0; box-shadow:0 -8px 24px rgba(0,0,0,.6); }
+    .lbbar { position:sticky; bottom:0; z-index:16; }
+    #lb-list.list .lbwhere { max-width:none; text-align:left; }
+  }
+</style>
+<script>
+const LB = { rows:[], folders:[], printers:[], limits:{max_file_mb:500}, counts:null, q:'', folder:'', hide:false, view:'grid', sel:new Set(),
+             open:null, msg:null, del:'', delTimer:null, timer:null, qTimer:null, seq:0, busy:false, send:null, loaded:false };
+try{ LB.view = localStorage.getItem('lbView') === 'list' ? 'list' : 'grid'; LB.hide = localStorage.getItem('lbHide') === '1'; }catch(e){ /* per-viewer extras only */ }
+
+function lbSize(n){ n = Number(n) || 0; return n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB'; }
+function lbLeave(){ clearTimeout(LB.timer); clearTimeout(LB.qTimer); lbDelReset(); }
+function lbSay(kind, text){ LB.msg = text ? {kind, text} : null; const m = $('lb-msg'); m.hidden = !LB.msg; m.className = 'lbmsg' + (LB.msg && kind === 'bad' ? ' bad' : ''); m.textContent = LB.msg ? LB.msg.text : ''; }
+const lbRow = id => LB.rows.find(r => r.id === id) || null;
+const lbSelRows = () => LB.rows.filter(r => LB.sel.has(r.id));
+
+async function openLibrary(){
+  LB.open = null; LB.sel.clear(); lbSay('', '');
+  $('lb-q').value = LB.q; $('lb-hide').checked = LB.hide;
+  $('lb-detail').hidden = true; $('lb-bar').hidden = true;
+  show('library');
+  lbViewBtns();
+  $('lb-list').innerHTML = '<div class="lbempty">Loading the library&hellip;</div>';
+  await lbLoad();
+}
+
+async function lbLoad(){
+  clearTimeout(LB.timer);
+  if(LB.busy) return;
+  LB.busy = true;
+  const mine = ++LB.seq;
+  try{
+    const d = await api('/api/library?q=' + pu(LB.q) + '&folder=' + pu(LB.folder) + '&hide_printer_only=' + (LB.hide ? '1' : '0'), {}, 30000);
+    if(mine === LB.seq && $('library').classList.contains('on')){
+      LB.rows = d.rows || []; LB.folders = d.folders || []; LB.printers = d.printers || []; LB.counts = d.counts || null;
+      LB.limits = d.limits || LB.limits; LB.loaded = true;
+      const ids = new Set(LB.rows.map(r => r.id));
+      LB.sel.forEach(id => { if(!ids.has(id)) LB.sel.delete(id); });
+      if(LB.open && !ids.has(LB.open)) LB.open = null;
+      lbRender();
+    }
+  }catch(e){
+    if($('library').classList.contains('on') && !LB.loaded) $('lb-list').innerHTML = '<div class="lbempty">Could not read the library: ' + esc(e.message) + '</div>';
+    else if($('library').classList.contains('on')) lbSay('bad', 'Could not refresh the library: ' + e.message);
+  }
+  LB.busy = false;
+  if($('library').classList.contains('on')) LB.timer = setTimeout(() => { if(!document.hidden) lbLoad(); else LB.timer = setTimeout(lbLoad, 5000); }, 15000);
+}
+
+function lbSearch(v){ LB.q = String(v || ''); clearTimeout(LB.qTimer); LB.qTimer = setTimeout(lbLoad, 250); }
+function lbHide(on){ LB.hide = !!on; try{ localStorage.setItem('lbHide', on ? '1' : '0'); }catch(e){} lbLoad(); }
+function lbViewBtns(){
+  $('lb-v-grid').setAttribute('aria-checked', LB.view === 'grid' ? 'true' : 'false');
+  $('lb-v-list').setAttribute('aria-checked', LB.view === 'list' ? 'true' : 'false');
+}
+
+function lbWhere(r){
+  const on = r.printers.length ? 'on: ' + r.printers.join(', ') : '';
+  return [on, r.in_library ? 'in library ✓' : 'printer only'].filter(Boolean).join(' · ');
+}
+function lbBits(r){
+  const fil = r.filaments.map(f => f.color_name + ' ' + f.type).join(' + ');
+  return [r.print_time, r.weight_g ? Math.round(r.weight_g) + ' g' : '', fil].filter(Boolean).join(' · ') || (r.details_error ? 'details unreadable' : 'no details yet');
+}
+
+function lbRender(){
+  const c = LB.counts || {library:0, printer_only:0};
+  $('lb-count').textContent = c.library + ' in library' + (c.printer_only ? ' · ' + c.printer_only + ' printer-only' : '');
+  // folders
+  const chips = [['', 'All']].concat(LB.folders.map(f => [f, f]));
+  $('lb-folders').innerHTML = chips.map(x => `<button data-act="lbFolder" data-f="${esc(x[0])}" aria-pressed="${x[0] === LB.folder ? 'true' : 'false'}">${esc(x[1])}</button>`).join('')
+    + `<button data-ctl data-act="lbNewFolder">+ New folder</button>`;
+  // files
+  const l = $('lb-list');
+  l.className = LB.view === 'list' ? 'list' : 'grid';
+  if(!LB.rows.length){
+    const why = LB.q ? 'Nothing matches that search.' : (LB.folder ? 'This folder is empty.' : (LB.hide ? 'No files in the library yet. Upload some, or untick "Hide printer-only files".' : 'No files yet. Upload one, or open a printer to see its files here.'));
+    l.innerHTML = `<div class="lbempty">${esc(why)}${LB.folder && !LB.q ? '<br><button data-ctl data-act="lbDelFolder" style="margin-top:10px">Remove this folder</button>' : ''}</div>`;
+  } else {
+    l.innerHTML = LB.rows.map(r => {
+      const sel = LB.sel.has(r.id);
+      const th = r.thumb_url ? `<img class="lbth" src="${esc(safeHref(r.thumb_url))}" alt="plate preview" loading="lazy">` : `<div class="lbth ph"></div>`;
+      return `<div class="lbcard${sel ? ' sel' : ''}${LB.open === r.id ? ' on' : ''}" data-act="lbOpen" data-id="${esc(r.id)}">
+        <button class="lbck" data-act="lbSel" data-id="${esc(r.id)}" aria-pressed="${sel ? 'true' : 'false'}" aria-label="Select ${esc(r.name)}">${sel ? '✔' : ''}</button>
+        ${th}<div class="lbtxt"><div class="lbn">${esc(r.name)}</div><div class="lbm">${esc(lbBits(r))}</div></div>
+        <div class="lbwhere">${esc(lbWhere(r))}</div></div>`;
+    }).join('');
+  }
+  lbDetail();
+  lbBar();
+}
+
+function lbDetail(){
+  const d = $('lb-detail'), r = LB.open ? lbRow(LB.open) : null;
+  if(!r){ d.hidden = true; d.innerHTML = ''; return; }
+  const row = (k, v) => (v === null || v === undefined || v === '') ? '' : `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`;
+  const temps = [r.nozzle_temp != null ? 'nozzle ' + r.nozzle_temp + '°C' : '', r.bed_temp != null ? 'bed ' + r.bed_temp + '°C' : ''].filter(Boolean).join(', ');
+  const sup = r.supports === true ? 'yes' : (r.supports === false ? 'no' : '');
+  const fil = r.filaments.length ? r.filaments.map(f => `<div class="lbfil"><b>${esc(f.color_name)}</b> ${esc(f.type)}${f.used_g ? ' — ' + esc(Math.round(f.used_g * 10) / 10) + ' g' : ''}${f.nozzle_temp ? ' · ' + esc(f.nozzle_temp) + '°C' : ''}</div>`).join('') : '<div class="lbfil">not known</div>';
+  const th = r.thumb_url ? `<img class="lbth" src="${esc(safeHref(r.thumb_url))}" alt="plate preview">` : `<div class="lbth ph" style="height:110px"></div>`;
+  const folderOpts = ['<option value="">(no folder)</option>'].concat(LB.folders.map(f => `<option value="${esc(f)}"${f === r.folder ? ' selected' : ''}>${esc(f)}</option>`)).join('');
+  const prints = r.printers.map(p => `<button data-ctl class="primary" data-act="lbPrint" data-printer="${esc(p)}" data-fname="${esc(r.on.find(o => o.printer === p).path)}">Print on ${esc(p)}&hellip;</button>`).join('');
+  const dlHref = safeHref('/api/library/files/' + pu(r.name) + '/download');
+  d.hidden = false;
+  d.innerHTML = `<div class="row"><span class="chip ${r.in_library ? 'run' : 'idle'}">${r.in_library ? 'IN LIBRARY ✓' : 'PRINTER ONLY'}</span><span class="grow"></span><button data-act="lbCloseDetail" aria-label="Close details" style="min-height:44px">Close</button></div>
+    ${th}<h2>${esc(r.name)}</h2>
+    <div class="lbact">
+      ${r.in_library ? `<a class="lbdlbtn" href="${esc(dlHref)}" download>Download</a>` : `<button data-ctl class="primary" data-act="lbSave" data-id="${esc(r.id)}">Save to library</button>`}
+      ${r.in_library ? `<button data-ctl data-act="lbSendOne" data-id="${esc(r.id)}">Send to&hellip;</button>` : ''}
+      <button data-ctl data-act="rnOpenLb" data-id="${esc(r.id)}">Rename&hellip;</button>
+      ${prints}
+      ${r.in_library ? `<button data-ctl class="danger" data-act="lbDelOne" data-id="${esc(r.id)}">${LB.del === 'one:' + r.id ? 'Tap again to delete' : 'Delete'}</button>` : ''}
+    </div>
+    ${r.in_library ? `<div class="row" data-ctl style="margin-top:8px"><select id="lb-move" aria-label="Folder" class="stin" style="margin:0;min-height:44px;font-size:15px">${folderOpts}</select><button data-ctl data-act="lbMove" data-id="${esc(r.id)}">Move</button></div>` : ''}
+    <dl class="lbdl">${row('Print time', r.print_time)}${row('Weight', r.weight_g ? Math.round(r.weight_g * 10) / 10 + ' g' : '')}${row('Layer height', r.layer_height != null ? r.layer_height + ' mm' : '')}
+      ${row('Layers', r.layers)}${row('Nozzle', r.nozzle != null ? r.nozzle + ' mm' : '')}${row('Temperatures', temps)}${row('Infill', r.infill)}${row('Supports', sup)}
+      ${row('Slicer', r.slicer)}${row('Sliced for', r.sliced_for)}${row('Parts', r.parts)}${row('Size', lbSize(r.size))}${row('Folder', r.folder)}${row('Added', r.added ? r.added.replace('T', ' ').replace('Z', ' UTC') : '')}
+      ${row('Source', r.source)}${row('On printers', r.printers.join(', '))}</dl>
+    ${r.details_error ? `<div class="note">Details: ${esc(r.details_error)}</div>` : ''}
+    ${r.in_library ? '' : '<div class="note">Printer-only: save it to the library to keep it and see every detail.</div>'}
+    <b style="font-size:14px">Filament</b>${fil}`;
+}
+
+function lbBar(){
+  const b = $('lb-bar'), rows = lbSelRows();
+  if(!rows.length){ b.hidden = true; b.innerHTML = ''; return; }
+  const inLib = rows.filter(r => r.in_library), only = rows.filter(r => !r.in_library);
+  b.hidden = false;
+  b.innerHTML = `<b>${rows.length} selected</b><span class="grow"></span>
+    ${inLib.length ? `<button data-act="lbDownload">Download</button><button data-ctl class="primary" data-act="lbSendSel">Send to&hellip;</button>` : ''}
+    ${only.length ? `<button data-ctl class="primary" data-act="lbSaveSel">Save to library</button>` : ''}
+    ${inLib.length ? `<button data-ctl class="danger" data-act="lbDelSel">${LB.del === 'sel' ? 'Tap again: delete ' + inLib.length : 'Delete'}</button>` : ''}
+    <button data-act="lbClear">Clear</button>`;
+}
+
+function lbDelReset(){ clearTimeout(LB.delTimer); if(LB.del){ LB.del = ''; try{ lbDetail(); lbBar(); }catch(e){} } }
+function lbDelArm(what){ LB.del = what; clearTimeout(LB.delTimer); LB.delTimer = setTimeout(lbDelReset, 4000); lbDetail(); lbBar(); }
+
+// ---- actions
+function lbSelToggle(id){ if(LB.sel.has(id)) LB.sel.delete(id); else LB.sel.add(id); lbDelReset(); lbRender(); }
+
+async function lbUpload(){ $('lb-file').click(); }
+async function lbPicked(inp){
+  const files = Array.from(inp.files || []); inp.value = '';
+  if(!files.length) return;
+  const cap = (LB.limits.max_file_mb || 500) * 1048576, notes = [];
+  let ok = 0;
+  for(let i = 0; i < files.length; i++){
+    const f = files[i];
+    lbSay('', 'Uploading ' + (i + 1) + ' of ' + files.length + ': ' + f.name + ' (' + lbSize(f.size) + ')…');
+    if(f.size > cap){ notes.push(f.name + ': larger than the ' + LB.limits.max_file_mb + ' MB limit'); continue; }
+    try{
+      await api('/api/library/files/' + pu(f.name) + '?folder=' + pu(LB.folder), {method:'PUT',
+        headers:{'Content-Type':'application/octet-stream', 'X-Fabrica-Upload':'1'}, body:f}, 900000);
+      ok++;
+    }catch(e){ notes.push(f.name + ': ' + e.message); }
+  }
+  lbSay(notes.length ? 'bad' : 'ok', (ok ? 'Uploaded ' + ok + ' file' + (ok === 1 ? '' : 's') + '. ' : '') + notes.join(' · '));
+  await lbLoad();
+}
+
+async function lbScan(){
+  lbSay('', 'Reading the printers’ file lists…');
+  try{
+    const d = await api('/api/library/scan', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'}, 120000);
+    const bad = (d.printers || []).filter(p => !p.ok).map(p => p.printer + ': ' + p.error);
+    const skipped = (d.printers || []).filter(p => p.skipped).map(p => p.printer + ' is busy (last list kept)');
+    lbSay(bad.length ? 'bad' : 'ok', 'Printers re-read. ' + skipped.join('; ') + (bad.length ? ' ' + bad.join('; ') : ''));
+  }catch(e){ lbSay('bad', e.message); }
+  setTimeout(lbLoad, 4000);       // the background preview/details pass fills in a few seconds later
+  await lbLoad();
+}
+
+function lbDownloadRows(rows){
+  rows.forEach((r, i) => setTimeout(() => {
+    const a = document.createElement('a');
+    a.href = safeHref('/api/library/files/' + pu(r.name) + '/download'); a.download = r.name;
+    document.body.appendChild(a); a.click(); a.remove();
+  }, i * 500));
+}
+
+async function lbSaveRows(rows){
+  let ok = 0; const notes = [];
+  for(const r of rows){
+    const src = r.on[0];
+    lbSay('', 'Saving ' + r.name + ' from ' + src.printer + '…');
+    try{ await api('/api/library/save', {method:'POST', headers:{'Content-Type':'application/json'},
+           body: JSON.stringify({printer:src.printer, filename:src.path, folder:LB.folder})}, 300000); ok++; }
+    catch(e){ notes.push(r.name + ': ' + e.message); }
+  }
+  lbSay(notes.length ? 'bad' : 'ok', (ok ? 'Saved ' + ok + ' file' + (ok === 1 ? '' : 's') + ' to the library. ' : '') + notes.join(' · '));
+  LB.sel.clear();
+  await lbLoad();
+}
+
+async function lbDeleteRows(rows){
+  let ok = 0; const notes = [];
+  for(const r of rows.filter(x => x.in_library)){
+    try{ await api('/api/library/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({name:r.name, confirm:r.name})}); ok++; }
+    catch(e){ notes.push(r.name + ': ' + e.message); }
+    LB.sel.delete(r.id);
+  }
+  LB.open = null; lbDelReset();
+  lbSay(notes.length ? 'bad' : 'ok', (ok ? 'Deleted ' + ok + ' file' + (ok === 1 ? '' : 's') + ' from the library (printers are not touched). ' : '') + notes.join(' · '));
+  await lbLoad();
+}
+
+// ---- send to printers (an upload; it never starts a print)
+function lbSendOpen(rows){
+  const files = rows.filter(r => r.in_library);
+  if(!files.length){ lbSay('bad', 'Only library files can be sent. Save a printer-only file to the library first.'); return; }
+  LB.send = {names: files.map(r => r.name), results: [], pick: new Set(), busy: false};
+  lbSendRender();
+  $('modal').classList.add('on');
+}
+function lbSendRender(){
+  const S = LB.send;
+  const sub = S.names.length === 1 ? S.names[0] : S.names.length + ' files';
+  const list = LB.printers.map(p => {
+    const why = !p.can_receive ? 'cannot receive files from the Hub yet' : (!p.idle ? 'busy: ' + (p.state || 'not connected') + ' — not sent to' : 'idle — ready');
+    const ok = p.can_receive && p.idle, on = S.pick.has(p.name);
+    return `<button class="lbsend" data-act="lbPickPrinter" data-printer="${esc(p.name)}" aria-pressed="${on ? 'true' : 'false'}" ${ok ? '' : 'disabled'}>
+      <b>${esc(p.name)}</b> <small>${esc(p.model || '')}${p.model ? ' · ' : ''}${esc(why)}</small></button>`;
+  }).join('') || '<div class="note">No printers added yet.</div>';
+  let res = '';
+  if(S.results.length){
+    res = '<h2 style="margin-top:12px">Result</h2>' + S.results.map(x => {
+      const good = x.ok;
+      const word = {sent:'SENT', already_there:'ALREADY THERE', refused:'NOT SENT', failed:'FAILED'}[x.status] || String(x.status || '').toUpperCase();
+      const over = x.code === 'model_mismatch' ? `<div class="toggle" style="border:2px solid var(--bad);font-size:16px;margin:6px 0"><input type="checkbox" class="lbov" data-printer="${esc(x.printer)}" data-fname="${esc(x.name)}" id="lbov-${esc(S.results.indexOf(x))}"><label for="lbov-${esc(S.results.indexOf(x))}">I know this file is safe on ${esc(x.printer)}</label></div>` : '';
+      const pr = good ? `<button class="primary" data-act="lbPrintSent" data-printer="${esc(x.printer)}" data-fname="${esc(x.name)}">Open the start-print confirm&hellip;</button>` : '';
+      return `<div class="lbres ${good ? 'ok' : 'no'}"><b>${esc(word)}</b>${esc(x.printer)} &middot; ${esc(x.name)}<div>${esc(x.reason || '')}</div>${over}${pr}</div>`;
+    }).join('');
+    if(S.results.some(x => x.code === 'model_mismatch')) res += '<button class="big" data-act="lbOverride" style="width:100%;margin-top:6px">Send the ticked ones anyway</button>';
+    res += '<div class="note">Sending does not start anything. To print, open the start-print confirm: it still asks for the spool and for you to confirm the bed is clear.</div>';
+  }
+  $('mbody').innerHTML = `<h2>Send to printers</h2><div class="note" style="overflow-wrap:anywhere">${esc(sub)}. Only idle printers accept a file.</div>
+    <div class="lbpickbox">${list}</div>${res}
+    <div class="row" style="margin-top:10px"><button class="big grow" onclick="closeModal()">Close</button>
+      <button class="big grow primary" data-act="lbSendGo" ${S.busy ? 'disabled' : ''}>${S.busy ? 'Sending…' : 'Send'}</button></div>`;
+}
+async function lbSendGo(over){
+  const S = LB.send; if(!S || S.busy) return;
+  const printers = Array.from(S.pick);
+  if(!printers.length){ return; }
+  S.busy = true; lbSendRender();
+  try{
+    const d = await api('/api/library/send', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({names:S.names, printers, model_override: false})}, 600000);
+    S.results = d.results || [];
+  }catch(e){ S.results = [{ok:false, status:'failed', printer:'', name:'', reason:e.message}]; }
+  S.busy = false; lbSendRender(); lbScanQuiet();
+}
+async function lbOverride(){
+  const S = LB.send; if(!S || S.busy) return;
+  const ticked = Array.from(document.querySelectorAll('.lbov:checked')).map(c => ({printer:c.dataset.printer, name:c.dataset.fname}));
+  if(!ticked.length) return;
+  S.busy = true; lbSendRender();
+  for(const t of ticked){
+    try{
+      const d = await api('/api/library/send', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({names:[t.name], printers:[t.printer], model_override:true})}, 600000);
+      const nr = (d.results || [])[0];
+      S.results = S.results.map(x => (x.printer === t.printer && x.name === t.name) ? (nr || x) : x);
+    }catch(e){ S.results = S.results.map(x => (x.printer === t.printer && x.name === t.name) ? {...x, reason:e.message} : x); }
+  }
+  S.busy = false; lbSendRender(); lbScanQuiet();
+}
+function lbScanQuiet(){ setTimeout(lbLoad, 500); }
+function lbPrintHandoff(printer, fname){
+  // hand off to the EXISTING start flow: the printer's page + the start-print confirm (ticket, bed-clear tick, spool mapping)
+  closeModal();
+  openPrinter(printer);
+  askPrint(fname);
+}
+
+const LB_ACT = {
+  lbOpen:   b => { LB.open = (LB.open === b.dataset.id) ? null : b.dataset.id; lbDelReset(); lbRender(); },
+  lbSel:    b => lbSelToggle(b.dataset.id),
+  lbCloseDetail: () => { LB.open = null; lbRender(); },
+  lbView:   b => { LB.view = b.dataset.v === 'list' ? 'list' : 'grid'; try{ localStorage.setItem('lbView', LB.view); }catch(e){} lbViewBtns(); lbRender(); },
+  lbFolder: b => { LB.folder = b.dataset.f; LB.open = null; lbLoad(); },
+  lbUpload: () => lbUpload(),
+  lbScan:   () => lbScan(),
+  lbClear:  () => { LB.sel.clear(); lbDelReset(); lbRender(); },
+  lbDownload: () => lbDownloadRows(lbSelRows().filter(r => r.in_library)),
+  lbSendSel: () => lbSendOpen(lbSelRows()),
+  lbSendOne: b => { const r = lbRow(b.dataset.id); if(r) lbSendOpen([r]); },
+  lbSaveSel: () => lbSaveRows(lbSelRows().filter(r => !r.in_library)),
+  lbSave:   b => { const r = lbRow(b.dataset.id); if(r) lbSaveRows([r]); },
+  lbDelSel: () => { if(LB.del === 'sel') lbDeleteRows(lbSelRows()); else lbDelArm('sel'); },
+  lbDelOne: b => { if(LB.del === 'one:' + b.dataset.id){ const r = lbRow(b.dataset.id); if(r) lbDeleteRows([r]); } else lbDelArm('one:' + b.dataset.id); },
+  lbMove:   async b => {
+    const r = lbRow(b.dataset.id); if(!r) return;
+    try{ await api('/api/library/folder', {method:'POST', headers:{'Content-Type':'application/json'},
+           body: JSON.stringify({action:'move', name:r.name, folder:$('lb-move').value})}); lbSay('ok', 'Moved.'); }
+    catch(e){ lbSay('bad', e.message); }
+    await lbLoad();
+  },
+  lbNewFolder: () => {
+    $('mbody').innerHTML = `<h2>New folder</h2><div class="note">One level of folders. Files can be moved into it from their details.</div>
+      <input id="lb-newfolder" class="stin" maxlength="40" placeholder="Folder name" aria-label="Folder name">
+      <div class="row" style="margin-top:10px"><button class="big grow" onclick="closeModal()">Cancel</button>
+      <button class="big grow primary" data-act="lbFolderCreate">Create</button></div>`;
+    $('modal').classList.add('on');
+  },
+  lbFolderCreate: async () => {
+    const v = $('lb-newfolder').value;
+    try{ const d = await api('/api/library/folder', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({action:'create', folder:v})});
+         closeModal(); LB.folder = (d.folders || []).find(f => f.toLowerCase() === String(v).trim().toLowerCase()) || ''; lbSay('ok', 'Folder created.'); }
+    catch(e){ closeModal(); lbSay('bad', e.message); }
+    await lbLoad();
+  },
+  lbDelFolder: async () => {
+    try{ await api('/api/library/folder', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({action:'delete', folder:LB.folder})}); LB.folder = ''; lbSay('ok', 'Folder removed.'); }
+    catch(e){ lbSay('bad', e.message); }
+    await lbLoad();
+  },
+  lbPickPrinter: b => { const S = LB.send; if(!S) return; const p = b.dataset.printer; if(S.pick.has(p)) S.pick.delete(p); else S.pick.add(p); lbSendRender(); },
+  lbSendGo: () => lbSendGo(),
+  lbOverride: () => lbOverride(),
+  lbPrint:  b => lbPrintHandoff(b.dataset.printer, b.dataset.fname),
+  lbPrintSent: b => lbPrintHandoff(b.dataset.printer, b.dataset.fname),
+};
+</script>
+<!-- ==== end library ==== -->
+
 <!-- ===== printer management UI: full-screen Printers page - fleet list, Discover, Add wizard, Edit, Remove (server side: fleet_store.py, discovery.py) ===== -->
 <style>
   #printers { padding-bottom:10px; }
@@ -690,7 +1207,7 @@ async function bkStart(name){
   .dc-tips ul { margin:6px 0 0 20px; font-size:16px; line-height:1.45; color:var(--txt); }
   .dc-tips li { margin-bottom:6px; }
   .dc-tips > b { font-size:18px; }
-  @media (max-width:760px) {
+  @media (max-width:760px), (orientation:landscape) and (max-height:500px) and (max-width:932px) {
     #printers.on { padding:10px; }
     #pr-body { overflow:visible; }
     .pr-grid, .pm-fields { grid-template-columns:minmax(0,1fr); }
@@ -782,6 +1299,7 @@ function pmRenderList(){
       <div class="bkhead"><b>${pmEsc(p.name)}</b><span class="chip ${cls}">${pmEsc(word)}</span>
         <span class="chip idle" style="font-size:13px">${pmEsc(p.type_label)}</span></div>
       <div class="bkinfo">${pmEsc(p.address || 'no address')}${p.model ? ' &middot; ' + pmEsc(p.model) : ''}${sec ? ' &middot; ' + pmEsc(sec) : ''}</div>
+      ${pgRowHtml(p)}
       <div class="bkbtns">
         <button data-name="${pmEsc(p.name)}" onclick="pmEdit(this.dataset.name)">Edit</button>
         <button class="danger" data-name="${pmEsc(p.name)}" onclick="pmAskRemove(this.dataset.name)">Remove</button>
@@ -791,7 +1309,8 @@ function pmRenderList(){
     ${rows ? `<div class="pr-grid">${rows}</div>` : `<div class="pr-empty"><h2>No printers yet</h2>
       <p>Add one by typing its address, or let the Hub look for printers on your network.</p>
       <div class="row"><button class="big primary" onclick="pmAddStart()">Add printer</button>
-        <button class="big" onclick="pmDiscover()">Discover printers</button></div></div>`}`;
+        <button class="big" onclick="pmDiscover()">Discover printers</button></div></div>`}
+    ${pgSectionHtml()}`;
   const sig = JSON.stringify([PM.view, body]);
   if(sig === PM.sig) return;                       // nothing changed: do not touch the DOM (keeps taps and scroll steady)
   const keep = pmPage('Printers', PM_HEAD_LIST, body);
@@ -1043,6 +1562,7 @@ function pmForm(typeKey, existing, draft){
   const src = draft || (existing ? existing.values : {});
   const fields = fam.fields.map(f => pmField(f, f.name === 'name' && existing ? existing.name : (src[f.name] != null ? src[f.name] : (f.default || '')), existing)).join('');
   const f = existing ? null : PM.found;
+  pgInit(existing, draft);
   const banner = f ? `<div class="pmres"><span class="chip idle">FOUND</span><span>Found on your network: ${pmEsc(f.model || f.label)} at ${pmEsc(f.address)}.
       The details are filled in &mdash; type the ${pmEsc(PM_SECRET_WORD[typeKey] || 'secret')} below, then test the connection.</span></div>` : '';
   pmPage(existing ? 'Edit ' + existing.name : 'Add a ' + fam.label + ' printer', pmBtn('Back', 'pmFormBack()'), `
@@ -1051,6 +1571,7 @@ function pmForm(typeKey, existing, draft){
     ${pmGuideHtml(fam, !existing && !pmGuideSeen(typeKey))}
     <form id="pm-form" onsubmit="pmTest();return false" autocomplete="off">
       <div class="pm-fields">${fields}</div>
+      ${pgFieldHtml()}
       <div class="pm-foot">
         <div id="pm-result" role="status" aria-live="polite"></div>
         <div class="row">
@@ -1060,6 +1581,7 @@ function pmForm(typeKey, existing, draft){
       </div>
     </form>`);
   if(!existing) pmGuideSeen(typeKey, true);      // open by default the first time only
+  pgRender();
   pmSync();
 }
 
@@ -1101,7 +1623,7 @@ async function pmTest(){
 
 async function pmSave(skip, force){
   if(PM.saving || PM.testing) return;
-  const editing = !!PM.editName, values = pmCollect(); PM.draft = values;
+  const editing = !!PM.editName, values = pmCollect(); values.groups = (PM.groups || []).slice(); PM.draft = values;
   PM.saving = true; pmSync();
   pmResult('wait', 'SAVING', skip ? 'Saving without testing…' : 'Saving…');
   const r = editing
@@ -1212,7 +1734,7 @@ async function pmRemove(name, force){
   .hi-empty p { font-size:18px; color:var(--dim); max-width:560px; margin:8px auto; line-height:1.4; }
   .hi-det { display:grid; grid-template-columns:max-content 1fr; gap:4px 14px; font-size:16px; margin:8px 0; }
   .hi-det dt { color:var(--dim); } .hi-det dd { margin:0; overflow-wrap:anywhere; -webkit-user-select:text; user-select:text; }
-  @media (max-width:760px) {
+  @media (max-width:760px), (orientation:landscape) and (max-height:500px) and (max-width:932px) {
     #hi-head { flex-wrap:wrap; }
     #hi-ctl { flex-wrap:wrap; width:100%; }
     #hi-ctl .seg { flex-wrap:wrap; width:100%; }
@@ -1242,24 +1764,22 @@ async function openHistory(){
   $('hi-body').innerHTML = '<div class="note">Loading the history&hellip;</div>';
   hiHead();
   if(!HI.names.length){ const r = await pmCall('GET', '/api/printers'); if(r.ok) HI.names = (r.body.printers || []).map(p => p.name); hiHead(); }
+  await hfLoadGroups(); hiHead();
   await hiLoad();
 }
 function hiHead(){
-  const names = Array.from(new Set([...HI.names, ...Object.keys((HI.st && HI.st.by_printer) || {})])).sort((a, b) => a.localeCompare(b));
-  $('hi-ctl').innerHTML = `<select aria-label="Printer" onchange="hiSetPrinter(this.value)"><option value="">All printers</option>${names.map(n =>
-      `<option value="${pmEsc(n)}" ${n === HI.printer ? 'selected' : ''}>${pmEsc(n)}</option>`).join('')}</select>
+  $('hi-ctl').innerHTML = `<button type="button" class="hf-btn" data-act="hfOpen" aria-haspopup="dialog" title="Choose a group or hand-picked printers">${esc(hfLabel())}</button>
     <div class="seg" role="radiogroup" aria-label="Period">${HI_PERIODS.map(([k, l]) =>
       `<button role="radio" aria-checked="${HI.period === k}" data-p="${esc(k)}" onclick="hiSetPeriod(this.dataset.p)">${esc(l)}</button>`).join('')}</div>
-    <a data-ctl class="bkdl" href="/api/jobs.csv?period=${HI.period}${HI.printer ? '&printer=' + encodeURIComponent(HI.printer) : ''}" download="jobs.csv" title="Every print in this period, with costs, as a spreadsheet file">Download CSV</a>
+    <a data-ctl class="bkdl" href="/api/jobs.csv?period=${HI.period}${esc(hfQuery())}" download="jobs.csv" title="Every print in this period, with costs, as a spreadsheet file">Download CSV</a>
     <button onclick="show('home')">Close</button>`;
 }
 function hiSetPeriod(p){ HI.period = p; HI.sig = ''; hiHead(); hiLoad(); }
-function hiSetPrinter(n){ HI.printer = n; HI.sig = ''; hiHead(); hiLoad(); }
 
 async function hiLoad(){
   clearTimeout(HI.timer);
-  const q = '?period=' + HI.period + (HI.printer ? '&printer=' + encodeURIComponent(HI.printer) : '');
-  const [a, b] = await Promise.all([pmCall('GET', '/api/stats' + q), pmCall('GET', '/api/jobs?limit=100' + (HI.printer ? '&printer=' + encodeURIComponent(HI.printer) : ''))]);
+  const q = '?period=' + HI.period + hfQuery();
+  const [a, b] = await Promise.all([pmCall('GET', '/api/stats' + q), pmCall('GET', '/api/jobs?limit=100' + hfQuery())]);
   if(!$('history').classList.contains('on')) return;
   if(!a.ok || !b.ok){
     HI.err = (a.ok ? b : a).body.error || 'The Hub did not answer.';
@@ -1307,7 +1827,7 @@ function hiRender(){
   const inPeriod = HI.jobs.filter(j => st.since == null || (j.ended_at || j.started_at || 0) >= st.since);
   let body;
   if(!st.jobs && !HI.jobs.length){
-    body = `<div class="hi-empty"><h2>No prints logged yet</h2><p>Every print is logged automatically &mdash; what it was, how it ended and what it cost. Start one and it appears here when it finishes.</p></div>`;
+    body = hfActive() ? hfEmptyHtml() : `<div class="hi-empty"><h2>No prints logged yet</h2><p>Every print is logged automatically &mdash; what it was, how it ended and what it cost. Start one and it appears here when it finishes.</p></div>`;
   } else {
     const pr = Object.entries(st.by_printer || {});
     const prT = pr.length ? `<h2>By printer <small class="stsrc">${periodLabel}</small></h2><div class="ht" style="--c:minmax(0,2fr) 70px minmax(0,1.6fr) 90px 100px">
@@ -1331,7 +1851,7 @@ function hiRender(){
         <div class="n" data-l="Parts">${j.parts == null ? '?' : esc(j.parts)}</div><div class="n" data-l="Grams">${j.grams_used == null ? '—' : Math.round(j.grams_used)}</div>
         <div class="n" data-l="Time">${j.open ? 'running' : hiDur(j.duration_s)}</div><div class="n" data-l="Cost">${j.cost ? hiMoney(j.cost.total) : '—'}</div></div>`).join('')}</div>`
       : '<div class="note">No prints in this period.</div>');
-    body = prT + flT + jT;
+    body = prT + hfGroupHtml(st, periodLabel) + flT + jT;
   }
   const html = kpis + body;
   if(html === HI.sig) return;                 // nothing changed: leave the page (and the scroll position) alone
@@ -1367,6 +1887,233 @@ async function hiDetail(id){
 }
 </script>
 
+<!-- ===== Printer groups: labels on printers ("Production", "Workshop"). Edited on the Printers page, used as a filter on the
+     History page. Server side: fleet_store.py (groups), /api/groups, PUT /api/printers/{name}/groups, joblog.py (by_group). ===== -->
+<style>
+  .pg-chips { display:flex; flex-wrap:wrap; gap:8px; margin:6px 0; align-items:center; }
+  .pg-chip { display:inline-flex; align-items:center; gap:2px; border:2px solid var(--txt); border-radius:18px; padding:0 2px 0 12px; font-size:16px; font-weight:700; min-height:40px; max-width:100%; }
+  .pg-chip > span { overflow-wrap:anywhere; }
+  .pg-chip button { min-width:40px; min-height:36px; padding:0 10px; font-size:20px; line-height:1; background:none; border:0; color:var(--txt); }
+  .pg-add { display:flex; gap:8px; align-items:stretch; }
+  .pg-add input { flex:1 1 0; min-width:0; }
+  .pg-add button { min-width:72px; }
+  .pg-sug { margin-top:6px; font-size:14px; color:var(--dim); display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+  .pg-sug button { min-height:40px; font-size:15px; padding:4px 12px; }
+  .pg-msg { font-size:15px; margin-top:6px; min-height:20px; }
+  .pg-sec { margin:14px 0 6px; font-size:20px; }
+  .hf-btn { max-width:240px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .hf-h { font-size:17px; margin:12px 0 4px; }
+  .hf-list { display:grid; gap:6px; }
+  .hf-opt { display:flex; gap:12px; align-items:center; min-height:48px; padding:6px 10px; border:1px solid var(--line); border-radius:10px; background:var(--card2); font-size:17px; cursor:pointer; }
+  .hf-opt input { width:26px; height:26px; flex:none; }
+  .hf-opt small { display:block; color:var(--dim); font-size:13px; overflow-wrap:anywhere; }
+  @media (max-width:760px), (orientation:landscape) and (max-height:500px) and (max-width:932px) { .hf-btn { flex:1 1 40%; max-width:none; } }
+</style>
+<script>
+const PG_MAX_LEN = 32, PG_MAX_N = 8;
+const pgClean = s => String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
+const pgHas = (list, g) => (list || []).some(x => String(x).toLowerCase() === String(g).toLowerCase());
+function pgMsg(t){ const e = $('pg-msg'); if(e) e.textContent = t || ''; }
+
+// every group in use, from the printer list the Printers page already loaded: [{name, printers:[...]}]
+function pgIndex(){
+  const m = new Map();
+  for(const p of PM.printers || []) for(const g of p.groups || []){
+    const k = String(g).toLowerCase();
+    if(!m.has(k)) m.set(k, {name:g, printers:[]});
+    m.get(k).printers.push(p.name);
+  }
+  return [...m.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+// ---- the printer list: which groups a printer is in, and a section to rename / delete a whole group
+function pgRowHtml(p){
+  return (p.groups || []).length ? `<div class="bkinfo">Groups: ${(p.groups || []).map(esc).join(', ')}</div>` : '';
+}
+function pgSectionHtml(){
+  const idx = pgIndex();
+  if(!idx.length) return '';
+  const cards = idx.map(g => `<div class="pmrow"><div class="bkhead"><b>${esc(g.name)}</b>
+      <span class="chip idle" style="font-size:13px">${esc(g.printers.length)} printer${g.printers.length === 1 ? '' : 's'}</span></div>
+    <div class="bkinfo">${g.printers.map(esc).join(', ')}</div>
+    <div class="bkbtns"><button data-act="pgRename" data-g="${esc(g.name)}">Rename</button>
+      <button class="danger" data-act="pgDelete" data-g="${esc(g.name)}">Delete group</button></div></div>`).join('');
+  return `<h2 class="pg-sec">Groups</h2><div class="note" style="margin-top:0">A group is a label, for example Production or Workshop &mdash; History and costs can be filtered by it.
+    Add a printer to groups from its Edit screen. A group disappears when its last printer leaves it; deleting one only removes the label.</div>
+    <div class="pr-grid">${cards}</div>`;
+}
+
+// ---- the Groups field on the printer form (chips you add and remove; words, not colour)
+function pgInit(existing, draft){
+  PM.groups = Array.isArray(draft && draft.groups) ? draft.groups.slice() : (existing && Array.isArray(existing.groups) ? existing.groups.slice() : []);
+}
+function pgFieldHtml(){
+  return `<div class="pm-field pg-field" id="pg-field"><label for="pg-in">Groups <span class="pmreq">(optional)</span></label>
+    <div id="pg-chips" class="pg-chips"></div>
+    <div class="pg-add"><input id="pg-in" type="text" maxlength="40" autocomplete="off" autocapitalize="off" spellcheck="false"
+        placeholder="Type a group, for example Production" aria-label="New group name" onkeydown="pgKey(event)">
+      <button type="button" data-act="pgAdd">Add</button></div>
+    <div id="pg-sug" class="pg-sug"></div>
+    <div class="pm-help">Press Enter or Add to put the printer in a group. It can be in several. Groups are only labels &mdash; they never change how the printer connects.</div>
+    <div id="pg-msg" class="pg-msg" role="status" aria-live="polite"></div>
+    ${PM.editName ? '<button type="button" data-act="pgSave">Save groups now</button>' : ''}</div>`;
+}
+function pgRender(){
+  const c = $('pg-chips'); if(!c) return;
+  const have = PM.groups || [];
+  c.innerHTML = have.length
+    ? have.map(g => `<span class="pg-chip"><span>${esc(g)}</span><button type="button" data-act="pgDrop" data-g="${esc(g)}" aria-label="Remove group ${esc(g)}">&times;</button></span>`).join('')
+    : '<span class="pm-help">Not in any group.</span>';
+  const more = pgIndex().filter(x => !pgHas(have, x.name));
+  $('pg-sug').innerHTML = more.length ? 'Existing groups: ' + more.map(x => `<button type="button" data-act="pgAdd" data-g="${esc(x.name)}">+ ${esc(x.name)}</button>`).join('') : '';
+}
+function pgKey(ev){ if(ev.key === 'Enter' || ev.key === ','){ ev.preventDefault(); pgAdd(''); } }
+function pgAdd(given){
+  const inp = $('pg-in'), raw = given || (inp ? inp.value : '');
+  let bad = '';
+  for(const part of String(raw).split(',')){
+    const g = pgClean(part);
+    if(!g || pgHas(PM.groups, g)) continue;
+    if(g.length > PG_MAX_LEN){ bad = 'A group name can be at most ' + PG_MAX_LEN + ' characters.'; break; }
+    if(/[\/\\]/.test(g)){ bad = 'A group name cannot contain a slash or a backslash.'; break; }
+    if(PM.groups.length >= PG_MAX_N){ bad = 'A printer can be in at most ' + PG_MAX_N + ' groups.'; break; }
+    const known = pgIndex().find(x => x.name.toLowerCase() === g.toLowerCase());
+    PM.groups.push(known ? known.name : g);          // an existing group keeps its spelling
+  }
+  if(!bad && inp) inp.value = '';
+  pgMsg(bad); pgRender();
+  if(inp) inp.focus();
+}
+function pgDrop(g){ PM.groups = (PM.groups || []).filter(x => x !== g); pgMsg(''); pgRender(); }
+// Edit screen: a group change is only a label, so it is saved at once - no connection test, fine while printing.
+async function pgSave(){
+  const who = PM.editName; if(!who) return;
+  pgAdd('');                                         // a name typed but not yet added is added now
+  pgMsg('Saving groups…');
+  const r = await pmCall('PUT', '/api/printers/' + encodeURIComponent(who) + '/groups', {groups:PM.groups});
+  if(!pmShowing() || PM.view !== 'form') return;
+  if(!r.ok){ pgMsg('Not saved: ' + (r.body.error || 'unknown error')); return; }
+  PM.groups = (r.body.groups || []).slice();
+  const p = PM.printers.find(x => x.name === who); if(p) p.groups = PM.groups.slice();
+  pgRender(); pgMsg('Groups saved.');
+}
+
+// ---- rename / delete a whole group
+function pgRename(g){
+  clearTimeout(PM.timer); PM.view = 'grp';
+  pmPage('Rename group', pmBtn('Back', 'openPrinters()'), `
+    <div class="note" style="margin-top:0">Every printer in <b>${esc(g)}</b> moves to the new name. Using the name of another group merges the two.</div>
+    <div class="pm-field"><label for="pg-new">New name</label>
+      <input id="pg-new" type="text" maxlength="40" autocomplete="off" spellcheck="false" value="${esc(g)}" onkeydown="if(event.key==='Enter')document.getElementById('pg-go').click()"></div>
+    <div id="pg-msg" class="pg-msg" role="status"></div>
+    <div class="row"><button class="big grow" onclick="openPrinters()">Cancel</button>
+      <button class="big grow primary" id="pg-go" data-act="pgRenameGo" data-g="${esc(g)}">Rename</button></div>`);
+  const e = $('pg-new'); if(e){ e.focus(); e.select(); }
+}
+async function pgRenameGo(g){
+  const to = pgClean($('pg-new') ? $('pg-new').value : '');
+  if(!to){ pgMsg('Type the new name.'); return; }
+  const r = await pmCall('POST', '/api/groups/rename', {from:g, to:to});
+  if(!pmShowing() || PM.view !== 'grp') return;
+  if(!r.ok){ pgMsg('Not renamed: ' + (r.body.error || 'unknown error')); return; }
+  PM.msg = 'Group renamed to ' + r.body.group + (r.body.merged ? ' (merged with the group of that name)' : '') + '.';
+  PM.view = 'list'; await pmRefresh();
+}
+function pgDelete(g){
+  clearTimeout(PM.timer); PM.view = 'grp';
+  const n = (pgIndex().find(x => x.name === g) || {printers:[]}).printers.length;
+  pmPage('Delete group?', '', `
+    <div class="note" style="font-size:17px;color:var(--txt)">The label <b>${esc(g)}</b> is taken off ${esc(n)} printer${n === 1 ? '' : 's'}.
+      The printers and their print history are not changed; the history just can no longer be filtered by this group.</div>
+    <div id="pg-msg" class="pg-msg" role="status"></div>
+    <div class="row" style="margin-top:12px"><button class="big grow" onclick="openPrinters()">Keep group</button>
+      <button class="big grow danger" data-act="pgDeleteGo" data-g="${esc(g)}">Delete group</button></div>`);
+}
+async function pgDeleteGo(g){
+  const r = await pmCall('DELETE', '/api/groups/' + encodeURIComponent(g));
+  if(!pmShowing() || PM.view !== 'grp') return;
+  if(!r.ok){ pgMsg('Not deleted: ' + (r.body.error || 'unknown error')); return; }
+  PM.msg = 'Group ' + r.body.deleted + ' deleted.';
+  PM.view = 'list'; await pmRefresh();
+}
+
+// ---- History: filter by group(s) and/or hand-picked printers, plus the By-group table
+const HF = { groups:[], printers:[], idx:[] };
+const hfActive = () => HF.groups.length > 0 || HF.printers.length > 0;
+const hfQuery = () => HF.groups.map(g => '&group=' + pu(g)).join('') + HF.printers.map(p => '&printer=' + pu(p)).join('');
+function hfLabel(){
+  if(!hfActive()) return 'All printers ▾';
+  const bits = [];
+  if(HF.groups.length) bits.push((HF.groups.length === 1 ? 'Group: ' : 'Groups: ') + HF.groups.join(', '));
+  if(HF.printers.length) bits.push(HF.printers.length === 1 ? HF.printers[0] : HF.printers.length + ' printers');
+  return bits.join(' + ') + ' ▾';
+}
+async function hfLoadGroups(){
+  const r = await pmCall('GET', '/api/groups');
+  HF.idx = r.ok && Array.isArray(r.body) ? r.body : [];
+  HF.groups = HF.groups.filter(g => pgHas(HF.idx.map(x => x.name), g));        // a deleted group drops out of the filter
+}
+function hfPrinterNames(){
+  return Array.from(new Set([...HI.names, ...Object.keys((HI.st && HI.st.by_printer) || {}), ...HF.printers]))
+    .sort((a, b) => a.localeCompare(b));
+}
+function hfOpen(){
+  const gOpts = HF.idx.map(g => `<label class="hf-opt"><input type="checkbox" data-hf="group" data-v="${esc(g.name)}" ${pgHas(HF.groups, g.name) ? 'checked' : ''}>
+      <span><b>${esc(g.name)}</b><small>${esc((g.printers || []).join(', '))}</small></span></label>`).join('');
+  const pOpts = hfPrinterNames().map(n => `<label class="hf-opt"><input type="checkbox" data-hf="printer" data-v="${esc(n)}" ${pgHas(HF.printers, n) ? 'checked' : ''}>
+      <span>${esc(n)}</span></label>`).join('');
+  const gSec = gOpts ? `<h3 class="hf-h">Groups</h3><div class="hf-list">${gOpts}</div>` : '';
+  $('mbody').innerHTML = `<h2>Show history for</h2>
+    <div class="note" style="margin-top:0">Tick groups and/or printers. A print is counted if it ran on a ticked printer or on any printer in a ticked group. Nothing ticked means all printers.</div>
+    <div class="row" style="margin:10px 0 4px"><button class="big grow" data-act="hfClear">All printers</button>
+      <button class="big grow primary" data-act="hfApply">Show these</button></div>
+    ${gSec}<h3 class="hf-h">Printers</h3><div class="hf-list">${pOpts}</div>`;
+  $('modal').classList.add('on');
+}
+function hfSet(groups, printers){
+  HF.groups = groups; HF.printers = printers;
+  closeModal(); HI.sig = ''; hiHead(); hiLoad();
+}
+function hfApply(){
+  const on = k => [...document.querySelectorAll('#mbody input[data-hf="' + k + '"]:checked')].map(i => i.dataset.v);
+  hfSet(on('group'), on('printer'));
+}
+function hfEmptyHtml(){
+  return `<div class="hi-empty"><h2>No prints for this selection</h2><p>Nothing has been logged for the ticked groups or printers in this period. Choose &ldquo;All printers&rdquo; or another period.</p></div>`;
+}
+function hfGroupHtml(st, per){
+  const bg = st.by_group || [];
+  if(!bg.length) return '';
+  const rows = bg.map(g => {
+    const decided = Number(g.finished) + Number(g.failed) + Number(g.cancelled);
+    const mats = Object.entries(g.by_material || {}).sort((a, b) => b[1] - a[1]).slice(0, 2).map(([m, gr]) => m + ' ' + hiGrams(gr)).join(' · ');
+    const who = g.group == null ? 'No group' : g.group;
+    return `<div class="tr"><div class="first" title="${esc(who)}"><b>${esc(who)}</b><br><small>${esc((g.printers || []).join(', '))}</small></div>
+      <div class="n" data-l="Prints">${esc(g.jobs)}</div>
+      <div class="n" data-l="Success">${hiPct(g.success_rate)}<small> (${esc(g.finished)} of ${esc(decided)})</small></div>
+      <div class="n" data-l="Hours">${hiNum(g.hours, 1)}</div>
+      <div class="n" data-l="Material">${hiGrams(g.grams_used)}${mats ? '<br><small>' + esc(mats) + '</small>' : ''}</div>
+      <div class="n" data-l="Cost">${hiMoney(g.cost_total)}</div></div>`;
+  }).join('');
+  return `<h2>By group <small class="stsrc">${esc(per)}</small></h2><div class="ht" style="--c:minmax(0,2fr) 70px minmax(0,1.5fr) 80px minmax(0,1.5fr) 100px">
+    <div class="tr h"><div>Group</div><div class="n">Prints</div><div class="n">Success</div><div class="n">Hours</div><div class="n">Material</div><div class="n">Cost</div></div>${rows}</div>
+    <div class="note">A printer that is in more than one group is counted in each of them, so these rows can add up to more than the totals above. &ldquo;No group&rdquo; is every printer that is in none.</div>`;
+}
+
+const PG_ACTIONS = {
+  pgAdd:      b => pgAdd(b.dataset.g || ''),
+  pgDrop:     b => pgDrop(b.dataset.g),
+  pgSave:     () => pgSave(),
+  pgRename:   b => pgRename(b.dataset.g),
+  pgRenameGo: b => pgRenameGo(b.dataset.g),
+  pgDelete:   b => pgDelete(b.dataset.g),
+  pgDeleteGo: b => pgDeleteGo(b.dataset.g),
+  hfOpen:     () => hfOpen(),
+  hfApply:    () => hfApply(),
+  hfClear:    () => hfSet([], []),
+};
+</script>
+
 <!-- ===== Detection settings (Settings > Detection) and the one-line status on the printer screen (server side: detection.py, /api/detection) ===== -->
 <style>
   .detline { flex:none; margin-top:4px; font-size:14px; line-height:20px; height:20px; color:var(--dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -1374,7 +2121,7 @@ async function hiDetail(id){
   .detline:empty { display:none; }
   .detline.alert { color:var(--txt); font-weight:700; }
   .detline.down { color:var(--txt); font-weight:700; }
-  @media (max-width:760px) { .detline { white-space:normal; height:auto; min-height:20px; } }
+  @media (max-width:760px), (orientation:landscape) and (max-height:500px) and (max-width:932px) { .detline { white-space:normal; height:auto; min-height:20px; } }
   .dtstatus { background:var(--card2); border:1px solid var(--line); border-radius:12px; padding:10px 14px; margin-bottom:8px; font-size:16px; line-height:1.4; }
   .dtstatus b { font-size:17px; }
 </style>
@@ -1484,7 +2231,7 @@ function detLine(d){
   .keybox { -webkit-user-select:text; user-select:text; font-family:ui-monospace,Menlo,Consolas,monospace; font-size:19px; font-weight:700;
             background:#0d0f12; border:2px solid var(--accent); border-radius:10px; padding:14px 12px; overflow-wrap:anywhere; word-break:break-all; margin:10px 0; }
   .secscope { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:6px; }
-  @media (max-width:760px) {
+  @media (max-width:760px), (orientation:landscape) and (max-height:500px) and (max-width:932px) {
     .secmodes, .secscope { grid-template-columns:minmax(0,1fr); }
     .seclog .lrow { grid-template-columns:minmax(0,1fr) auto; grid-template-areas:"who who" "what what" "cnt res"; gap:3px 10px; }
     .seclog .lrow.h { display:none; }
@@ -1495,6 +2242,186 @@ function detLine(d){
     .secbanner span.txt { order:2; flex:1 1 100%; }
     .secbanner button { order:3; flex:1 1 100%; }
   }
+</style>
+<style>
+/* ==== phone layout ====
+   iPhone / Android phones, used as a Home Screen app. Two shapes:
+     portrait  : width <= 600px
+     landscape : height <= 500px and width <= 932px
+   The 1024x600 wall kiosk and desktop windows match neither, so they are untouched.
+   Every other max-width:760px @media block above is widened to also match landscape phones (same flowing layout);
+   this block sits LAST so it wins over them. Meaning is always in words, never in colour alone. */
+@media (max-width:600px), (orientation:landscape) and (max-height:500px) and (max-width:932px) {
+  :root { --sat:env(safe-area-inset-top, 0px); --sab:env(safe-area-inset-bottom, 0px);
+          --sal:env(safe-area-inset-left, 0px); --sar:env(safe-area-inset-right, 0px); }
+  html { -webkit-text-size-adjust:100%; text-size-adjust:100%; }
+  body { padding-left:var(--sal); padding-right:var(--sar); min-height:100vh; min-height:100dvh; }
+  body:has(#modal.on), body:has(#camfull.on), body:has(#firstrun.on) { overflow:hidden; }
+  /* no double-tap zoom on controls; inputs never trigger iOS's auto-zoom (needs >= 16px) */
+  button, a, summary, select, label, [role=button], .pcard, .tr.click { touch-action:manipulation; }
+  input, select, textarea { font-size:16px; }
+  /* safe areas: notch / Dynamic Island on top, home bar at the bottom */
+  .screen, #home.on, #printer.on, #printers.on, #settings.on, #history.on {
+    padding:calc(10px + var(--sat)) 10px calc(14px + var(--sab)); }
+  /* buttons: 44px minimum everywhere */
+  button, a.bkdl { min-height:44px; }
+  .hubdown { font-size:16px; padding:8px 12px; border-width:2px; }
+
+  /* ---- fleet header: row 1 = logo, clock, reload; row 2 = the four pages ---- */
+  #home > .row:first-child { gap:8px; align-items:center; }
+  #home > .row:first-child > h1 { order:1; }
+  #home > .row:first-child > .grow { order:2; flex:1 1 0; }
+  #home > .row:first-child > #vo-chip { order:3; }
+  #home > .row:first-child > #clock { order:4; font-size:16px !important; }
+  #home > .row:first-child > button[title="Reload"] { order:5; flex:none; width:48px; min-height:48px !important; padding:0 !important; }
+  #home > .row:first-child > button:not([title="Reload"]) { order:10; min-height:48px !important; font-size:16px !important; padding:8px 12px !important; }
+  /* ---- fleet cards: one per row, camera first and big ---- */
+  #fleet, #fleet.c4 { gap:12px; margin-top:10px; padding-bottom:0; }
+  .pcard, #fleet.c4 .pcard { padding:12px; gap:8px; }
+  .pcard .cslot { order:-1; }
+  .pcard .prow { height:auto; min-height:36px; }
+  #fleet .pcard .pname, #fleet.c4 .pcard .pname { font-size:24px; }
+  #fleet .pcard .chip, #fleet.c4 .pcard .chip { font-size:14px; padding:6px 12px; }
+  .pcard .job { height:auto; min-height:20px; font-size:16px; }
+  .pcard .eta:empty, .pcard .meta:empty { display:none; }
+  #fleet .pcard .eta, #fleet.c4 .pcard .eta { font-size:22px; }
+  .cardcam .camstat { font-size:13px; }
+  .nocam { aspect-ratio:auto; min-height:44px; margin-bottom:0; }
+  .welcome { padding:16px 4px; }
+  .welcome h2 { font-size:28px; }
+
+  /* ---- printer screen ---- */
+  #printer .tbar { gap:8px; }
+  #printer .tbar > button:first-child { order:1; flex:none; min-height:48px; }
+  #printer .tbar h1 { order:2; flex:1 1 0; min-width:0; font-size:22px; }
+  #p-chip, #vo-chip2 { order:3; }
+  #printer .tbar .grow { order:4; }
+  #printer .tbar #p-connect, #printer .tbar #p-pause, #printer .tbar #p-resume { order:5; flex:1 1 0; min-height:52px; font-size:17px; }
+  #printer .tbar > button.danger { order:6; flex:0 0 36%; min-height:52px; font-size:17px; }
+  #printer .tbar > button[onclick^="bkStart"], #printer .tbar > button[onclick^="loadFiles"] { order:7; flex:1 1 40%; min-height:44px; font-size:14px; }
+  #printer .jobline { flex-direction:column; align-items:flex-start; gap:2px; margin-top:8px; }
+  #printer .jobline .grow { display:none; }
+  #p-job { font-size:17px !important; overflow-wrap:anywhere; }
+  #p-temps { font-size:15px !important; }
+  #printer .jobbar { height:12px; border-radius:6px; }
+  #p-controls { flex-direction:column; align-items:stretch; }
+  .ctlrow { gap:8px; }
+  .ctlrow button { flex:1 1 calc(50% - 8px); min-height:46px; font-size:15px; white-space:normal; }
+  .ctlsplit { display:flex; flex:1 1 100%; }
+  .ctlsplit button { flex:1 1 auto; }
+  .ctlmsg { white-space:normal; }
+  .topgrid { flex-direction:column; gap:10px; margin-top:10px; }
+  #cam, #cam.injob { order:-1; width:100%; max-width:none; margin:0; align-self:stretch; }
+  #cam .camhead, #cam .camstat { font-size:12px; padding:3px 8px; }
+  .trays { grid-template-columns:minmax(0,1fr); gap:8px; }
+  .tray { min-height:56px; padding:6px 8px 6px 12px; }
+  .tray .ttxt { white-space:normal; overflow:visible; }
+  .tray .tcol { font-size:17px; }
+  .tray .tmat { font-size:15px; }
+  .tray button { min-height:44px; min-width:88px; padding:6px 14px; font-size:15px; }
+  #files { margin-top:12px; }
+  #files .fhead { font-size:18px; padding-bottom:8px; }
+  .frow { flex-wrap:wrap; padding:10px; gap:8px 10px; margin-bottom:10px; }
+  .frow .grow { flex:1 1 calc(100% - 64px); min-width:0; }
+  .frow .fname { font-size:18px; overflow-wrap:anywhere; }
+  .frow .fmeta { font-size:14px; }
+  .frow .chip { order:3; }
+  .frow button.primary { order:4; flex:1 1 0; min-height:48px; font-size:17px; }
+  .frow .fdelete { order:5; flex:0 0 30%; min-height:48px; margin-left:0; }
+  .frow .frename { order:5; flex:0 0 30%; min-height:48px; margin-left:0; }   /* ==== rename ==== */
+
+  /* ---- dialogs are full-screen sheets; their action buttons stay on screen ---- */
+  #modal { align-items:stretch; justify-content:stretch; background:var(--card); }
+  .mbox, #mbody:has(#bk-body), #firstrun .mbox { width:100%; max-width:none; height:100%; max-height:none; border:0; border-radius:0;
+    padding:calc(14px + var(--sat)) 14px calc(16px + var(--sab)); overflow-y:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch; }
+  #firstrun { align-items:stretch; }
+  .mbox h2 { font-size:22px; }
+  .cfdlg { margin:0; }
+  .cfprn { font-size:34px; padding:0 10px; }
+  .cfactions { position:sticky; bottom:calc(-16px - var(--sab)); margin:12px -14px 0; padding:10px 14px calc(10px + var(--sab));
+    background:var(--card); border-top:1px solid var(--line); z-index:5; }
+  .cfactions .row { flex-wrap:nowrap; }
+  .cfactions .row > button { min-height:56px; font-size:17px; line-height:1.2; }
+  .cfactions .row > button:first-child { flex:0 0 30%; }
+  .cfactions .row > button.grow:last-child { flex:1 1 0; min-width:0; }
+  #spoolgrid { grid-template-columns:repeat(2,minmax(0,1fr)) !important; }
+  .cfcam { width:100%; }
+  .toggle { font-size:17px; }
+  #camfull .camtop { padding:calc(10px + var(--sat)) calc(12px + var(--sar)) 10px calc(12px + var(--sal)); }
+  #camfull .camtop .camtitle { font-size:16px; min-width:0; }
+  #camfull .camview { padding-bottom:var(--sab); }
+
+  /* ---- settings: header + tab strip stay put, the panel scrolls; tabs scroll sideways inside their own strip ---- */
+  #settings.on { height:100vh; height:100dvh; min-height:0; overflow:hidden; }
+  .sthead { position:static; padding:0; }
+  .sthead button { min-height:48px; }
+  .sttabs { position:relative; flex-wrap:nowrap; overflow-x:auto; overflow-y:hidden; gap:6px; margin-left:-10px; margin-right:-10px; padding:0 10px;
+            -webkit-overflow-scrolling:touch; touch-action:pan-x; scrollbar-width:none; }
+  .sttabs::-webkit-scrollbar { display:none; }
+  .sttab, .sttabs.sub .sttab { flex:0 0 auto; min-width:0; padding:6px 16px; white-space:nowrap; }
+  #st-body { overflow-y:auto; overflow-x:hidden; flex:1; min-height:0; padding-bottom:calc(16px + var(--sab)); }
+  .stin { min-height:48px; }
+
+  /* ---- printers manager + add wizard: Save / Test stay reachable ---- */
+  .pm-foot { position:sticky; bottom:0; margin:8px -10px 0; padding:8px 10px calc(8px + var(--sab)); background:var(--bg); z-index:3; }
+  .pm-foot .linkbtn { min-height:44px; }
+  .pm-field input, .pm-field select { min-height:50px; }
+  .pm-guide > summary { min-height:56px; }
+
+  /* ---- history: filters wrap, the page title carries Close ---- */
+  #hi-head { gap:8px; }
+  #hi-ctl { display:contents; }
+  #hi-head .grow { order:1; }
+  #hi-ctl > button { order:2; flex:none; min-width:84px; }
+  #hi-ctl > select { order:3; flex:1 1 100%; }
+  #hi-ctl > .seg { order:4; flex:1 1 100%; gap:6px; }
+  #hi-ctl > a { order:5; flex:1 1 100%; justify-content:center; }
+  #hi-ctl .seg button { flex:1 1 0; min-width:0; padding:6px 2px; font-size:14px; white-space:nowrap; }
+  .ht .tr.click { padding:10px 0; }
+  .kpi .kv { font-size:26px; }
+
+  /* ---- backups / settings details ---- */
+  .bkbtns > *, a.bkdl { min-height:48px; }
+  .pmrow .bkbtns > * { flex:1 1 40%; }
+  .seg button, .chk { min-height:48px; }
+  .seg button { padding:6px 4px; font-size:15px; }
+}
+
+@media (max-width:600px) {
+  /* portrait only */
+  #home > .row:first-child::after { content:""; order:9; flex:1 1 100%; height:0; }      /* line break: the four pages get their own row */
+  #home > .row:first-child > button:not([title="Reload"]) { flex:1 1 0; min-width:0; padding:8px 4px !important; }
+  #home > .row:first-child > #signout-btn { font-size:14px !important; }
+  .pcard .meta { font-size:15px; }
+}
+
+@media (orientation:landscape) and (max-height:500px) and (max-width:932px) {
+  /* landscape: short and wide. Cards two across, camera + slots side by side, dialogs compact (they scroll, buttons stay) */
+  .screen, #home.on, #printer.on, #printers.on, #settings.on, #history.on {
+    padding-left:calc(10px + var(--sal)); padding-right:calc(10px + var(--sar)); padding-top:calc(6px + var(--sat)); }
+  body { padding-left:0; padding-right:0; }
+  #fleet, #fleet.c4 { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  #home > .row:first-child > button[title="Reload"] { order:11; }
+  #printer .tbar #p-connect, #printer .tbar #p-pause, #printer .tbar #p-resume, #printer .tbar > button.danger,
+  #printer .tbar > button[onclick^="bkStart"], #printer .tbar > button[onclick^="loadFiles"] { flex:0 1 auto; min-height:44px; font-size:15px; padding:6px 16px; }
+  #printer .jobline { gap:2px 18px; }
+  .topgrid { flex-direction:row; align-items:flex-start; }
+  #cam, #cam.injob { flex:0 0 44%; width:44%; order:0; }
+  .trays { flex:1; grid-template-columns:repeat(2,minmax(0,1fr)); }
+  #printer .jobline { flex-direction:row; flex-wrap:wrap; }
+  #printer .tbar h1 { flex:1 1 0; }
+  .mbox, #mbody:has(#bk-body), #firstrun .mbox { padding-left:calc(16px + var(--sal)); padding-right:calc(16px + var(--sar)); padding-top:calc(8px + var(--sat)); }
+  .cfactions { margin-left:calc(-16px - var(--sal)); margin-right:calc(-16px - var(--sar)); padding-left:calc(16px + var(--sal)); padding-right:calc(16px + var(--sar)); }
+  .cfprn { font-size:26px; border-width:2px; }
+  .cfhead { font-size:17px; }
+  .cfcam, .cfnocam { display:none; }
+  .cfcap { display:none; }
+  .toggle { margin:8px 0; padding:8px 12px; }
+  #spoolgrid { grid-template-columns:repeat(4,minmax(0,1fr)) !important; }
+  #spoolgrid button { min-height:60px !important; }
+  .cfactions .row > button { min-height:48px; }
+  #camfull .camview img { max-height:calc(100vh - 70px); }
+}
 </style>
 <script>
 const SEC = { d:null, err:'', msg:null, loading:false, pwBusy:false, newKey:null, dev:null, admin:null };   // admin: null | 'unset' | 'locked' | 'ok' (the admin password, see secAdminHtml)
@@ -2318,6 +3245,10 @@ function stRender(keepScroll){
   if(keepScroll) window.scrollTo(0, wy);
   stBannerRender();
   stSyncHead();
+  for(const id of ['st-tabs', 'st-subtabs']){   // phones: the tab strip scrolls sideways - keep the chosen tab in view
+    const bar = $(id), on = bar && bar.querySelector('[aria-selected="true"]');
+    if(on && bar.scrollWidth > bar.clientWidth) bar.scrollLeft = on.offsetLeft - (bar.clientWidth - on.offsetWidth) / 2;
+  }
 }
 
 function stBannerRender(){
@@ -2584,6 +3515,7 @@ function show(id){ document.querySelectorAll('.screen').forEach(s=>s.classList.r
   $(id).classList.add('on'); clearInterval(POLL);
   if(id!=='printers') pmLeave();
   if(id!=='history') hiLeave();
+  if(id!=='library') lbLeave();   // ==== library ====
   HUB.enter = Date.now();     // a page that was not polling must not look like a dead Hub the moment you come back to it
   if(id==='home'){ fleet(); POLL=setInterval(()=>{ if(!document.hidden) fleet(); },5000); }
   if(id==='printer'){ pview(); POLL=setInterval(()=>{ if(!document.hidden) pview(); },5000); }
@@ -2814,7 +3746,7 @@ async function pviewOnce(){
       </div>`).join('');
   if(trH !== PV.trSig){ PV.trSig = trH; $('p-trays').innerHTML = trH; }     // not rebuilt every 5 s: a tap on Change is never swallowed
   // no AMS: the camera tile shares the job-line row instead of costing a whole row of its own (kiosk only)
-  const inJob = !trays.length && !window.matchMedia('(max-width:760px)').matches;
+  const inJob = !trays.length && !window.matchMedia('(max-width:760px), (orientation:landscape) and (max-height:500px) and (max-width:932px)').matches;
   const home = inJob ? $('p-jobline') : $('p-topgrid');
   if($('cam').parentNode !== home) home.appendChild($('cam'));
   $('cam').classList.toggle('injob', inJob);
@@ -2859,6 +3791,7 @@ async function loadFiles(refresh){
       ${warn}
       <button data-ctl class="primary" onclick="askPrint(this.dataset.f)" data-f="${esc(name)}">Print</button>
       <button data-ctl class="fdelete" onclick="askDelete(this.dataset.f)" data-f="${esc(name)}">Delete</button>
+      <button data-ctl class="frename" data-act="rnOpenFile" data-loc="${esc(CUR)}" data-f="${esc(name)}" title="Rename this file on the printer">Rename</button>
     </div>`;
   }).join('');
 }
@@ -3621,6 +4554,7 @@ setInterval(uivCheck, 60000);
 // ---- delegated clicks: untrusted text (file names, tray types, printer names) travels in data-* attributes, never in a handler string
 const ACT = {
   openPrinter: b => openPrinter(b.dataset.name),
+  ...PG_ACTIONS,                                  // printer groups + History filter (see the Printer groups block)
   tray:      b => askTray(Number(b.dataset.tray), b.dataset.mat),
   trayMat:   b => askTrayColor(Number(b.dataset.tray), b.dataset.mat, b.dataset.cur),
   trayColor: b => doTray(Number(b.dataset.tray), b.dataset.mat, b.dataset.color),
@@ -3634,6 +4568,8 @@ const ACT = {
   delete:    () => doDelete(),
   bkStart:   b => bkStart(b.dataset.name),
   stTest:    b => stTest(b.dataset.ch),
+  ...(typeof LB_ACT !== 'undefined' ? LB_ACT : {}),   // ==== library ====
+  ...(typeof RN_ACT !== 'undefined' ? RN_ACT : {}),   // ==== rename ====
 };
 document.addEventListener('click', e => {
   const b = e.target.closest ? e.target.closest('[data-act]') : null;

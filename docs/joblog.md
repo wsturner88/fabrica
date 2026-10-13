@@ -155,6 +155,45 @@ multi-colour prints, supports the slicer did not count, packaging, fees, labour.
 | `export_csv(printer=None, period="all", fp=None)` | CSV text of the jobs (oldest first) with costs at current rates; spreadsheet-formula-looking names are neutralised with a leading `'`. |
 | `on_event(event)` / `observe(fleet)` | The inputs (see wiring). Neither raises. |
 
+`printer` in `recent_jobs`, `stats`, `file_costs`, `export_csv` (and `material_usage`) is one name **or a list of names**
+(any of them; case-insensitive). An **empty list matches nothing** - it never means "everything", so a group nobody is in
+cannot show the whole fleet by accident. `stats(..., group_members=[{"name", "printers"}])` adds `by_group`.
+
+## Filtering by group or printers
+
+Printers can carry [groups](GUIDE.md#groups) (`Production`, `Workshop`, ...). Every history view takes the same filter, as
+repeatable query parameters:
+
+```
+GET /api/stats?period=month&group=Production&group=Prototypes&printer=Garage-MK4
+GET /api/jobs?group=Production            GET /api/jobs.csv?period=year&group=Production
+GET /api/costs/file?name=bracket&group=Workshop
+```
+
+* **Union.** A print counts if it ran on a named `printer` **or** on any printer that is in a named `group`. Group names
+  match without regard to case. No filter = all printers; a single `printer=` behaves exactly as before.
+* **Everything is computed over the filtered set:** totals, success rate, hours, material, cost, true / clean cost per part,
+  `by_printer`, `by_file`. Per-printer figures are unchanged and still shown.
+* **The answer says what it used:** `filter: {groups, printers, resolved_printers, unknown_groups}`. An unknown group matches
+  nothing (the REST API answers with empty figures and lists it under `unknown_groups`; the MCP tools refuse and name the
+  groups that do exist).
+* **Membership is today's.** The log stores printer names, not groups, so the filter uses each printer's *current* groups:
+  moving a printer to another group moves its whole history with it (handy at tax time: relabel once, re-run the report).
+  A printer that was removed from the Hub belongs to no group, but can still be picked by name.
+* **CSV export** keeps its `control` scope; the group filter just narrows the rows.
+
+### By group
+
+`/api/stats` and `job_stats` also return `by_group`: one row per group with `jobs`, `finished` / `failed` / `cancelled`,
+`success_rate`, `hours`, `grams_used`, `by_material`, `cost_total`, `wasted_on_failures` and the cost per part, plus a last
+row with `"group": null` for printers that are in no group (shown on the dashboard as *No group*, only when at least one
+group exists). The History page shows it as the **By group** table. **A printer in two groups is counted in both**, so the
+rows can add up to more than the totals - the dashboard says so under the table. With a filter active, only groups that
+have prints in the filtered set are listed.
+
+MCP: `job_stats`, `recent_jobs` and `cost_per_part` accept `group` (one name, or several separated by commas) and `printers`
+(a list); `job_stats` / `recent_jobs` keep their single `printer` argument too. They add up (union).
+
 ## How it is wired
 
 Everything below is in `app/server.py` unless it says otherwise.

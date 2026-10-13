@@ -6,6 +6,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- **Agent-facing file renaming.** The Hub provides the mechanics, not a naming convention: `file_facts` (parts on the plate, sliced-for
+  model, time, grams, colour words, where else the file is, how often it was printed), `rename_preview` (before -> after table, per-row
+  problems, single-use 10-minute ticket) and `rename_apply` (needs the ticket and the human's yes, `approved_by_human=true`), plus the
+  MCP prompt `rename_files`. On a printer: download, keep a copy of the original in the Library (`Renamed originals`), upload under the
+  new name, verify, and only then delete the old name; busy printers are refused, nothing is overwritten. Library files are renamed
+  atomically. Job history, costs and the History "By file" table treat a renamed file as one file. Dashboard: a **Rename...** button
+  in the Library and on each printer file row. REST `GET /api/files/facts`, `POST /api/rename/preview`, `POST /api/rename/apply`.
+  See [docs/renaming.md](docs/renaming.md).
+- **Upload and download for OctoPrint, PrusaLink and Klipper (beta - not yet verified on real hardware).** Needed by renaming; also lets
+  the Library's **Send to...** put `.gcode` / `.bgcode` files on these printers. Idle printers only, never starts a print.
+- **Agent kit.** An agent needs only the MCP address: server instructions with the safety rules arrive on connect,
+  `fabrica_guide` returns short guides (start, printing, library, history, renaming, changes), and three workflows
+  (`print_a_file`, `fleet_status`, `print_history_report`) are available as MCP prompts. A kit version (`k-xxxxxxxx`)
+  changes by itself whenever a guide, tool or prompt changes; `list_printers` shows it, and
+  `fabrica_guide('changes', since=...)` says what is new. `GET /api/agent-kit`; shown in Settings > Agents / MCP.
+- **Printer groups.** Label printers (`Production`, `Workshop`, ...), several per printer. History, costs, stats and
+  the CSV export filter by a group or any hand-picked set of printers and sum them, with a **By group** table
+  (a printer in two groups counts in both). Groups are edited on the Printers page; REST `GET /api/groups`,
+  `PUT /api/printers/{name}/groups`, `POST /api/groups/rename`, `DELETE /api/groups/{name}`; MCP `list_groups`,
+  `set_printer_groups`, and `group` / `printers` filters on `job_stats`, `recent_jobs`, `cost_per_part`.
+
 ## [1.0.0] - 2026-10-12
 
 First public release.
