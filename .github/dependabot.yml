@@ -6,6 +6,10 @@ updates:
     schedule:
       interval: "weekly"
     labels: ["dependencies"]
+    ignore:
+      # The MCP SDK 2.x is a breaking change: move to it deliberately, in its own change.
+      - dependency-name: "mcp"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
