@@ -6,6 +6,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- **Two-filament prints: you can now choose the spools.** The start-print confirm used to offer the spool grid only for single-filament
+  jobs; a job with a PETG body and a PLA interface layer just showed text, with no way to pick the PETG slot you wanted. It now shows one
+  row per filament ("Filament 1 - PETG - file colour GREEN - 38 g") with every loaded slot as a tap target and the suggested one starred.
+  Tapping a slot another filament holds swaps the two; a different material (file wants PETG, slot holds PLA) is said in words and allowed.
+  The ticket and bed-clear tick are unchanged. `suggest_mapping` / `/suggest` gain `filaments` (type, colour word, grams).
+
+### Added
+
+- **Remembered spools per file.** When a print starts, the Hub notes which spool (slot, material, colour) fed each filament, in
+  `spool_memory.json` in the data folder (owner-only, last 500 files). The next proposal for the same file on the same printer starts from
+  those spools, even if they moved to another slot, and says so ("Same spools as your last print of this file (Oct 13)"); if one is no
+  longer loaded the normal proposal is used. Agents see the same note. It only changes the proposal: nothing starts without the human.
+
 ## [1.0.0] - 2026-10-13
 - **Name: Fabrica** (title "Fabrica — Print Farm"). README, About screen and the Home Screen app name; repository, image and container stay `fabrica`.
 

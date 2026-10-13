@@ -269,6 +269,7 @@ class ServerBase(unittest.TestCase):
         server.PRINTERS.clear()
         server._START_PENDING.clear()                       # the fakes never turn RUNNING, so a "start pending" would linger
         server.START_TICKETS.clear()
+        server.SPOOL_MEMORY.clear()                          # a remembered choice from an earlier test must not steer this one
         try:
             os.remove(server.CACHE_PATH)
         except OSError:

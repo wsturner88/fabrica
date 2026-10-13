@@ -180,6 +180,7 @@ class Base(unittest.TestCase):
         server.PRINTERS.clear()
         server._START_PENDING.clear()
         server.START_TICKETS.clear()
+        server.SPOOL_MEMORY.clear()                          # a remembered choice from an earlier test must not steer this one
         server.START_TICKETS.clock = time.time
         try:
             os.remove(server.CACHE_PATH)
