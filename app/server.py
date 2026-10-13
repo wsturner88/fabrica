@@ -48,6 +48,7 @@ import costs
 import discovery
 import detection
 import agentkit  # ==== agent kit ====
+import spool_memory
 
 # Every file the Hub creates is private to its owner (0600): settings.json holds a webhook URL / ntfy topic that act
 # like passwords, jobs.sqlite holds file names that can carry customer information. (Second security review.)
@@ -106,7 +107,7 @@ _EXISTING_INSTALL = security.detect_existing_install(DATA_DIR, legacy_config=boo
 
 PRIVATE_DATA_FILES = ("settings.json", "printers.json", "secrets.json", "api_keys.json", "dashboard_auth.json",
                       "jobs.sqlite", "jobs.sqlite-wal", "jobs.sqlite-shm", "metacache.json", "login_limiter.reset",
-                      "tray-changes.log")
+                      "tray-changes.log", "spool_memory.json")
 
 
 def harden_data_files(data_dir=None) -> list:
@@ -126,6 +127,8 @@ def harden_data_files(data_dir=None) -> list:
 
 
 harden_data_files()
+# Which spools each file was last printed with (see spool_memory.py): shapes the PROPOSAL only, never starts anything.
+SPOOL_MEMORY = spool_memory.SpoolMemory(os.path.join(DATA_DIR, spool_memory.FILE_NAME))
 STORE = fleet_store.FleetStore(DATA_DIR)
 _legacy = CFG.get("printers")
 if _legacy:
@@ -1198,6 +1201,106 @@ def _map_filaments(filaments: list, trays: list, rule) -> tuple:
     return mapping, clauses, notes, blocked
 
 
+# ---- spool memory: re-use last time's spools for the same file --------------------------------------------------
+def _cname(hex_color) -> str:
+    """color_name() that never raises on a half-reported tray colour."""
+    try:
+        return color_name(hex_color)
+    except Exception:
+        return "UNKNOWN"
+
+
+def _spool_matches(tray: dict, spool: dict) -> bool:
+    """Does this tray hold the remembered spool's material + colour (same hex, or the same colour word)?"""
+    if str(tray.get("type") or "").upper() != str(spool.get("type") or "").upper():
+        return False
+    return (str(tray.get("color") or "").upper() == str(spool.get("color") or "").upper()
+            or _cname(tray.get("color")) == str(spool.get("color_name") or "").upper())
+
+
+def _resolve_remembered(rem: dict, filaments: list, trays: list, base_mapping: list):
+    """Re-resolve a remembered choice against the trays loaded NOW -> (mapping, clauses, notes) or None.
+    Never changes which filament slots the job uses (`base_mapping` says which); each filament keeps its old tray if
+    that tray still holds the same material + colour, else takes any other free tray that does (the spool moved).
+    One unresolved filament -> None, and the caller keeps the normal proposal for the whole job."""
+    used = {i for i, v in enumerate(base_mapping) if v >= 0}
+    spools = {s["index"]: s for s in rem.get("spools") or []}
+    if not used or set(spools) != used:
+        return None
+    by_tray = {t["tray"]: t for t in trays}
+    chosen, claimed = {}, set()
+    for i, sp in spools.items():                                  # pass 1: the spool is still where it was
+        t = by_tray.get(sp["tray"])
+        if t is not None and _spool_matches(t, sp):
+            chosen[i] = t["tray"]
+            claimed.add(t["tray"])
+    for i in sorted(spools):                                      # pass 2: it moved - any free tray with the same spool
+        if i in chosen:
+            continue
+        t = next((t for t in trays if t["tray"] not in claimed and _spool_matches(t, spools[i])), None)
+        if t is None:
+            return None
+        chosen[i] = t["tray"]
+        claimed.add(t["tray"])
+    mapping = [chosen.get(i, -1) for i in range(len(base_mapping))]
+    fl_by_idx = {((f.get("id") or n + 1) - 1): f for n, f in enumerate(filaments)}
+    clauses, notes = [], []
+    for i in sorted(chosen):
+        t, fl = by_tray[chosen[i]], fl_by_idx.get(i) or {}
+        want = fl.get("type") or t["type"]
+        clauses.append(f'filament {i + 1} {want} \u2192 slot {t["slot_1based"]} ({_cname(t["color"])} {t["type"]})')
+        if str(want).upper() != str(t["type"]).upper():
+            notes.append(f'\u26a0 filament {i + 1} is sliced for {want} but slot {t["slot_1based"]} holds {t["type"]} '
+                         f"(your choice last time)")
+    return mapping, clauses, notes
+
+
+def _day_words(ts) -> str:
+    t = time.localtime(ts)
+    return time.strftime("%b ", t) + str(t.tm_mday)
+
+
+def _filament_rows(filaments: list, mapping: list) -> list:
+    """Per-filament facts for the dashboard's spool picker (colours as WORDS). `index` = position in ams_mapping,
+    `tray` = the proposed tray (-1: not used / not matched). `role` = "main" for the filament with the most grams
+    when the file says; nothing else is guessed (support / interface layers are not marked in the file)."""
+    grams = [f.get("used_g") for f in filaments]
+    main = None
+    if len(filaments) > 1 and all(isinstance(g, (int, float)) for g in grams):
+        top = max(grams)
+        if grams.count(top) == 1:
+            main = grams.index(top)
+    out = []
+    for n, f in enumerate(filaments):
+        idx = (f.get("id") or n + 1) - 1
+        row = {"index": idx, "id": idx + 1, "type": f.get("type"), "color_name": _cname(f.get("color")),
+               "used_g": f.get("used_g"), "tray": mapping[idx] if 0 <= idx < len(mapping) else -1}
+        if n == main:
+            row["role"] = "main"
+        out.append(row)
+    return out
+
+
+def _remember_spools(prn, filename: str, mapping: list):
+    """A print was just sent: note which spool (tray, material, colour) fed each filament. Never raises."""
+    if _is_octo(prn):
+        return
+    try:
+        trays = {t["tray"]: t for t in prn.ams_trays() if t.get("type")}
+        spools = []
+        for i, tray in enumerate(mapping):
+            if tray < 0:
+                continue
+            t = trays.get(tray)
+            if t is None:
+                return
+            spools.append({"index": i, "tray": tray, "type": t["type"], "color": t["color"],
+                           "color_name": _cname(t["color"])})
+        SPOOL_MEMORY.record(prn.name, costs.file_key(filename), spools)
+    except Exception as e:
+        print(f"[spool-memory] not recorded: {type(e).__name__}: {e}", flush=True)
+
+
 @_tool
 def suggest_mapping(printer: str, filename: str) -> str:
     """Work out which AMS tray(s) a job should use — applying the user's part-color
@@ -1205,6 +1308,9 @@ def suggest_mapping(printer: str, filename: str) -> str:
     single-use code that expires after 5 minutes and is tied to this printer, this file and this
     tray mapping: relay the plan to the human, get their go-ahead and their statement that the
     bed is clear, then call start_print with it. It cannot be written by hand or reused.
+    When this file was printed on this printer before and those spools are still loaded, the plan starts
+    from the same spools and says so in `notes` ("Same spools as your last print of this file"); `filaments`
+    lists what each filament of the job is (material, colour word, grams).
     A read-only key never makes the Hub download anything; a Bambu that is printing is not asked
     for files either (cached information only)."""
     prn = _pick(printer)
@@ -1250,7 +1356,19 @@ def suggest_mapping(printer: str, filename: str) -> str:
     trays = [t for t in prn.ams_trays() if t["type"]]
     rule = convention_for(filename)
 
-    mapping, clauses, notes, blocked = _map_filaments(meta.get("filaments", []), trays, rule)
+    filaments = meta.get("filaments", [])
+    mapping, clauses, notes, blocked = _map_filaments(filaments, trays, rule)
+    remembered = None
+    if not blocked and mapping:
+        try:        # the spools this file was printed with last time, if they are still loaded (wherever they sit now)
+            rem = SPOOL_MEMORY.lookup(prn.name, costs.file_key(filename))
+            res = _resolve_remembered(rem, filaments, trays, mapping) if rem else None
+        except Exception:
+            rem = res = None
+        if res:
+            mapping, clauses, rem_notes = res
+            notes = [f"Same spools as your last print of this file ({_day_words(rem['ts'])})"] + rem_notes
+            remembered = rem["ts"]
     mapping_described = "\n".join(clauses)
     mc = _model_check(prn, filename, [meta])
     confirm = "" if blocked else START_TICKETS.issue(prn, filename, size, mapping, _ams_fingerprint(prn),
@@ -1265,6 +1383,8 @@ def suggest_mapping(printer: str, filename: str) -> str:
         "file": filename, "printer": prn.name, "printer_kind": getattr(prn, "kind", ""),
         "print_time": meta.get("print_time"), "weight_g": meta.get("weight_g"),
         "ams_mapping": mapping, "mapping_described": mapping_described,
+        "filaments": _filament_rows(filaments, mapping),
+        "remembered": remembered is not None, "remembered_at": remembered,
         "notes": notes,
         "blocked": blocked, **mc,
         "confirm_string": confirm, "confirm_expires_in_s": START_TICKET_TTL_S if confirm else None,
@@ -1376,6 +1496,7 @@ def _start_locked(prn, filename, ams_mapping, nonce, allow_remap, model_override
         return f"REFUSED: {e}"
     _START_PENDING[key] = time.monotonic()
     _RECENT_STARTS[key] = {"key": costs.file_key(filename), "mapping": list(ams_mapping), "ts": time.time()}
+    _remember_spools(prn, filename, ams_mapping)
     time.sleep(8)
     s2 = prn.snapshot()
     if s2.get("state") in controls.BUSY_STATES:

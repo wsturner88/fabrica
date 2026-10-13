@@ -197,6 +197,20 @@
   .cfnocam { margin:8px 0 0; min-height:48px; aspect-ratio:auto; }
   .cfactions { position:sticky; bottom:-22px; background:var(--card); padding:8px 0 0; margin-top:8px; z-index:2; }
   .cfactions .row { margin:0; }
+  /* multi-filament start: one row per filament, tap the spool each should use (the bed-clear box rides in the sticky footer) */
+  .msrow { margin:6px 0 0; padding:8px 10px; background:var(--card2); border:1px solid var(--line); border-radius:12px; }
+  .msintro { font-size:17px; color:var(--txt); margin-top:8px; }
+  .mshead { font-size:16px; font-weight:800; line-height:1.25; overflow-wrap:anywhere; }
+  .mshead .msrole { font-weight:600; color:var(--dim); }
+  .msgrid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:6px; margin-top:6px; }
+  .msgrid button { min-height:60px; padding:4px 6px; font-size:15px; line-height:1.2; border:1px solid var(--line); background:var(--card); overflow-wrap:anywhere; }
+  .msgrid button[aria-pressed="true"] { border:3px solid var(--accent); background:#1d3b5c; }
+  .msgrid button small { display:block; font-size:13px; font-weight:600; color:var(--dim); }
+  .mswarn.warnbox { margin:6px 0 0; padding:5px 10px; font-size:15px; font-weight:700; }
+  .mscol { margin:5px 0 0; font-size:14px; }
+  #msmsg:empty { display:none; }
+  #msmsg { margin:6px 0 0; font-size:15px; color:var(--txt); }
+  .cfmulti .toggle { margin:8px 0 0; }
   /* short kiosk screens (1024x600): keep the bed-clear box and the START button on screen without scrolling */
   @media (min-width:761px) and (max-height:640px) {
     .cfdlg { margin:-10px -4px; }
@@ -208,6 +222,20 @@
     .cfdlg .warnbox.cfmis { font-size:15px; padding:6px 10px; margin:4px 0; }
     .cfdlg .cfactions { margin-top:4px; padding-top:6px; }
     .cfdlg #spoolgrid button { min-height:56px !important; }
+    .cfdlg .msrow { margin-top:4px; padding:5px 8px; }
+    .cfdlg .mshead { font-size:15px; }
+    .cfdlg .msgrid { margin-top:4px; gap:5px; }
+    .cfdlg .msgrid button { min-height:50px; font-size:14px; }
+    .cfdlg .msgrid button small { font-size:12px; }
+    .cfdlg .mswarn.warnbox { margin-top:4px; padding:3px 8px; font-size:14px; }
+    .cfdlg .mscol { margin-top:3px; font-size:13px; }
+    .cfdlg.cfmulti .toggle { margin:4px 0 0; padding:6px 12px; }
+    .cfdlg.cfmulti .cfcam { width:112px; margin-top:2px; }
+    .cfdlg.cfmulti .cfcap { display:none; }
+    .cfdlg.cfmulti .cfactions .row > button:first-child { flex:0 0 26%; }
+    .cfdlg.cfmulti .cfactions .row > button.grow:last-child { flex:1 1 0; min-width:0; }
+    .cfdlg .msintro { font-size:15px; margin-top:4px; }
+    .cfdlg.cfmulti .cfsub { margin-top:0; }
   }
   /* phones: the page is a fixed 1024x600 kiosk layout; below 760px let it flow instead */
   @media (max-width:760px), (orientation:landscape) and (max-height:500px) and (max-width:932px) {
@@ -2369,6 +2397,9 @@ function detLine(d){
   .cfactions .row > button:first-child { flex:0 0 30%; }
   .cfactions .row > button.grow:last-child { flex:1 1 0; min-width:0; }
   #spoolgrid { grid-template-columns:repeat(2,minmax(0,1fr)) !important; }
+  .msgrid { grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
+  .msgrid button { min-height:56px; font-size:16px; }
+  .cfmulti .cfactions .toggle { margin:0 0 8px; }
   .cfcam { width:100%; }
   .toggle { font-size:17px; }
   #camfull .camtop { padding:calc(10px + var(--sat)) calc(12px + var(--sar)) 10px calc(12px + var(--sal)); }
@@ -2442,6 +2473,8 @@ function detLine(d){
   .toggle { margin:8px 0; padding:8px 12px; }
   #spoolgrid { grid-template-columns:repeat(4,minmax(0,1fr)) !important; }
   #spoolgrid button { min-height:60px !important; }
+  .msgrid { grid-template-columns:repeat(4,minmax(0,1fr)); }
+  .msgrid button { min-height:52px; }
   .cfactions .row > button { min-height:48px; }
   #camfull .camview img { max-height:calc(100vh - 70px); }
 }
@@ -3902,7 +3935,9 @@ async function askPrint(filename){
     const pickable = trays.length > 0 && posEntries.length === 1;
     window._pickIdx = pickable ? posEntries[0].i : null;
     SEL = pickable ? posEntries[0].v : null;
-    const spoolHtml = pickable ? `
+    // a job that uses 2+ AMS slots: one row per filament, the human taps the spool each one should use (see msBuild)
+    const multi = msBuild(d, trays, mapping);
+    const spoolHtml = multi ? msHtml() : pickable ? `
       <div class="note" style="font-size:17px;color:var(--txt);margin-top:10px"><b>Tap the spool to print with:</b></div>
       <div class="colorgrid" id="spoolgrid" style="grid-template-columns:repeat(${Math.min(trays.length,4)},1fr)">` +
         trays.map(t=>`<button class="big" data-act="pickSpool" data-tray="${t.tray}"
@@ -3925,7 +3960,11 @@ async function askPrint(filename){
       <div class="note cfcap">Live view of ${CUR} &mdash; check the bed is clear <span id="cfstat"></span></div>`
       : `<div class="nocam cfnocam">No camera on this printer</div>`;
     const jobBits = [d.print_time, d.weight_g ? Math.round(d.weight_g)+' g' : ''].filter(Boolean).map(pmEsc).join(' &middot; ');
-    $('mbody').innerHTML = `<div class="cfdlg">
+    // with a multi-filament picker the bed-clear box rides in the sticky footer, so it stays on screen next to START
+    const plateHtml = `<div class="toggle" style="border:2px solid var(--warn); font-size:19px">
+        <input type="checkbox" id="plateok" onchange="armStart()">
+        <label for="plateok">CONFIRM: THE PRINT BED IS CLEAR</label></div>`;
+    $('mbody').innerHTML = `<div class="cfdlg${multi ? ' cfmulti' : ''}">
       <h2 class="cfhead" style="margin:0">START A PRINT ON <span class="cfprn">${CUR}</span>?</h2>
       <div class="cfsub">${fam}</div>
       <div class="cffile">${esc(fileShort)}${jobBits ? ' <span class="cfsub" style="font-weight:600">&middot; ' + jobBits + '</span>' : ''}</div>
@@ -3933,17 +3972,16 @@ async function askPrint(filename){
       ${spoolHtml}
       ${notes}
       ${camHtml}
-      <div class="toggle" style="border:2px solid var(--warn); font-size:19px">
-        <input type="checkbox" id="plateok" onchange="armStart()">
-        <label for="plateok">CONFIRM: THE PRINT BED IS CLEAR</label></div>
-      <div class="cfactions"><div class="row">
+      ${multi ? '' : plateHtml}
+      <div class="cfactions">${multi ? plateHtml : ''}<div class="row">
         <button class="big grow" onclick="closeModal()">Back</button>
         <button class="big grow" id="startbtn" disabled
           style="opacity:.4"
           data-act="start">START PRINT ON ${CUR}</button>
       </div></div></div>`;
     if(s.camera) cfStart();
-    if(pickable) highlightSpool();
+    if(multi) msRender();
+    else if(pickable) highlightSpool();
   }catch(e){
     if(gone()) return;
     errorCard('Could not start print', e.message);
@@ -3951,6 +3989,70 @@ async function askPrint(filename){
 }
 
 function pickSpool(tray){ SEL = tray; highlightSpool(); }
+
+// ---- multi-filament jobs: one row per filament the job uses; tap the spool it should print with ----
+// MS.pick = {filament index -> tray}. Tapping a spool another filament holds swaps the two (never two filaments on one tray).
+// Material / colour differences are shown in WORDS and allowed (interface layers mix materials on purpose).
+let MS = { rows:null, pick:{}, sugg:{}, trays:[], msg:'' };
+
+function msBuild(d, trays, mapping){
+  MS = { rows:null, pick:{}, sugg:{}, trays:[], msg:'' };
+  const list = Array.isArray(d.filaments) ? d.filaments : [];
+  const used = mapping.filter(v=>v>=0).length;
+  const rows = list.map(f=>({idx:Number(f.index), kind:String(f.type||''), colour:String(f.color_name||''),
+                             g:typeof f.used_g === 'number' ? f.used_g : null, role:String(f.role||'')}))
+    .filter(r=>Number.isInteger(r.idx) && r.idx >= 0 && mapping[r.idx] >= 0)
+    .sort((a,b)=>a.idx-b.idx);
+  if(used < 2 || rows.length !== used || !trays.length) return false;
+  MS.rows = rows;
+  MS.trays = trays.map(t=>({tray:t.tray, slot:Number(t.slot_1based)||t.tray+1, kind:String(t.type||''), colour:String(t.color_name||'')}));
+  rows.forEach(r=>{ MS.pick[r.idx] = mapping[r.idx]; MS.sugg[r.idx] = mapping[r.idx]; });
+  return true;
+}
+
+function msHtml(){
+  return `<div class="note msintro"><b>This print uses ${MS.rows.length} filaments &mdash; tap the spool for each:</b></div>
+    <div id="msrows"></div><div id="msmsg" role="status" aria-live="polite"></div>`;
+}
+
+function msGrams(g){ return g === null ? '' : ' &middot; ' + esc(g >= 10 ? Math.round(g) : String(Math.round(g*10)/10)) + ' g'; }
+
+function msRender(){
+  const el = $('msrows');
+  if(!el || !MS.rows) return;
+  el.innerHTML = MS.rows.map(r=>{
+    const sel = MS.pick[r.idx], cur = MS.trays.find(t=>t.tray === sel);
+    const btns = MS.trays.map(t=>{
+      const on = t.tray === sel;
+      return `<button class="big" data-act="pickMulti" data-idx="${r.idx}" data-tray="${t.tray}" aria-pressed="${on ? 'true' : 'false'}">${on ? '&#10004; ' : ''}Slot ${esc(t.slot)}<br>${esc(t.colour)} ${esc(t.kind)}${MS.sugg[r.idx] === t.tray ? '<small>&#9733; suggested</small>' : ''}</button>`;
+    }).join('');
+    let flag = '';
+    if(cur && cur.kind.toUpperCase() !== r.kind.toUpperCase()){
+      flag = `<div class="mswarn warnbox" role="alert">&#9888; File wants ${esc(r.kind)} &mdash; Slot ${esc(cur.slot)} holds ${esc(cur.kind)}. Allowed &mdash; check it is on purpose.</div>`;
+    }else if(cur && cur.colour.toUpperCase() !== r.colour.toUpperCase()){
+      flag = `<div class="note mscol">Colour: file says ${esc(r.colour)}, Slot ${esc(cur.slot)} is ${esc(cur.colour)}.</div>`;
+    }
+    return `<div class="msrow"><div class="mshead">Filament ${r.idx + 1} &middot; ${esc(r.kind)} &middot; file colour ${esc(r.colour)}${msGrams(r.g)}${r.role === 'main' ? ' <span class="msrole">&middot; main</span>' : ''}</div>
+      <div class="msgrid">${btns}</div>${flag}</div>`;
+  }).join('');
+  $('msmsg').textContent = MS.msg;
+}
+
+function msPick(idx, tray){
+  if(!MS.rows || !MS.rows.some(r=>r.idx === idx) || !MS.trays.some(t=>t.tray === tray)) return;
+  const prev = MS.pick[idx];
+  if(prev === tray) return;
+  MS.msg = '';
+  for(const r of MS.rows){
+    if(r.idx !== idx && MS.pick[r.idx] === tray){        // that spool was the other filament's: swap, never two filaments on one tray
+      MS.pick[r.idx] = prev;
+      const t = MS.trays.find(x=>x.tray === prev);
+      MS.msg = 'Swapped: Filament ' + (r.idx + 1) + ' now uses Slot ' + (t ? t.slot : prev + 1) + '.';
+    }
+  }
+  MS.pick[idx] = tray;
+  msRender();
+}
 
 function highlightSpool(){
   document.querySelectorAll('#spoolgrid [data-tray]').forEach(b=>{
@@ -3962,9 +4064,10 @@ function highlightSpool(){
 
 function startSelected(){
   const suggestedMapping = ASK.mapping || [], suggestedConfirm = ASK.confirm;
-  if(SEL !== null && window._pickIdx !== null){
+  if(MS.rows || (SEL !== null && window._pickIdx !== null)){
     const mapping = suggestedMapping.slice();
-    mapping[window._pickIdx] = SEL;
+    if(MS.rows){ MS.rows.forEach(r=>{ mapping[r.idx] = MS.pick[r.idx]; }); }
+    else mapping[window._pickIdx] = SEL;
     // A single-use ticket ("ph-...") from suggest is sent back as it is, with the spool the human picked in the mapping (the
     // Hub accepts a different spool for the dashboard). An older Hub wanted file|printer|mapping written out.
     const ticket = typeof suggestedConfirm === 'string' && suggestedConfirm.indexOf('ph-') === 0;
@@ -4628,6 +4731,7 @@ const ACT = {
   trayColor: b => doTray(Number(b.dataset.tray), b.dataset.mat, b.dataset.color),
   trayBack:  b => askTray(Number(b.dataset.tray), b.dataset.cur),
   pickSpool: b => pickSpool(Number(b.dataset.tray)),
+  pickMulti: b => msPick(Number(b.dataset.idx), Number(b.dataset.tray)),
   frSet:     () => frSet(),
   frSkip:    () => frSkip(),
   frBack:    () => frBack(),
