@@ -1,9 +1,11 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="app/static/brand/logo-lockup.svg">
-    <img src="app/static/brand/logo-lockup-light.svg" alt="Fabrica" width="420">
+    <img src="app/static/brand/logo-lockup-light.svg" alt="Fabrica Farm" width="420">
   </picture>
 </p>
+
+<h1 align="center">Fabrica Farm</h1>
 
 <h3 align="center">Your whole print farm on one screen — and in your AI agent's hands.</h3>
 
@@ -27,11 +29,16 @@
 - 🔔 **Alerts to your phone** — Telegram, Discord, ntfy, email or webhook, with a photo
 - 💰 **True cost per part** — filament, power and wear, failed prints included
 - 📊 **Print history** — success rate, material used and cost, by printer and by file
+- 🏷️ **Printer groups** — tag printers (Production, Workshop…) and see history and costs per group
+- 📚 **One file library** — every file on every printer in one place: search, folders, details, send to any idle printer
+- ✏️ **Rename files safely** — preview, approve, and the old file is removed only after the new one is verified
 - 💾 **One-tap backups** — every file on every printer, saved and downloadable
 - 🔎 **Finds your printers** — scans your network and fills in the details for you
 - 🎛️ **Printer controls** — light, pre-heat, cool down, load and unload filament
-- 🤖 **Agent-first** — 30+ MCP tools: let Claude or any AI agent run your farm
+- 🤖 **Agent-first** — 47 MCP tools: let Claude or any AI agent run your farm
+- 🧭 **Agents teach themselves** — connect an agent and Fabrica hands it the rules and guides, and tells it when anything changes
 - 🔐 **Safe by design** — API keys, optional sign-in, and a human confirms every print start
+- 📱 **iPhone and Android ready** — add it to your Home Screen and it works like an app
 - 📺 **Wall-screen ready** — built for a 10″ touchscreen next to your printers
 
 ## 📸 See it

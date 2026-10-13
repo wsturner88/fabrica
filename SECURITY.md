@@ -65,13 +65,18 @@ issue before disclosing it, we will not pursue or support legal action over your
   in a URL query string. An agent cannot create or revoke keys or change security settings through MCP.
 - **Dashboard sign-in (optional).** Turn on a dashboard password (and an optional view-only password) under
   Settings > Security. Sessions and trusted devices can be listed and revoked, and attempts are
-  rate-limited. A brand-new install shows a first-run prompt offering to protect the dashboard. Key and
-  security administration needs a separate admin password.
+  rate-limited. A brand-new install shows a first-run prompt offering to protect the dashboard (set a
+  password or skip it). **Whoever opens the dashboard first answers that prompt**, so open it right after
+  starting Fabrica. Key and security administration needs a separate admin password.
 - **Secrets are write-only.** Printer access codes, API keys and passwords are never returned by any page,
   REST call or MCP tool.
 - **Trust model.** Without a dashboard password, the dashboard is protected only by your network: anyone
   who can reach its port can operate the printers through it. Fabrica is built for a home, shop or VPN
   network you trust. **Do not expose it to the internet.**
+- **Human-approval flags.** Flags such as `approved_by_human`, `model_override` and `bed_clear_confirmed_by_human`
+  are statements the calling agent makes about the human; the server cannot verify them. They are guard
+  rails against an agent acting on its own, not authentication. Give an agent a `read` key unless you want it
+  to control printers.
 - **Spaghetti detection (optional)** is alert-only and never pauses or stops a print. The model container
   has no published port and sits on an internal Docker network.
 

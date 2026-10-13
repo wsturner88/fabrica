@@ -868,6 +868,12 @@ def failing(code):
     return fn
 
 
+def _octo_delete_past_idle_guard(d):
+    """The driver's idle guard (review 3 F6) refuses first on a host that cannot answer; skip it to reach the redirect."""
+    with mock.patch.object(bambu, "_require_idle_for_delete"):
+        d.sd_delete("job.gcode")
+
+
 class TestHttpDriversRefuseRedirects(unittest.TestCase):
     def hosts(self, reply):
         h = Hosts(reply)
@@ -886,7 +892,7 @@ class TestHttpDriversRefuseRedirects(unittest.TestCase):
         calls = {
             "octoprint": [("stop", lambda d: d.stop()), ("start", lambda d: d.start_print("job.gcode")),
                           ("pause", lambda d: d.pause()), ("temps", lambda d: d.set_temps(200, 60)),
-                          ("delete", lambda d: d.sd_delete("job.gcode")), ("connect", lambda d: d.connect_serial())],
+                          ("delete", lambda d: _octo_delete_past_idle_guard(d)), ("connect", lambda d: d.connect_serial())],
             "prusalink": [("cancel", lambda d: d._call("DELETE", "/api/v1/job/7", what="cancel the job")),
                           ("start", lambda d: d.start_print("job.gcode")),
                           ("delete", lambda d: d.sd_delete("job.gcode"))],

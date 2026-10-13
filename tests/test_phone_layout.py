@@ -76,6 +76,40 @@ class TestPhoneLayout(unittest.TestCase):
         self.assertIn('title="Reload">&#8635;</button>', HTML)
         self.assertIn('button[title="Reload"]', phone_block())
 
+    def test_phone_header_has_at_most_three_buttons_plus_a_menu(self):
+        """Phones keep Printers + Library and a More menu; History / Backups / Settings / Sign out move into it."""
+        i = HTML.index('<section id="home"')
+        row = HTML[i:HTML.index("</section>", i)]
+        row = row[:row.index('<div id="sec-banner"')]
+        buttons = re.findall(r"<button\b([^>]*)>(.*?)</button>", row, re.S)
+        hidden = {re.sub(r"<[^>]+>|&[^;]+;", "", t).strip() for a, t in buttons if "phone-hide" in a}
+        shown = {re.sub(r"<[^>]+>|&[^;]+;", "", t).strip() for a, t in buttons if "phone-hide" not in a}
+        self.assertEqual(hidden, {"History", "Backups", "Settings", "Sign out"})
+        self.assertEqual(shown, {"Printers", "Library", "More", ""})        # "" = the reload arrow
+        self.assertLessEqual(len(shown - {"More", ""}), 3)
+        blk = phone_block()
+        self.assertIn("#home > .row:first-child > .phone-hide { display:none !important; }", blk)
+        self.assertIn("#home > .row:first-child > #morebtn { display:block; }", blk)
+        # the menu and its button exist on phones only: hidden in the base styles, switched on inside the phone block
+        base = HTML[:HTML.index("/* ==== phone layout ====")]
+        self.assertIn("#morebtn, #moresheet { display:none; }", base)
+        css = "".join(re.findall(r"<style>(.*?)</style>", base, re.S))
+        self.assertNotIn("phone-hide", css)                  # nothing hides those buttons outside the phone block
+        self.assertIn("#moresheet.on { display:flex;", blk)
+        self.assertRegex(blk, r"#moresheet \.morebox button \{[^}]*min-height:56px")      # big targets, words not icons
+
+    def test_more_menu_lists_the_moved_pages_with_words(self):
+        i = HTML.index('<div id="moresheet">')
+        sheet = HTML[i:HTML.index("</div>\n</div>", i)]
+        for go, word in (("history", "History"), ("backups", "Backups"), ("settings", "Settings"), ("signout", "Sign out")):
+            self.assertRegex(sheet, r'data-act="moreGo" data-go="%s">%s</button>' % (go, word))
+        self.assertIn('role="dialog"', sheet)
+        self.assertIn('data-act="moreClose"', sheet)
+        for fn in ("moreOpen:  () => moreOpen(),", "moreClose: () => moreClose(),", "moreGo:    b => moreGo(b.dataset.go),"):
+            self.assertIn(fn, HTML)
+        self.assertIn("e.key === 'Escape'", HTML)
+        self.assertIn("$('more-signout').hidden = !so || so.hidden;", HTML)       # Sign out only when the header one would show
+
     def test_manifest_fields(self):
         i = SERVER.index('@mcp.custom_route("/manifest.webmanifest"')
         body = SERVER[i:SERVER.index("@mcp.custom_route", i + 10)]

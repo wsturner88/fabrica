@@ -118,11 +118,12 @@ def parse_slice_info(text) -> dict:
 def slice_info_from_3mf(data: bytes) -> dict:
     """parse_slice_info() for the bytes of a .gcode.3mf (zip). Never raises."""
     try:
-        z = zipfile.ZipFile(io.BytesIO(data))
+        import bambu                                    # bounded zip open + the 8 MB per-member cap
+        z = bambu.open_zip_bounded(data)
         names = [n for n in z.namelist() if n.endswith("slice_info.config")]
         if not names:
             return {"plates": [], "error": "no slice_info.config"}
-        return parse_slice_info(z.read(names[0]))
+        return parse_slice_info(bambu._zread(z, names[0]))
     except Exception as e:
         return {"plates": [], "error": f"unreadable 3mf: {type(e).__name__}"}
 

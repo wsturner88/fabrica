@@ -36,7 +36,7 @@ import unicodedata
 import zipfile
 
 import modelcheck
-from bambu import extract_gcode_png, extract_plate_png, parse_3mf_meta
+from bambu import extract_gcode_png, extract_plate_png, open_zip_bounded, parse_3mf_meta
 
 ALLOWED_EXT = (".gcode.3mf", ".3mf", ".bgcode", ".gcode")
 DEFAULT_MAX_MB = 500
@@ -209,7 +209,7 @@ def _extras_3mf(data: bytes) -> dict:
     """Layer height, layers, nozzle, temperatures, infill, supports and slicer of a Bambu-style .3mf. Best effort:
     every field is optional and a read problem just leaves it out."""
     out = {}
-    z = zipfile.ZipFile(io.BytesIO(data))
+    z = open_zip_bounded(data)
     names = z.namelist()
     settings = {}
     for n in names:

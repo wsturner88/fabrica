@@ -1,4 +1,4 @@
-# Install Fabrica
+# Install Fabrica Farm
 
 About 10 minutes. Pick your edition first:
 
@@ -37,6 +37,8 @@ Then turn it on: **Settings → Detection → This machine**.
 
 ## 4. Open the dashboard
 `http://<your-machine>:8271/dashboard` (on the same machine: `http://localhost:8271/dashboard`)
+
+Open the dashboard right after starting it — the first person to open it sets the password.
 
 ## 5. Add your printers
 Tap **Add your first printer** (or **Discover printers** to scan your network), pick the kind

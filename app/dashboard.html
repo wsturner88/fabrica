@@ -360,16 +360,29 @@
 <section id="home" class="screen on">
   <div class="row"><h1 id="hub-title"><span class="brand"><img src="/static/brand/mark.svg" alt=""><span class="wordmark">fabrica<i>_</i></span></span></h1><span class="grow"></span><span id="vo-chip" class="chip idle" hidden title="This sign-in can look but not change anything">VIEW-ONLY</span><span id="clock" style="color:var(--dim);font-size:18px"></span>
     <button data-ctl onclick="openPrinters()" style="min-height:44px;font-size:16px;padding:8px 14px">Printers</button>
-    <button onclick="openHistory()" style="min-height:44px;font-size:16px;padding:8px 14px">History</button>
+    <button onclick="openHistory()" class="phone-hide" style="min-height:44px;font-size:16px;padding:8px 14px">History</button>
     <button onclick="openLibrary()" style="min-height:44px;font-size:16px;padding:8px 14px" title="Every print file on the Hub and the printers">Library</button><!-- ==== library ==== -->
-    <button data-ctl onclick="openBackups()" style="min-height:44px;font-size:16px;padding:8px 14px">Backups</button>
-    <button data-ctl onclick="openSettings()" style="min-height:44px;font-size:16px;padding:8px 14px">Settings</button>
-    <button id="signout-btn" hidden onclick="secSignOut()" style="min-height:44px;font-size:16px;padding:8px 14px" title="Sign this browser out of the dashboard">Sign out</button>
+    <button id="morebtn" data-act="moreOpen" aria-haspopup="dialog" aria-expanded="false" style="min-height:44px;font-size:16px;padding:8px 14px">More &#9662;</button><!-- phone menu: see "phone layout" -->
+    <button data-ctl onclick="openBackups()" class="phone-hide" style="min-height:44px;font-size:16px;padding:8px 14px">Backups</button>
+    <button data-ctl onclick="openSettings()" class="phone-hide" style="min-height:44px;font-size:16px;padding:8px 14px">Settings</button>
+    <button id="signout-btn" class="phone-hide" hidden onclick="secSignOut()" style="min-height:44px;font-size:16px;padding:8px 14px" title="Sign this browser out of the dashboard">Sign out</button>
     <button onclick="location.reload()" style="min-height:44px;min-width:44px;font-size:18px;padding:8px 14px" title="Reload">&#8635;</button></div>
   <div id="sec-banner" class="secbanner" role="status" hidden></div>
   <div class="hubdown" role="alert" aria-live="assertive" hidden></div>
   <div id="fleet"></div>
 </section>
+
+<!-- Phone-only menu (History / Backups / Settings / Sign out). Never shown on the wall screen or desktop. -->
+<div id="moresheet">
+  <div class="morebk" data-act="moreClose"></div>
+  <div class="morebox" role="dialog" aria-modal="true" aria-label="More pages">
+    <button data-act="moreGo" data-go="history">History</button>
+    <button data-ctl data-act="moreGo" data-go="backups">Backups</button>
+    <button data-ctl data-act="moreGo" data-go="settings">Settings</button>
+    <button id="more-signout" hidden data-act="moreGo" data-go="signout">Sign out</button>
+    <button class="moreclose" data-act="moreClose">Close</button>
+  </div>
+</div>
 
 <section id="printer" class="screen">
   <div class="row tbar">
@@ -892,7 +905,7 @@ function lbDetail(){
   d.innerHTML = `<div class="row"><span class="chip ${r.in_library ? 'run' : 'idle'}">${r.in_library ? 'IN LIBRARY ✓' : 'PRINTER ONLY'}</span><span class="grow"></span><button data-act="lbCloseDetail" aria-label="Close details" style="min-height:44px">Close</button></div>
     ${th}<h2>${esc(r.name)}</h2>
     <div class="lbact">
-      ${r.in_library ? `<a class="lbdlbtn" href="${esc(dlHref)}" download>Download</a>` : `<button data-ctl class="primary" data-act="lbSave" data-id="${esc(r.id)}">Save to library</button>`}
+      ${r.in_library ? `<a data-ctl class="lbdlbtn" href="${esc(dlHref)}" download>Download</a>` : `<button data-ctl class="primary" data-act="lbSave" data-id="${esc(r.id)}">Save to library</button>`}
       ${r.in_library ? `<button data-ctl data-act="lbSendOne" data-id="${esc(r.id)}">Send to&hellip;</button>` : ''}
       <button data-ctl data-act="rnOpenLb" data-id="${esc(r.id)}">Rename&hellip;</button>
       ${prints}
@@ -914,7 +927,7 @@ function lbBar(){
   const inLib = rows.filter(r => r.in_library), only = rows.filter(r => !r.in_library);
   b.hidden = false;
   b.innerHTML = `<b>${rows.length} selected</b><span class="grow"></span>
-    ${inLib.length ? `<button data-act="lbDownload">Download</button><button data-ctl class="primary" data-act="lbSendSel">Send to&hellip;</button>` : ''}
+    ${inLib.length ? `<button data-ctl data-act="lbDownload">Download</button><button data-ctl class="primary" data-act="lbSendSel">Send to&hellip;</button>` : ''}
     ${only.length ? `<button data-ctl class="primary" data-act="lbSaveSel">Save to library</button>` : ''}
     ${inLib.length ? `<button data-ctl class="danger" data-act="lbDelSel">${LB.del === 'sel' ? 'Tap again: delete ' + inLib.length : 'Delete'}</button>` : ''}
     <button data-act="lbClear">Clear</button>`;
@@ -2244,6 +2257,7 @@ function detLine(d){
   }
 </style>
 <style>
+#morebtn, #moresheet { display:none; }          /* phones only - switched on in the phone layout below */
 /* ==== phone layout ====
    iPhone / Android phones, used as a Home Screen app. Two shapes:
      portrait  : width <= 600px
@@ -2275,6 +2289,16 @@ function detLine(d){
   #home > .row:first-child > #clock { order:4; font-size:16px !important; }
   #home > .row:first-child > button[title="Reload"] { order:5; flex:none; width:48px; min-height:48px !important; padding:0 !important; }
   #home > .row:first-child > button:not([title="Reload"]) { order:10; min-height:48px !important; font-size:16px !important; padding:8px 12px !important; }
+  /* ---- phone header: Printers + Library + More. History / Backups / Settings / Sign out move into the More sheet ---- */
+  #home > .row:first-child > .phone-hide { display:none !important; }
+  #home > .row:first-child > #morebtn { display:block; }
+  #moresheet.on { display:flex; position:fixed; inset:0; z-index:40; flex-direction:column; justify-content:flex-end; background:rgba(0,0,0,.6); }
+  #moresheet .morebk { flex:1 1 auto; }
+  #moresheet .morebox { flex:none; display:flex; flex-direction:column; gap:8px; background:var(--card); border-top:2px solid var(--line);
+    border-radius:16px 16px 0 0; padding:14px calc(14px + var(--sar)) calc(14px + var(--sab)) calc(14px + var(--sal)); max-height:80vh; overflow-y:auto; }
+  #moresheet .morebox button { width:100%; min-height:56px; font-size:18px; text-align:left; padding:8px 16px; }
+  #moresheet .morebox button[hidden] { display:none; }
+  #moresheet .morebox .moreclose { text-align:center; margin-top:4px; }
   /* ---- fleet cards: one per row, camera first and big ---- */
   #fleet, #fleet.c4 { gap:12px; margin-top:10px; padding-bottom:0; }
   .pcard, #fleet.c4 .pcard { padding:12px; gap:8px; }
@@ -2391,7 +2415,6 @@ function detLine(d){
   /* portrait only */
   #home > .row:first-child::after { content:""; order:9; flex:1 1 100%; height:0; }      /* line break: the four pages get their own row */
   #home > .row:first-child > button:not([title="Reload"]) { flex:1 1 0; min-width:0; padding:8px 4px !important; }
-  #home > .row:first-child > #signout-btn { font-size:14px !important; }
   .pcard .meta { font-size:15px; }
 }
 
@@ -3265,6 +3288,7 @@ function stPanel(sec){
   let html = `<h2>${pmEsc(sec.label)}</h2><div class="note">${pmEsc(sec.description || '')}</div>`;
   if(sec.help) html += `<details class="sthelpbox"><summary>How to set this up</summary><div>${pmEsc(sec.help)}</div></details>`;
   if(sec.id === 'agents') html += stAboutHtml();
+  if(sec.id === 'general') html += stTzNoteHtml();
   html += rows;
   if(sec.test) html += `<div class="sttest"><button class="primary big" data-act="stTest" data-ch="${esc(sec.test)}" id="st-test-btn">Send test message</button>
       <span id="st-test-res" role="status" aria-live="polite">${stTestHtml(sec.test)}</span></div>
@@ -3280,14 +3304,41 @@ function stPanel(sec){
   return html;
 }
 
+// One-time, dismissible hint in Settings > General: the Hub's time zone is just the default, so times on this
+// page follow the browser. One tap saves the browser's zone as the Hub's. Dismissal is remembered per browser.
+const TZ_NOTE_KEY = 'fabrica-tz-note-dismissed';
+function stBrowserTz(){ try{ return Intl.DateTimeFormat().resolvedOptions().timeZone || ''; }catch(e){ return ''; } }
+function stTzNoteHidden(){ try{ return localStorage.getItem(TZ_NOTE_KEY) === '1'; }catch(e){ return false; } }
+function stTzNoteHtml(){
+  const f = stField('general.timezone'), z = stBrowserTz();
+  if(!f || f.source !== 'default' || !z || z === f.value || stTzNoteHidden()) return '';
+  return `<div class="stf tznote" id="st-tznote" role="note"><div class="sthelp" style="margin:0 0 10px;font-size:16px">Times on this page use your browser's time zone (${pmEsc(z)}).
+    Set the Hub's time zone here so alerts and quiet hours match.</div>
+    <div class="row"><button class="primary big grow" data-act="stUseTz" data-tz="${pmEsc(z)}">Use ${pmEsc(z)}</button>
+    <button class="big" data-act="stTzDismiss">Not now</button></div></div>`;
+}
+function stTzDismiss(){ try{ localStorage.setItem(TZ_NOTE_KEY, '1'); }catch(e){} const e = $('st-tznote'); if(e) e.remove(); }
+async function stUseTz(z){
+  if(!z || ST.saving) return;
+  ST.saving = true;
+  const r = await pmCall('PUT', '/api/settings', {values:{'general.timezone': z}, clear:[]});
+  ST.saving = false;
+  if(!r.ok){ ST.banner = {kind:'bad', text:'Could not save the time zone.', list:[(r.body && (r.body.error || Object.values(r.body.errors || {})[0])) || '']}; stRender(true); return; }
+  const f = stField('general.timezone'), nf = (r.body.settings.sections || []).flatMap(s => s.fields).find(x => x.key === 'general.timezone');
+  if(f && nf){ f.value = nf.value; f.source = nf.source; ST.draft['general.timezone'] = nf.value; }   // other unsaved edits stay as they are
+  ST.banner = {kind:'ok', text:"The Hub's time zone is now " + z + '.'};
+  stRender(true);
+  applyPrefsFrom(r.body.settings);
+}
+
 // About Fabrica: logo, name, tagline, version (Settings > Agents / MCP). The version is the Hub's build id.
 function stAboutHtml(){
   const sec = ST.data && ST.data.sections.find(x => x.id === 'agents');
   const vf = sec && sec.fields.find(f => f.name === 'version');
   const ver = (vf && vf.value) || 'dev';
   return `<div class="stf about" id="st-about"><div class="stlab"><b>About</b></div>
-    <img class="aboutlogo" src="/static/brand/logo-lockup.svg" alt="Fabrica - printer management, agent-first." width="368" height="96">
-    <div class="aboutname"><b>Fabrica</b> <span class="aboutdim">printer management, agent-first.</span></div>
+    <img class="aboutlogo" src="/static/brand/logo-lockup.svg" alt="Fabrica Farm - printer management, agent-first." width="368" height="96">
+    <div class="aboutname"><b>Fabrica Farm</b> <span class="aboutdim">printer management, agent-first.</span></div>
     <div class="aboutrows"><span class="aboutdim">Version</span> <b class="stval" id="st-about-ver">${pmEsc(ver)}</b>
       <span class="aboutdim">Source</span> <span>GitHub repository &mdash; coming soon</span></div></div>`;
 }
@@ -3563,7 +3614,7 @@ function errorCard(title, msg){
   $('modal').classList.add('on');
 }
 
-// When a job should finish: "~3:45 PM", "tomorrow ~7:10 AM", or "Sat ~9:20 AM" (Hub time zone / clock style from Settings).
+// When a job should finish: "~3:45 PM", "tomorrow ~7:10 AM", or "Sat ~9:20 AM" (Hub time zone / clock style from Settings, else the browser's).
 function finishAt(min){
   const t = new Date(Date.now() + min*60000), now = new Date(), o = tzOpt();
   const hm = fmtTime(t);
@@ -4121,19 +4172,22 @@ async function act(action){
 // ---------------------------------------------------------------- display preferences (from Settings)
 // hub name, temperature unit, time zone and date style come from GET /api/settings. Display only:
 // the API and the printers always work in degrees Celsius.
-const PREFS = { hub_name:'Fabrica', temp_unit:'C', timezone:'', datetime_format:'iso', thumb_refresh_s:5 };
+// tzSet / fmtSet: true only when the owner (or the TZ variable) chose a time zone / date style. Until then
+// times follow the BROWSER's own zone and 12/24-hour habit, so a fresh install never shows UTC to a stranger.
+const PREFS = { hub_name:'Fabrica', temp_unit:'C', timezone:'', tzSet:false, datetime_format:'iso', fmtSet:false, thumb_refresh_s:5 };
 function tzOpt(){
-  if(!PREFS.timezone) return {};
+  if(!PREFS.tzSet || !PREFS.timezone) return {};
   try{ new Intl.DateTimeFormat(undefined, {timeZone:PREFS.timezone}); return {timeZone:PREFS.timezone}; }catch(e){ return {}; }
 }
-const hour12 = () => PREFS.datetime_format === 'us';
+const hour12 = () => PREFS.fmtSet ? PREFS.datetime_format === 'us' : undefined;   // undefined = the browser's own habit
 function fmtTime(d, secs){
   return d.toLocaleTimeString([], {hour:'numeric', minute:'2-digit', ...(secs ? {second:'2-digit'} : {}), hour12:hour12(), ...tzOpt()});
 }
 function fmtDateTime(d){
   if(isNaN(d) || !d.getTime()) return '';
   const o = tzOpt();
-  const day = d.toLocaleDateString(PREFS.datetime_format === 'us' ? 'en-US' : PREFS.datetime_format === 'eu' ? 'en-GB' : 'en-CA', {year:'numeric', month:'2-digit', day:'2-digit', ...o});
+  const loc = !PREFS.fmtSet ? [] : PREFS.datetime_format === 'us' ? 'en-US' : PREFS.datetime_format === 'eu' ? 'en-GB' : 'en-CA';
+  const day = d.toLocaleDateString(loc, {year:'numeric', month:'2-digit', day:'2-digit', ...o});
   return day + ' ' + fmtTime(d);
 }
 const tconv = c => PREFS.temp_unit === 'F' ? c * 9 / 5 + 32 : c;
@@ -4156,12 +4210,14 @@ function setHubTitle(){
   document.title = custom ? n : 'Fabrica';
 }
 function applyPrefsFrom(doc){
-  const v = {};
-  ((doc && doc.sections) || []).forEach(s => s.fields.forEach(f => { v[f.key] = f.value; }));
+  const v = {}, src = {};
+  ((doc && doc.sections) || []).forEach(s => s.fields.forEach(f => { v[f.key] = f.value; src[f.key] = f.source; }));
   PREFS.hub_name = v['general.hub_name'] || 'Fabrica';
   PREFS.temp_unit = v['general.temp_unit'] === 'F' ? 'F' : 'C';
   PREFS.timezone = v['general.timezone'] || '';
+  PREFS.tzSet = !!PREFS.timezone && !!src['general.timezone'] && src['general.timezone'] !== 'default';
   PREFS.datetime_format = v['general.datetime_format'] || 'iso';
+  PREFS.fmtSet = !!src['general.datetime_format'] && src['general.datetime_format'] !== 'default';
   const t = Number(v['camera.thumb_refresh_s']);
   if(t >= 1 && t <= 120 && t * 1000 !== CAM_REFRESH_MS){
     CAM_REFRESH_MS = t * 1000;
@@ -4552,6 +4608,18 @@ uivCheck();                        // remember the build this page was loaded fr
 setInterval(uivCheck, 60000);
 
 // ---- delegated clicks: untrusted text (file names, tray types, printer names) travels in data-* attributes, never in a handler string
+// ---- phone header "More" sheet (the button and the sheet only exist visually inside the phone media queries)
+function moreOpen(){
+  const so = $('signout-btn'); $('more-signout').hidden = !so || so.hidden;
+  $('moresheet').classList.add('on'); $('morebtn').setAttribute('aria-expanded', 'true');
+  const first = $('moresheet').querySelector('.morebox button:not([hidden])'); if(first) first.focus();
+}
+function moreClose(){ $('moresheet').classList.remove('on'); $('morebtn').setAttribute('aria-expanded', 'false'); }
+function moreGo(where){
+  moreClose();
+  ({history: () => openHistory(), backups: () => openBackups(), settings: () => openSettings(), signout: () => secSignOut()}[where] || (() => {}))();
+}
+document.addEventListener('keydown', e => { if(e.key === 'Escape' && $('moresheet').classList.contains('on')){ moreClose(); $('morebtn').focus(); } });
 const ACT = {
   openPrinter: b => openPrinter(b.dataset.name),
   ...PG_ACTIONS,                                  // printer groups + History filter (see the Printer groups block)
@@ -4568,6 +4636,11 @@ const ACT = {
   delete:    () => doDelete(),
   bkStart:   b => bkStart(b.dataset.name),
   stTest:    b => stTest(b.dataset.ch),
+  stUseTz:   b => stUseTz(b.dataset.tz),
+  moreOpen:  () => moreOpen(),
+  moreClose: () => moreClose(),
+  moreGo:    b => moreGo(b.dataset.go),
+  stTzDismiss: () => stTzDismiss(),
   ...(typeof LB_ACT !== 'undefined' ? LB_ACT : {}),   // ==== library ====
   ...(typeof RN_ACT !== 'undefined' ? RN_ACT : {}),   // ==== rename ====
 };

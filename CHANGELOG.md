@@ -6,6 +6,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-13
+- **Name: Fabrica Farm** ("Fabrica" for short). README, install guide, About screen and the Home Screen app name; repository, image and container stay `fabrica`.
+
+### Changed
+
+- **New installs show your own time.** Until a time zone / date style is chosen in Settings, the dashboard uses the browser's time zone
+  and 12/24-hour habit instead of UTC / 24 h. The Hub itself (quiet hours, notification times, CSV dates) uses `TZ`, else the machine's own
+  zone, else UTC, and Settings > General offers a one-time, dismissible **Use <your zone>** note when they differ.
+- **Phone header.** On phones the second row is Printers, Library and a **More** menu (History, Backups, Settings, Sign out). The wall
+  screen and desktop are unchanged.
+### Security
+
+- **Send to printer never overwrites.** File names are compared ignoring upper/lower case on every printer type (SD cards and USB sticks
+  ignore case); OctoPrint / PrusaLink / Klipper sends need a live file list and are refused if it cannot be read. "Save from printer"
+  now stops reading at the size limit while downloading (HTTP and Bambu). Archives with thousands of members and oversized
+  `slice_info.config` members are refused. Library renames check the previewed size. OctoPrint deletes re-check that the printer is idle.
+  View-only devices no longer see Download buttons. First-run password: open the dashboard right after starting it.
+
 ### Added
 
 - **Agent-facing file renaming.** The Hub provides the mechanics, not a naming convention: `file_facts` (parts on the plate, sliced-for
@@ -28,8 +46,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   (a printer in two groups counts in both). Groups are edited on the Printers page; REST `GET /api/groups`,
   `PUT /api/printers/{name}/groups`, `POST /api/groups/rename`, `DELETE /api/groups/{name}`; MCP `list_groups`,
   `set_printer_groups`, and `group` / `printers` filters on `job_stats`, `recent_jobs`, `cost_per_part`.
-
-## [1.0.0] - 2026-10-12
 
 First public release.
 

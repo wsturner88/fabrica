@@ -49,9 +49,9 @@ quiet hours by default.
 | Key | Type | Default | Notes |
 |---|---|---|---|
 | `general.hub_name` | string | `Print Hub` |  |
-| `general.timezone` | timezone | `UTC` | env `TZ` is the default |
+| `general.timezone` | timezone | `UTC` | env `TZ` is the default, then the machine's own zone (a container is usually UTC). Until it is set the dashboard shows times in the viewer's browser zone, and Settings offers a one-tap **Use <browser zone>** |
 | `general.temp_unit` | enum | `C` | one of C, F |
-| `general.datetime_format` | enum | `iso` | one of iso, us, eu |
+| `general.datetime_format` | enum | `iso` | one of iso, us, eu. Until it is set the dashboard follows the browser's own 12/24-hour style |
 
 ### Notifications (`notifications`)
 

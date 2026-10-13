@@ -273,9 +273,30 @@ def _zread(z, name, cap=_MEMBER_CAP):
     return z.read(name)
 
 
+_ZIP_MAX_ENTRIES = 10_000          # a real .3mf holds a few dozen members; more is a hostile file
+_ZIP_MAX_DIR_BYTES = 4 * 1024 * 1024
+
+
+def open_zip_bounded(data: bytes) -> "zipfile.ZipFile":
+    """zipfile.ZipFile(BytesIO(data)) - but a file whose central directory is huge (millions of empty members fit in
+    a few MB) is refused BEFORE zipfile builds one ZipInfo per member (ValueError). The end-of-central-directory
+    record is read directly: entry count and directory size; a ZIP64 marker (0xFFFF / 0xFFFFFFFF) means 'too many'."""
+    tail = data[-65600:]
+    i = tail.rfind(b"PK\x05\x06")
+    if i >= 0 and len(tail) - i >= 22:
+        entries = int.from_bytes(tail[i + 10:i + 12], "little")
+        dir_size = int.from_bytes(tail[i + 12:i + 16], "little")
+        if entries > _ZIP_MAX_ENTRIES or dir_size > _ZIP_MAX_DIR_BYTES:
+            raise ValueError("too many entries in the archive")
+    return zipfile.ZipFile(io.BytesIO(data))
+
+
 def parse_3mf_meta(data: bytes) -> dict:
     """Extract print metadata from a .gcode.3mf's Metadata/slice_info.config."""
-    z = zipfile.ZipFile(io.BytesIO(data))
+    try:
+        z = open_zip_bounded(data)
+    except ValueError as e:
+        return {"error": str(e)}
     si = [n for n in z.namelist() if n.endswith("slice_info.config")]
     if not si:
         return {"error": "no slice_info.config"}
@@ -331,7 +352,7 @@ def extract_plate_png(data: bytes):
     slicer embedded one. Prefers the full-size render; falls back to the
     thumbnail. Returns None (not an error) when neither is present — some
     older/odd exports omit both."""
-    z = zipfile.ZipFile(io.BytesIO(data))
+    z = open_zip_bounded(data)
     names = set(z.namelist())
     for cand in ("Metadata/plate_1.png", "Metadata/plate_1_small.png"):
         if cand in names:
@@ -1167,11 +1188,19 @@ class BambuPrinter:
                             "modified": m.group(2)})
         return out
 
-    def sd_download(self, filename: str) -> bytes:
+    def sd_download(self, filename: str, max_bytes: int = None) -> bytes:
+        """The file's bytes. Reading stops (PrinterError, the session is closed) once it passes `max_bytes`
+        (default: FILE_MAX_BYTES), so a file bigger than expected never fills the Hub's memory."""
+        cap = FILE_MAX_BYTES if max_bytes is None else int(max_bytes)
         f = self._ftps()
         try:
             buf = io.BytesIO()
-            f.retrbinary(f"RETR {filename}", buf.write)
+
+            def sink(chunk):
+                if buf.tell() + len(chunk) > cap:
+                    raise PrinterError(f"The file is larger than the {cap // 1048576} MB limit for a download.")
+                buf.write(chunk)
+            f.retrbinary(f"RETR {filename}", sink)
         finally:
             _close_ftp(f)
         return buf.getvalue()
@@ -1628,6 +1657,7 @@ class OctoPrintPrinter:
         self._ctl_post("/api/printer/command", {"command": "M701"}, "load the filament")
 
     def sd_delete(self, filename, origin="local"):
+        _require_idle_for_delete(self)       # a fresh reading, like PrusaLink / Moonraker (review N-12 pattern)
         # Same space/URL problem as start_print: percent-encode the path before
         # it goes into the request line, or http.client raises InvalidURL.
         path = urllib.parse.quote(filename, safe="/")

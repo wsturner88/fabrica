@@ -1,13 +1,13 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="../app/static/brand/logo-lockup.svg">
-    <img src="../app/static/brand/logo-lockup-light.svg" alt="Fabrica - printer management, agent-first." width="460">
+    <img src="../app/static/brand/logo-lockup-light.svg" alt="Fabrica Farm - printer management, agent-first." width="460">
   </picture>
 </p>
 
-# Fabrica — the full guide
+# Fabrica Farm — the full guide
 
-> **Naming:** the product is **Fabrica**; the repository, Docker image and container are all `fabrica` now.
+> **Naming:** the product is **Fabrica Farm** ("Fabrica" for short); the repository, Docker image and container are all `fabrica` now.
 > Environment variables keep their `BAMBU_MCP_` prefix for compatibility.
 
 **Give any AI agent hands on your Bambu Lab printers — over your own LAN, no cloud.**

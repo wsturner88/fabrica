@@ -1933,7 +1933,7 @@ def _library_send_one(entry: dict, prn, model_override: bool) -> dict:
         return r
     http_up = _is_octo(prn) and hasattr(prn, "upload")          # ==== rename ==== OctoPrint / PrusaLink / Klipper upload: beta
     if not (http_up or (not _is_octo(prn) and hasattr(prn, "sd_upload"))):
-        return refuse("unsupported", f"{prn.name} cannot receive files from the Hub yet (only Bambu LAN printers can, for now).")
+        return refuse("unsupported", f"{prn.name} cannot receive files from the Hub (Bambu LAN printers take .3mf; OctoPrint, PrusaLink and Klipper take .gcode / .bgcode, in beta).")
     if http_up:
         if entry.get("kind") not in ("gcode", "bgcode"):
             return refuse("wrong_type", f"{prn.name} prints .gcode / .bgcode files; '{name}' is a {entry.get('kind') or 'different'} file.")
@@ -1953,13 +1953,27 @@ def _library_send_one(entry: dict, prn, model_override: bool) -> dict:
         with (_octo_lock(prn.name) if http_up else _ftps_lock(prn.name)):
             if not _printer_is_idle(prn):               # a print may have started while we waited for the lock
                 return refuse("busy", f"{prn.name} became busy. Nothing was sent.")
-            there = {f["name"]: f for f in (_rn_listing(prn)[0] if http_up else prn.sd_list())}       # the driver refuses (no FTPS) if it is not idle
-            cur = there.get(name)
-            if cur is not None and int(cur.get("size") or 0) == entry["size"]:
+            if http_up:
+                # Never fall back to the cached listing before a write: OctoPrint / Klipper uploads REPLACE a file of the same
+                # name, so without a live listing we cannot know the name is free. (Bambu: the driver's own idle-only FTPS list.)
+                try:
+                    rows = [dict(f) for f in _backup._files_for_backup(prn) if f.get("origin", "local") == "local"]
+                except Exception as e:
+                    return refuse("list_failed", f"Could not read {prn.name}'s file list right now ({security.scrub_text(str(e))[:120]}), "
+                                                 "so the Hub cannot tell whether the name is free. Nothing was sent.")
+            else:
+                rows = [dict(f) for f in prn.sd_list()]                       # the driver refuses (no FTPS) if it is not idle
+            # Names are compared case-insensitively for EVERY driver: SD cards (FAT/exFAT) and USB sticks ignore case, so a
+            # same-letters name in another case would be silently replaced.
+            low = name.lower()
+            same = [f for f in rows if str(f.get("name") or "").lower() == low]
+            exact = next((f for f in same if f.get("name") == name), None)
+            if exact is not None and len(same) == 1 and int(exact.get("size") or 0) == entry["size"]:
                 r.update(ok=True, status="already_there", reason=f"'{name}' is already on {prn.name}.")
                 return r
-            if cur is not None:
-                return refuse("name_taken", f"A different file called '{name}' is already on {prn.name}. "
+            if same:
+                other = same[0].get("name")
+                return refuse("name_taken", f"A different file called '{other}' is already on {prn.name} (names are compared ignoring upper/lower case). "
                                             "Delete or rename it on the printer's page first - the Hub never overwrites a file there.")
             with open(path, "rb") as fh:
                 data = fh.read()
@@ -2007,6 +2021,16 @@ def _library_send(names, printers, model_override=False) -> list:
     return out
 
 
+def _sd_download_capped(prn, filename, cap):
+    """A Bambu SD download that stops reading at `cap` bytes (the driver raises PrinterError). A test double without the
+    keyword is called the plain way."""
+    try:
+        takes_cap = "max_bytes" in inspect.signature(prn.sd_download).parameters
+    except (TypeError, ValueError):
+        takes_cap = False
+    return prn.sd_download(filename, max_bytes=cap) if takes_cap else prn.sd_download(filename)
+
+
 def _library_save(printer: str, filename: str, folder: str = "", replace: bool = False) -> dict:
     """Copy one file off a printer into the library. A Bambu is only asked when it is positively idle (and its
     listing is read under the FTPS lock); a PrusaLink printer follows the backup rule (idle only); OctoPrint and
@@ -2036,7 +2060,9 @@ def _library_save(printer: str, filename: str, folder: str = "", replace: bool =
                 resp = prn._get_raw("/downloads/files/local/" + urllib.parse.quote(filename, safe="/"), timeout=30)
             else:
                 resp = prn.open_file(filename, timeout=30)
-            tmp, _none, size, sha = _backup._stream_to_temp(resp, LIB.incoming)
+            tmp, _none, size, sha = _backup._stream_to_temp(resp, LIB.incoming, max_bytes=cap)
+        except _backup.StreamTooLarge:
+            raise _library.TooLarge(f"The file is larger than the {cap // 1048576} MB limit for one library file.")
         except PrinterBusy as e:
             raise _library.LibraryError(str(e))
         except _library.LibraryError:
@@ -2056,9 +2082,15 @@ def _library_save(printer: str, filename: str, folder: str = "", replace: bool =
         if int(listing[filename].get("size") or 0) > cap:
             raise _library.TooLarge(f"The file is larger than the {cap // 1048576} MB limit for one library file.")
         try:
-            data = prn.sd_download(filename)
+            data = _sd_download_capped(prn, filename, cap)
         except PrinterBusy as e:
             raise _library.LibraryError(str(e))
+        except PrinterError as e:
+            if "limit" in str(e):
+                raise _library.TooLarge(f"The file is larger than the {cap // 1048576} MB limit for one library file.")
+            raise _library.LibraryError(security.scrub_text(f"Could not download '{filename}' from {prn.name}: {e}"))
+        if len(data) > cap:
+            raise _library.TooLarge(f"The file is larger than the {cap // 1048576} MB limit for one library file.")
     inc = LIB.begin_incoming()
     inc.write(data)
     return LIB.ingest(inc, clean, folder, src, replace)
@@ -2146,10 +2178,10 @@ def library_file(name: str) -> str:
 def library_send(name: str, printers: list[str], model_override: bool = False) -> str:
     """UPLOAD a library file to one or more printers' storage. It does NOT start a print - after it, the normal flow
     applies: suggest_mapping, the human's go-ahead and bed-clear statement, then start_print. Only idle printers accept
-    a file (a printing, paused or offline one is refused, per printer, and nothing is sent to it); only Bambu LAN
-    printers can receive files for now; a file that was sliced for a different printer model is refused unless the
+    a file (a printing, paused or offline one is refused, per printer, and nothing is sent to it); Bambu LAN printers
+    take .3mf and, in beta, OctoPrint / PrusaLink / Klipper printers take .gcode / .bgcode; a file that was sliced for a different printer model is refused unless the
     human has read the warning and said it is safe - only then pass model_override=True (never on your own).
-    A file already on the printer is not overwritten. Returns one result per printer."""
+    A file already on the printer (names compared ignoring upper/lower case) is not overwritten. Returns one result per printer."""
     try:
         res = _library_send([name], printers, model_override is True)
     except _library.LibraryError as e:
@@ -2690,6 +2722,13 @@ def _rn_move_cache(prn, old, new, size):
 
 
 def _rn_apply_library(it) -> dict:
+    if it.get("size") is not None:                      # same ticket binding as a printer item: the file the human saw
+        try:
+            cur = LIB.get(it["old_name"])
+        except _library.LibraryError:
+            return _rn_result(it, "skipped", f"skipped: '{it['old_name']}' is no longer in the Library.")
+        if int(cur.get("size") or 0) != int(it["size"]):
+            return _rn_result(it, "skipped", f"skipped: '{it['old_name']}' changed since the preview (different size). Preview again.")
     try:
         e = LIB.rename(it["old_name"], it["new_name"])
     except _library.LibraryError as ex:
@@ -2734,7 +2773,7 @@ def _rn_apply_printer(it, prn) -> dict:
             if _rn_taken(rows, target) is not None:
                 return _rn_result(it, "skipped", f"skipped: '{target}' already exists on {prn.name}; nothing is ever overwritten.")
             try:
-                data = prn.download(old, max_bytes=cap) if is_http else prn.sd_download(old)
+                data = prn.download(old, max_bytes=cap) if is_http else _sd_download_capped(prn, old, cap)
             except PrinterBusy:
                 return refuse_busy()
             except Exception as e:
@@ -3253,7 +3292,7 @@ _BRAND_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _BRAND_TYPES = {".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon",
                 ".webmanifest": "application/manifest+json"}
 _BRAND_CACHE = {"Cache-Control": "public, max-age=86400"}
-BRAND_NAME, BRAND_TAGLINE = "Fabrica", "printer management, agent-first."
+BRAND_NAME, BRAND_SHORT, BRAND_TAGLINE = "Fabrica Farm", "Fabrica", "printer management, agent-first."
 BRAND_COLORS = {"blueprint": "#0f3b66", "drafting": "#e8f2fb", "amber": "#ffb020", "sky": "#5aa5e6"}
 
 
@@ -3323,9 +3362,9 @@ async def _static_brand(request: Request):
 @_safe_route
 async def _manifest(request: Request):
     hub = str(SETTINGS.get("general.hub_name") or "").strip()
-    short = BRAND_NAME if hub in ("", "Print Hub", "Fabrica") else hub[:12].strip()
+    short = BRAND_SHORT if hub in ("", "Print Hub", "Fabrica", "Fabrica Farm") else hub[:12].strip()
     icon = lambda f, n, purpose="any": {"src": f"/static/brand/{f}", "sizes": f"{n}x{n}", "type": "image/png", "purpose": purpose}
-    doc = {"name": BRAND_NAME, "short_name": short or BRAND_NAME, "description": BRAND_TAGLINE,
+    doc = {"name": BRAND_NAME, "short_name": short or BRAND_SHORT, "description": BRAND_TAGLINE,
            "id": "/dashboard", "start_url": "/dashboard", "scope": "/", "display": "standalone", "orientation": "any",
            "theme_color": BRAND_COLORS["blueprint"], "background_color": BRAND_COLORS["blueprint"],
            "icons": [icon("icon-192.png", 192), icon("icon-512.png", 512),

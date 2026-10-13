@@ -612,10 +612,16 @@ def _files_for_backup(prn) -> list:
     return prn.files(with_meta=False) if takes_meta else prn.files()
 
 
-def _stream_to_temp(resp, tmp_dir):
+class StreamTooLarge(Exception):
+    """The body being streamed passed the caller's byte cap (the temp file is already gone)."""
+
+
+def _stream_to_temp(resp, tmp_dir, max_bytes=None):
     """Stream an HTTP response (context manager with .read(n)) into a temp file in
     tmp_dir, hashing as it goes. Returns (tmp_path, None, size, sha256); the caller
-    deletes the temp file. The temp file is removed here on any error."""
+    deletes the temp file. The temp file is removed here on any error. With `max_bytes`
+    the read stops as soon as the body passes the cap (StreamTooLarge, temp file deleted),
+    so a lying listing or an endless body can never fill the disk."""
     tmp = os.path.join(tmp_dir, f".dl-{os.getpid()}-{threading.get_ident()}.tmp")
     h, n = hashlib.sha256(), 0
     try:
@@ -627,6 +633,8 @@ def _stream_to_temp(resp, tmp_dir):
                 out.write(chunk)
                 h.update(chunk)
                 n += len(chunk)
+                if max_bytes is not None and n > max_bytes:
+                    raise StreamTooLarge(f"the file is larger than the {int(max_bytes) // 1048576} MB limit")
     except Exception:
         _rm(tmp)
         raise

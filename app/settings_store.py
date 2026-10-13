@@ -134,14 +134,17 @@ SCHEMA = [
                 "Shown in the dashboard header and at the top of every notification.",
                 max_len=60),
          _field("timezone", "Time zone", "timezone", "UTC",
-                "IANA name, e.g. America/New_York or Europe/Berlin. Used for quiet hours and "
-                "displayed times. Defaults to the TZ environment variable, else UTC.",
+                "IANA name, e.g. America/New_York or Europe/Berlin. Used for quiet hours, "
+                "notification times and exports. Until you set it, the dashboard shows times in your "
+                "browser's own time zone; the Hub itself uses the TZ environment variable, else the "
+                "machine's own zone, else UTC.",
                 env="TZ", placeholder="UTC"),
          _field("temp_unit", "Temperature unit", "enum", "C",
                 "Display only - printers and the API always work in degrees Celsius.",
                 options=_opts(("C", "Celsius (°C)"), ("F", "Fahrenheit (°F)"))),
          _field("datetime_format", "Date and time format", "enum", "iso",
-                "How dates and times are written in the dashboard and in messages.",
+                "How dates and times are written in the dashboard and in messages. Until you pick one, "
+                "the dashboard follows your browser's own 12/24-hour style.",
                 options=_opts(("iso", "2026-03-31 14:05"), ("us", "03/31/2026 2:05 PM"),
                               ("eu", "31/03/2026 14:05"))),
      ]},
@@ -714,14 +717,47 @@ def format_temp(celsius, unit: str = "C", digits: int = 0) -> str:
     return f"{c:.{digits}f} °C"
 
 
+# ---------------------------------------------------------------- host time zone
+
+_UTC_NAMES = {"", "UTC", "ETC/UTC", "UCT", "ETC/UCT", "UNIVERSAL", "ETC/UNIVERSAL", "ZULU", "ETC/ZULU",
+              "GMT", "ETC/GMT", "LOCALTIME"}
+
+
+def host_timezone() -> str:
+    """The machine's own IANA zone name, or "" when it has none or is on UTC (a typical container).
+    Reads /etc/timezone, then the /etc/localtime symlink. Never raises."""
+    cands = []
+    try:
+        with open("/etc/timezone", encoding="utf-8") as fh:
+            cands.append(fh.read().strip())
+    except OSError:
+        pass
+    try:
+        target = os.path.realpath("/etc/localtime")
+        if "zoneinfo/" in target:
+            cands.append(target.split("zoneinfo/", 1)[1])
+    except OSError:
+        pass
+    for c in cands:
+        if c.upper() in _UTC_NAMES:
+            continue
+        if _TZ_RE.match(c) and _tz_ok(c):
+            return c
+    return ""
+
+
 # ---------------------------------------------------------------- the store
 
 class SettingsStore:
     """settings.json + the "_settings" secrets namespace. Thread-safe."""
 
-    def __init__(self, data_dir: str, env=None, fleet_store=None):
+    def __init__(self, data_dir: str, env=None, fleet_store=None, host_tz=None):
         self.dir = data_dir
         self.env = os.environ if env is None else env
+        # The machine's own zone is the fallback for general.timezone when neither a saved setting nor TZ
+        # exists. host_tz=None detects it only when running on the real environment (a test passing its own
+        # env dict stays hermetic); pass a name, or "" for none, to override.
+        self._host_tz = host_timezone() if (host_tz is None and self.env is os.environ) else (host_tz or "")
         self.path = os.path.join(data_dir, SETTINGS_FILE)
         self._lock = threading.RLock()
         self._secrets = _FleetSecrets(fleet_store) if fleet_store is not None else _FileSecrets(data_dir)
@@ -775,6 +811,8 @@ class SettingsStore:
                 return coerce(f, self.env.get(env_name))
             except ValueError:
                 pass
+        if key == "general.timezone" and self._host_tz:
+            return self._host_tz
         return copy.deepcopy(f["default"])
 
     def _source(self, key):
