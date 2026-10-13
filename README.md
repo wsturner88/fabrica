@@ -1,11 +1,11 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="app/static/brand/logo-lockup.svg">
-    <img src="app/static/brand/logo-lockup-light.svg" alt="Fabrica Farm" width="420">
+    <img src="app/static/brand/logo-lockup-light.svg" alt="Fabrica — Print Farm" width="420">
   </picture>
 </p>
 
-<h1 align="center">Fabrica Farm</h1>
+<h1 align="center">Fabrica — Print Farm</h1>
 
 <h3 align="center">Your whole print farm on one screen — and in your AI agent's hands.</h3>
 

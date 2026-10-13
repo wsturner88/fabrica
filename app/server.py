@@ -3292,7 +3292,7 @@ _BRAND_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _BRAND_TYPES = {".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon",
                 ".webmanifest": "application/manifest+json"}
 _BRAND_CACHE = {"Cache-Control": "public, max-age=86400"}
-BRAND_NAME, BRAND_SHORT, BRAND_TAGLINE = "Fabrica Farm", "Fabrica", "printer management, agent-first."
+BRAND_NAME, BRAND_SHORT, BRAND_TAGLINE = "Fabrica — Print Farm", "Fabrica", "printer management, agent-first."
 BRAND_COLORS = {"blueprint": "#0f3b66", "drafting": "#e8f2fb", "amber": "#ffb020", "sky": "#5aa5e6"}
 
 
@@ -3362,7 +3362,7 @@ async def _static_brand(request: Request):
 @_safe_route
 async def _manifest(request: Request):
     hub = str(SETTINGS.get("general.hub_name") or "").strip()
-    short = BRAND_SHORT if hub in ("", "Print Hub", "Fabrica", "Fabrica Farm") else hub[:12].strip()
+    short = BRAND_SHORT if hub in ("", "Print Hub", "Fabrica", "Fabrica Farm", BRAND_NAME) else hub[:12].strip()
     icon = lambda f, n, purpose="any": {"src": f"/static/brand/{f}", "sizes": f"{n}x{n}", "type": "image/png", "purpose": purpose}
     doc = {"name": BRAND_NAME, "short_name": short or BRAND_SHORT, "description": BRAND_TAGLINE,
            "id": "/dashboard", "start_url": "/dashboard", "scope": "/", "display": "standalone", "orientation": "any",

@@ -1,4 +1,4 @@
-# Install Fabrica Farm
+# Install Fabrica
 
 About 10 minutes. Pick your edition first:
 

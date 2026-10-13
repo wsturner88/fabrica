@@ -3337,8 +3337,8 @@ function stAboutHtml(){
   const vf = sec && sec.fields.find(f => f.name === 'version');
   const ver = (vf && vf.value) || 'dev';
   return `<div class="stf about" id="st-about"><div class="stlab"><b>About</b></div>
-    <img class="aboutlogo" src="/static/brand/logo-lockup.svg" alt="Fabrica Farm - printer management, agent-first." width="368" height="96">
-    <div class="aboutname"><b>Fabrica Farm</b> <span class="aboutdim">printer management, agent-first.</span></div>
+    <img class="aboutlogo" src="/static/brand/logo-lockup.svg" alt="Fabrica, print farm - printer management, agent-first." width="368" height="96">
+    <div class="aboutname"><b>Fabrica — Print Farm</b> <span class="aboutdim">printer management, agent-first.</span></div>
     <div class="aboutrows"><span class="aboutdim">Version</span> <b class="stval" id="st-about-ver">${pmEsc(ver)}</b>
       <span class="aboutdim">Source</span> <span>GitHub repository &mdash; coming soon</span></div></div>`;
 }

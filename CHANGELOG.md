@@ -7,7 +7,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ## [1.0.0] - 2026-10-13
-- **Name: Fabrica Farm** ("Fabrica" for short). README, install guide, About screen and the Home Screen app name; repository, image and container stay `fabrica`.
+- **Name: Fabrica** (title "Fabrica — Print Farm"). README, About screen and the Home Screen app name; repository, image and container stay `fabrica`.
 
 ### Changed
 

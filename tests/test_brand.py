@@ -130,7 +130,7 @@ class RouteTests(unittest.TestCase):
     def test_manifest_is_valid_json_and_complete(self):
         r = self.c.get("/manifest.webmanifest")
         m = json.loads(r.text)
-        self.assertEqual((m["name"], m["short_name"], m["display"], m["start_url"]), ("Fabrica Farm", "Fabrica", "standalone", "/dashboard"))
+        self.assertEqual((m["name"], m["short_name"], m["display"], m["start_url"]), ("Fabrica — Print Farm", "Fabrica", "standalone", "/dashboard"))
         self.assertEqual((m["theme_color"], m["background_color"]), ("#0f3b66", "#0f3b66"))
         self.assertIn("maskable", {i["purpose"] for i in m["icons"]})
         self.assertGreaterEqual({i["sizes"] for i in m["icons"]}, {"192x192", "512x512"})
@@ -144,7 +144,7 @@ class RouteTests(unittest.TestCase):
             self.assertEqual(self.c.get("/manifest.webmanifest").json()["short_name"], "Shop Hub")
             server.SETTINGS.update({"general.hub_name": "A very long hub name indeed"})
             self.assertLessEqual(len(self.c.get("/manifest.webmanifest").json()["short_name"]), 12)
-            self.assertEqual(self.c.get("/manifest.webmanifest").json()["name"], "Fabrica Farm")
+            self.assertEqual(self.c.get("/manifest.webmanifest").json()["name"], "Fabrica — Print Farm")
         finally:
             server.SETTINGS.reset(["general.hub_name"])
         self.assertEqual(self.c.get("/manifest.webmanifest").json()["short_name"], "Fabrica")
