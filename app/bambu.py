@@ -1545,6 +1545,24 @@ class OctoPrintPrinter:
             raise PrinterError(f"Could not reach OctoPrint at {self.url}: {scrub_text(e)}") from e
         return data[:nbytes]
 
+    def download_tail(self, filename: str, size: int, nbytes: int = 65536):
+        """The last `nbytes` of a gcode file (PrusaSlicer / Orca write their config block - material, layer height - at the
+        END). Needs the file size (from the listing). Returns None when the server ignored the Range header (a 200 would
+        be the whole file; it is never read) and b"" for an empty file. Same auth and path-encoding as download_head."""
+        if not isinstance(size, int) or size <= 0:
+            return b""
+        start = max(0, size - nbytes)
+        path = "/downloads/files/local/" + urllib.parse.quote(filename, safe="/")
+        try:
+            with self._get_raw(path, headers={"Range": f"bytes={start}-{size - 1}"}) as r:
+                if start > 0 and getattr(r, "status", 206) != 206:
+                    return None
+                return r.read(nbytes + 1)[-nbytes:]
+        except urllib.error.HTTPError as e:
+            raise PrinterError(f"OctoPrint refused the file download ({e.code} {e.reason}).") from e
+        except NET_ERRORS as e:
+            raise PrinterError(f"Could not reach OctoPrint at {self.url}: {scrub_text(e)}") from e
+
     # ==== rename ====
     def download(self, filename: str, max_bytes: int = FILE_MAX_BYTES) -> bytes:
         """The whole file (capped at `max_bytes`; PrinterError beyond it)."""

@@ -54,7 +54,7 @@ MOONRAKER_PORT = 7125
 
 _LIGHT_NAME = re.compile(r"light|led|lamp", re.I)      # also covers "caselight"
 _LIGHT_KINDS = ("output_pin", "led", "neopixel", "dotstar")
-_OBJECTS = "print_stats&virtual_sdcard&display_status&extruder&heater_bed&webhooks"
+_OBJECTS = "print_stats&virtual_sdcard&display_status&extruder&heater_bed&toolhead&webhooks"
 
 
 def _perr(msg: str, status=None) -> PrinterError:
@@ -108,21 +108,21 @@ class MoonrakerPrinter:
          "help": "Short name agents and the dashboard use for this printer, e.g. Voron. Letters, digits, "
                  "dash, underscore or dot - no spaces. It cannot be changed later."},
         {"name": "url", "label": "Moonraker address", "type": "url", "required": True,
-         "placeholder": "http://192.168.1.60", "guide_step": "address",
-         "help": "Address of the Klipper host (Raspberry Pi etc.) - the one you type in a browser to open "
-                 "Mainsail or Fluidd. Moonraker's port 7125 is used automatically; plain "
-                 "http://<address> is enough."},
+         "placeholder": "192.168.1.60", "guide_step": "address",
+         "help": "The address of the Klipper host (Raspberry Pi etc.) - the one you type in a browser to open "
+                 "Mainsail or Fluidd, e.g. 192.168.1.60 (http:// is added for you). Moonraker's port 7125 "
+                 "is used automatically."},
         {"name": "api_key", "label": "API key", "type": "password", "required": False,
          "secret": True, "guide_step": "trusted",
          "help": "Only if Moonraker asks for one. Most home setups do not: Moonraker trusts the local "
                  "network if it is listed under [authorization] trusted_clients in moonraker.conf. "
                  "Leave empty unless the test says a key is needed."},
         {"name": "camera_base_url", "label": "Web UI / camera base address", "type": "url",
-         "required": False, "placeholder": "http://192.168.1.60", "guide_step": "camera",
+         "required": False, "advanced": True, "placeholder": "http://192.168.1.60", "guide_step": "camera",
          "help": "Optional. Where relative webcam links (like /webcam/?action=snapshot) are served "
                  "from, if not the same host on port 80. The webcam itself comes from the Mainsail or "
                  "Fluidd settings automatically."},
-        {"name": "model", "label": "Model", "type": "text", "required": False,
+        {"name": "model", "label": "Model", "type": "text", "required": False, "advanced": True,
          "placeholder": "Voron 2.4", "help": "Display only."},
     ]
     CONFIG_REQUIRE_ONE_OF = []
@@ -310,6 +310,10 @@ class MoonrakerPrinter:
         ps, vs = status.get("print_stats") or {}, status.get("virtual_sdcard") or {}
         ds, ex = status.get("display_status") or {}, status.get("extruder") or {}
         bed, wh = status.get("heater_bed") or {}, status.get("webhooks") or {}
+        pos = (status.get("toolhead") or {}).get("position")
+        z_mm = self._r1(pos[2]) if isinstance(pos, (list, tuple)) and len(pos) > 2 else None
+        if z_mm is not None:
+            z_mm = round(pos[2], 2)
         if wh.get("state") not in (None, "ready"):
             return self._set_klippy_down(wh.get("state"), wh.get("state_message"))
         raw = (ps.get("state") or "").lower()
@@ -331,7 +335,7 @@ class MoonrakerPrinter:
         name = "" if state in ("IDLE", "UNKNOWN") else _strip_ext(ps.get("filename") or "")
         self._last = {
             "state": state, "raw": raw, "job": name, "percent": pct, "remaining_min": left,
-            "layer": layer,
+            "layer": layer, "z_mm": z_mm,
             "nozzle_c": self._r1(ex.get("temperature")), "nozzle_target_c": self._r1(ex.get("target")),
             "bed_c": self._r1(bed.get("temperature")), "bed_target_c": self._r1(bed.get("target")),
             "print_error": 1 if raw == "error" else 0,
@@ -377,6 +381,7 @@ class MoonrakerPrinter:
         s = self._last
         return {**base, "connected": True, "state": s["state"], "job": s["job"],
                 "percent": s["percent"], "remaining_min": s["remaining_min"], "layer": s["layer"],
+                "z_mm": s.get("z_mm"),
                 "nozzle_c": s["nozzle_c"], "nozzle_target_c": s["nozzle_target_c"],
                 "bed_c": s["bed_c"], "bed_target_c": s["bed_target_c"],
                 "print_error": s["print_error"], "fault": bool(s.get("fault")),
@@ -432,11 +437,17 @@ class MoonrakerPrinter:
             secs = meta.get("estimated_time")
             secs = int(secs) if isinstance(secs, (int, float)) and secs > 0 else None
             fil = meta.get("filament_total")
+            num = lambda v: float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0 else None
+            ftype = meta.get("filament_type")      # "PETG" or, for several materials, "PETG;PLA"
+            mats = [m.strip().upper() for m in re.split(r"[;,]", ftype) if m.strip()] if isinstance(ftype, str) else []
             out.append({
                 "name": nm, "size": size, "modified": mod,
                 "print_seconds": secs,
                 "print_time": f"{secs // 3600}h{(secs % 3600) // 60:02d}m" if secs else None,
                 "filament_mm": float(fil) if isinstance(fil, (int, float)) else None,
+                "weight_g": num(meta.get("filament_weight_total")),
+                "materials": mats, "filament_type": mats[0] if mats else None,
+                "layer_mm": num(meta.get("layer_height")), "nozzle_mm": num(meta.get("nozzle_diameter")),
                 "origin": "local",
             })
         return out

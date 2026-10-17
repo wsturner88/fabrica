@@ -10,6 +10,7 @@ Nothing here contacts a printer, the Internet, the LAN or a real detector. Disco
 127.0.0.1 and its multicast extras are switched off.
 """
 import asyncio
+import csv
 import http.server
 import io
 import json
@@ -247,8 +248,15 @@ class JobLogWiring(Base):
         self.assertEqual(r["currency"], "$")
         job = r["jobs"][0]
         self.assertEqual((job["result"], job["printer"], job["parts"], job["percent"]), ("finished", "Fake", 3, 100))
-        self.assertAlmostEqual(job["cost"]["total"], 1.515, delta=0.01)      # 0.72 + 0.045 + 0.75
-        self.assertAlmostEqual(job["cost"]["per_part"], 0.505, delta=0.01)
+        self.assertAlmostEqual(job["cost"]["total"], 0.72, delta=0.01)       # default: filament only
+        self.assertAlmostEqual(job["cost"]["per_part"], 0.24, delta=0.01)
+        self.assertIs(job["cost"]["includes_machine_costs"], False)
+        self.assertAlmostEqual(job["cost"]["total_with_machine"], 1.515, delta=0.01)    # 0.72 + 0.045 + 0.75
+        self.assertAlmostEqual(job["cost"]["electricity"], 0.045, delta=0.01)           # the split is always there
+        full = self.c.get("/api/jobs?machine=1").json()
+        self.assertIs(full["includes_machine_costs"], True)
+        self.assertAlmostEqual(full["jobs"][0]["cost"]["total"], 1.515, delta=0.01)
+        self.assertAlmostEqual(full["jobs"][0]["cost"]["per_part"], 0.505, delta=0.01)
         self.assertEqual(len(self.c.get("/api/jobs").json()["jobs"]), 1)     # one row for the whole attempt
 
     def test_detail_stats_file_costs_and_csv(self):
@@ -282,6 +290,63 @@ class JobLogWiring(Base):
         self.assertEqual(len(lines), 2)
         self.assertIn("benchy", lines[1])
         self.assertIn("finished", lines[1])
+
+    def test_machine_param_and_setting_on_every_cost_route(self):
+        """Filament only by default; ?machine=1 / ?machine=0 override the setting `costs.include_machine_costs` per request."""
+        seed_cache()
+        prn = self.run_one_print()
+        prn.set("IDLE"); self.tick(60)
+        prn.set("RUNNING", "benchy", 5); self.tick()
+        prn.set("FAILED", "benchy", 40); self.tick(3600)
+        job_id = [j for j in self.c.get("/api/jobs").json()["jobs"] if j["result"] == "finished"][0]["id"]
+
+        def look(extra):                       # extra: "" or "&machine=1" ...
+            st = self.c.get("/api/stats?period=all" + extra).json()
+            jobs = self.c.get("/api/jobs?limit=50" + extra).json()
+            one = self.c.get(f"/api/jobs/{job_id}?x=1" + extra).json()
+            fc = self.c.get("/api/costs/file?name=benchy" + extra).json()
+            rows = list(csv.DictReader(io.StringIO(self.c.get("/api/jobs.csv?period=all" + extra).text)))
+            return st, jobs, one, fc, rows
+
+        for setting_on in (False, True):
+            r = self.c.put("/api/settings", json={"values": {"costs.include_machine_costs": setting_on}})
+            self.assertEqual(r.status_code, 200, r.text)
+            for extra, incl in (("", setting_on), ("&machine=1", True), ("&machine=0", False), ("&machine=maybe", setting_on)):
+                st, jobs, one, fc, rows = look(extra)
+                tag = (setting_on, extra)
+                self.assertIs(st["includes_machine_costs"], incl, tag)
+                self.assertIs(st["cost"]["includes_machine_costs"], incl, tag)
+                self.assertIs(jobs["includes_machine_costs"], incl, tag)
+                self.assertIs(one["cost"]["includes_machine_costs"], incl, tag)
+                self.assertIs(fc["includes_machine_costs"], incl, tag)
+                c = st["cost"]
+                self.assertAlmostEqual(c["total"], c["total_with_machine"] if incl else c["material"], delta=0.011, msg=tag)
+                self.assertGreater(c["electricity"], 0, tag)                      # the split is always present
+                self.assertGreater(c["total_with_machine"], c["material"], tag)
+                self.assertAlmostEqual(st["true_cost_per_part"] * st["good_parts"], c["total"], delta=0.011, msg=tag)
+                self.assertAlmostEqual(fc["true_cost_per_part"], st["true_cost_per_part"], delta=0.0011, msg=tag)
+                self.assertGreater(c["wasted_on_failures"], 0, tag)
+                self.assertAlmostEqual(one["cost"]["total"], 1.515 if incl else 0.72, delta=0.011, msg=tag)
+                done = [x for x in rows if x["result"] == "finished"][0]
+                self.assertAlmostEqual(float(done["total_cost"]), 1.515 if incl else 0.72, delta=0.011, msg=tag)
+                self.assertEqual(done["total_includes_print_time"], "yes" if incl else "no", tag)
+                for j in jobs["jobs"]:
+                    if j["cost"]:
+                        self.assertIs(j["cost"]["includes_machine_costs"], incl, tag)
+        # the MCP tools take the same switch (the setting is still ON here from the loop)
+        self.assertIs(json.loads(self._tool("job_stats", period="all"))["includes_machine_costs"], True)
+        off = json.loads(self._tool("job_stats", period="all", include_machine_costs=False))
+        self.assertIs(off["includes_machine_costs"], False)
+        self.assertAlmostEqual(off["cost"]["total"], off["cost"]["material"], delta=0.011)
+        self.assertIn("incl. power + machine wear", self._tool("cost_per_part", file="benchy"))
+        self.assertIn("filament only", self._tool("cost_per_part", file="benchy", include_machine_costs=False))
+        rj = json.loads(self._tool("recent_jobs", include_machine_costs=False))
+        self.assertIs(rj["includes_machine_costs"], False)
+        self.assertTrue(all(j["cost"]["includes_machine_costs"] is False for j in rj["jobs"] if j["cost"]))
+
+    def _tool(self, name, **kw):
+        import asyncio
+        return asyncio.run(getattr(server, name)(**kw))
 
     def test_failure_is_charged_to_the_good_parts(self):
         seed_cache()
@@ -726,6 +791,43 @@ class DetectionWiring(Base):
         self.assertEqual(line["text"], "Watching · score 0.00 · learn-only")
         server.PRINTERS["plain"] = FakePrinter("Plain")
         self.assertIn("No camera", server._detection_line("Plain")["text"])
+
+    def test_per_printer_spaghetti_switch_uses_the_settings_route(self):
+        """The 5-inch board's per-printer Spaghetti switch = add / remove the printer from detection.excluded_printers through the
+        existing PUT /api/settings (no new route). The loop, /api/detection and the printer line all follow."""
+        prn = CamPrinter()
+        server.PRINTERS["fake"] = prn
+        self.enable()
+        self.assertEqual(self.c.get("/api/detection").json()["setup"]["excluded_printers"], [])
+        self.assertEqual(self.c.get("/api/printer/Fake").json()["detection"]["state"], "idle")
+        # switch OFF for this printer
+        r = self.c.put("/api/settings", json={"values": {"detection.excluded_printers": ["Fake"]}})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(self.c.get("/api/detection").json()["setup"]["excluded_printers"], ["Fake"])
+        self.assertIn("fake", server.DETECTION.excluded)
+        line = self.c.get("/api/printer/Fake").json()["detection"]
+        self.assertEqual(line["state"], "excluded")
+        self.assertEqual(line["text"], "Off for this printer")
+        prn.set("RUNNING", "benchy", 5)
+        self.frames(2, 9000.0)
+        self.assertEqual(self.scores, [])                                      # an excluded printer is never scored
+        self.assertTrue(self.c.get("/api/detection").json()["printers"]["Fake"]["excluded"])
+        # ... and back ON
+        r = self.c.put("/api/settings", json={"values": {"detection.excluded_printers": []}})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertNotIn("fake", server.DETECTION.excluded)
+        self.assertNotEqual(self.c.get("/api/printer/Fake").json()["detection"]["state"], "excluded")
+
+    def test_printer_line_also_says_learn_and_alerts_for_the_5in_panel(self):
+        prn = CamPrinter()
+        server.PRINTERS["fake"] = prn
+        self.enable()
+        d = self.c.get("/api/printer/Fake").json()["detection"]
+        self.assertIs(d["learn"], True)
+        self.assertEqual(d["alerts"], 0)
+        self.assertEqual(server._detection_line("Fake").keys() & {"learn", "alerts"}, set())      # the one-line helper itself is unchanged
+        self.enable(**{"detection.learn_only": False})
+        self.assertIs(self.c.get("/api/printer/Fake").json()["detection"]["learn"], False)
 
     def test_score_once_route_and_tool(self):
         prn = CamPrinter()

@@ -14,7 +14,10 @@ sys.path.insert(0, os.path.join(HERE, "..", "app"))
 
 import costs  # noqa: E402
 
+# Default Rates: totals are the FILAMENT cost only (power + machine wear are opt-in).
 R = costs.Rates(per_kg={"PLA": 20}, kwh_price=0.15, wear_per_hour=0.30)   # P1S default 120 W
+# The same prices with "include print time costs" ON: totals = material + electricity + wear.
+RM = costs.Rates(per_kg={"PLA": 20}, kwh_price=0.15, wear_per_hour=0.30, include_machine=True)
 
 
 def ok_job(**kw):
@@ -40,6 +43,8 @@ class RatesTests(unittest.TestCase):
         self.assertEqual(r.watts["MK4"], 100)
         self.assertEqual(r.default_watts, 120)
         self.assertEqual(r.wear_per_hour, 0.30)
+        self.assertFalse(r.include_machine)               # filament only unless asked
+        self.assertFalse(r.to_dict()["include_machine"])
 
     def test_parse_pairs_and_override(self):
         self.assertEqual(costs.parse_pairs(["pla=18", "bad", "X=oops", "petg = 23.5"]), {"PLA": 18.0, "PETG": 23.5})
@@ -53,6 +58,11 @@ class RatesTests(unittest.TestCase):
         r = costs.Rates.from_settings(lambda k: vals.get(k))
         self.assertEqual((r.kwh_price, r.per_kg["PLA"], r.currency), (0.30, 15, "EUR"))
         self.assertEqual(r.wear_per_hour, 0.30)           # missing keys -> defaults
+        self.assertFalse(r.include_machine)               # missing key -> filament only
+        for raw, want in ((True, True), (False, False), ("true", True), ("0", False), ("", False), (None, False)):
+            r = costs.Rates.from_settings(lambda k, raw=raw: raw if k == "costs.include_machine_costs" else None)
+            self.assertIs(r.include_machine, want, raw)
+        self.assertTrue(costs.Rates(include_machine=True).to_dict()["include_machine"])
 
     def test_price_lookup(self):
         r = costs.Rates()
@@ -81,20 +91,21 @@ class RatesTests(unittest.TestCase):
 class JobCostTests(unittest.TestCase):
     def test_finished_job_worked_example(self):
         # 36 g PLA @ 20/kg = 0.72 ; 2.5 h * 0.120 kW * 0.15 = 0.045 ; wear 2.5 * 0.30 = 0.75
-        c = costs.job_cost(ok_job(), R)
+        c = costs.job_cost(ok_job(), RM)
         self.assertEqual((c["material"], c["electricity"], c["wear"], c["total"]), (0.72, 0.045, 0.75, 1.515))
+        self.assertTrue(c["includes_machine_costs"])
         self.assertEqual(c["per_part"], 0.505)
         self.assertFalse(c["partial"])
 
     def test_failed_job_scales_by_percent(self):
         # 40 % of 36 g = 14.4 g -> 0.288 ; 1 h -> 0.018 elec + 0.30 wear
-        c = costs.job_cost(bad_job(), R)
+        c = costs.job_cost(bad_job(), RM)
         self.assertEqual(c["grams_used"], 14.4)
         self.assertEqual((c["material"], c["electricity"], c["wear"], c["total"]), (0.288, 0.018, 0.3, 0.606))
         self.assertIsNone(c["per_part"])                  # a failure yields no good parts
 
     def test_failed_without_percent_is_not_guessed(self):
-        c = costs.job_cost(bad_job(percent=None), R)
+        c = costs.job_cost(bad_job(percent=None), RM)
         self.assertIsNone(c["grams_used"])
         self.assertTrue(c["partial"])
         self.assertEqual(c["material"], 0)
@@ -122,7 +133,7 @@ class AggregateTests(unittest.TestCase):
 
     def test_true_cost_per_part_worked_example(self):
         # 3 good prints * 1.515 + 1 failure * 0.606 = 5.151 over 9 good parts = 0.5723 per part
-        a = costs.aggregate(self.jobs(), R)
+        a = costs.aggregate(self.jobs(), RM)
         self.assertEqual((a["finished"], a["failed"], a["good_parts"]), (3, 1, 9))
         self.assertEqual(a["success_rate"], 0.75)
         self.assertAlmostEqual(a["cost"]["total"], 5.151, delta=0.006)
@@ -133,7 +144,7 @@ class AggregateTests(unittest.TestCase):
         self.assertAlmostEqual(a["true_cost_per_part"], a["clean_cost_per_part"] + a["waste_per_part"], places=4)
 
     def test_no_success_has_no_per_part(self):
-        a = costs.aggregate([bad_job()], R)
+        a = costs.aggregate([bad_job()], RM)
         self.assertIsNone(a["true_cost_per_part"])
         self.assertAlmostEqual(a["cost"]["wasted_on_failures"], 0.606, delta=0.006)
         self.assertEqual(a["success_rate"], 0.0)
@@ -141,7 +152,7 @@ class AggregateTests(unittest.TestCase):
     def test_running_and_unknown_not_costed(self):
         run = ok_job(result="running", ended_at=None)
         unk = ok_job(result="unknown")
-        a = costs.aggregate([run, unk, ok_job()], R)
+        a = costs.aggregate([run, unk, ok_job()], RM)
         self.assertEqual((a["running"], a["unknown"], a["finished"]), (1, 1, 1))
         self.assertAlmostEqual(a["cost"]["total"], 1.515, delta=0.006)   # only the finished job
         self.assertEqual(a["success_rate"], 1.0)          # unknown does not drag the rate down
@@ -159,14 +170,14 @@ class AggregateTests(unittest.TestCase):
 
     def test_file_costs_window(self):
         # newest 2 attempts only: ended 30000 (ok) and 20000 (ok) -> no failure inside the window
-        a = costs.file_costs(self.jobs(), R, last_n=2)
+        a = costs.file_costs(self.jobs(), RM, last_n=2)
         self.assertEqual(a["attempts"], 2)
         self.assertEqual(a["failed"], 0)
         self.assertAlmostEqual(a["true_cost_per_part"], 0.505, places=4)
         self.assertEqual(a["avg_parts_per_print"], 3.0)
         self.assertAlmostEqual(a["grams_per_part"], 12.0, places=3)
         self.assertAlmostEqual(a["hours_per_part"], 2.5 / 3, places=3)
-        full = costs.file_costs(self.jobs(), R, last_n=20)
+        full = costs.file_costs(self.jobs(), RM, last_n=20)
         self.assertEqual(full["attempts"], 4)
         self.assertAlmostEqual(full["true_cost_per_part"], 0.5723, places=4)
 
@@ -175,6 +186,102 @@ class AggregateTests(unittest.TestCase):
         self.assertEqual(costs.file_key("BENCHY.3MF"), "benchy")
         self.assertEqual(costs.file_key("a/b.gcode"), "a/b")
         self.assertEqual(costs.file_key(None), "")
+
+
+class MachineCostTests(unittest.TestCase):
+    """Default = filament only; power + machine wear are opt-in (setting, or a per-call override)."""
+
+    def jobs(self):
+        return [ok_job(ended_at=10000.0), ok_job(ended_at=20000.0), ok_job(ended_at=30000.0), bad_job()]
+
+    def test_job_default_is_filament_only_but_keeps_the_split(self):
+        c = costs.job_cost(ok_job(), R)                           # setting off (default)
+        self.assertEqual((c["material"], c["electricity"], c["wear"]), (0.72, 0.045, 0.75))   # still computed
+        self.assertEqual(c["total"], 0.72)                        # ... but not in the total
+        self.assertEqual(c["total_with_machine"], 1.515)
+        self.assertIs(c["includes_machine_costs"], False)
+        self.assertEqual(c["per_part"], 0.24)                     # 0.72 / 3 parts
+        self.assertEqual(c["per_part_with_machine"], 0.505)
+
+    def test_job_setting_on_sums_everything(self):
+        c = costs.job_cost(ok_job(), RM)
+        self.assertEqual(c["total"], 1.515)
+        self.assertEqual(c["total"], c["total_with_machine"])
+        self.assertIs(c["includes_machine_costs"], True)
+        self.assertEqual(c["per_part"], 0.505)
+
+    def test_job_override_beats_the_setting_both_ways(self):
+        for rates, setting_on in ((R, False), (RM, True)):
+            on = costs.job_cost(ok_job(), rates, include_machine=True)
+            off = costs.job_cost(ok_job(), rates, include_machine=False)
+            self.assertEqual((on["total"], on["includes_machine_costs"]), (1.515, True), setting_on)
+            self.assertEqual((off["total"], off["includes_machine_costs"]), (0.72, False), setting_on)
+            self.assertEqual(costs.job_cost(ok_job(), rates, include_machine=None)["includes_machine_costs"], setting_on)
+            for c in (on, off):                                   # the split never changes with the mode
+                self.assertEqual((c["material"], c["electricity"], c["wear"]), (0.72, 0.045, 0.75))
+
+    def test_failed_job_filament_only(self):
+        c = costs.job_cost(bad_job(), R)
+        self.assertEqual((c["material"], c["total"], c["total_with_machine"]), (0.288, 0.288, 0.606))
+        self.assertIsNone(c["per_part"])
+
+    def test_aggregate_default_totals_and_waste_are_filament_only(self):
+        a = costs.aggregate(self.jobs(), R)
+        self.assertIs(a["includes_machine_costs"], False)
+        self.assertIs(a["cost"]["includes_machine_costs"], False)
+        # 3 * 0.72 + 0.288 = 2.448 over 9 good parts
+        self.assertAlmostEqual(a["cost"]["total"], 2.448, delta=0.006)
+        self.assertAlmostEqual(a["cost"]["material"], a["cost"]["total"], delta=0.0001)
+        self.assertAlmostEqual(a["cost"]["wasted_on_failures"], 0.288, delta=0.006)
+        self.assertAlmostEqual(a["true_cost_per_part"], 0.272, places=4)
+        self.assertAlmostEqual(a["clean_cost_per_part"], 0.24, places=4)
+        self.assertAlmostEqual(a["waste_per_part"], 0.032, places=4)
+        self.assertGreater(a["cost"]["electricity"], 0)           # the split is still reported
+        self.assertGreater(a["cost"]["wear"], 0)
+        # the with-machine figures are always there
+        self.assertAlmostEqual(a["cost"]["total_with_machine"], 5.151, delta=0.006)
+        self.assertAlmostEqual(a["cost"]["wasted_with_machine"], 0.606, delta=0.006)
+        self.assertAlmostEqual(a["true_cost_per_part_with_machine"], 0.5723, places=4)
+
+    def test_aggregate_all_four_combinations(self):
+        for rates, setting_on in ((R, False), (RM, True)):
+            on = costs.aggregate(self.jobs(), rates, include_machine=True)
+            off = costs.aggregate(self.jobs(), rates, include_machine=False)
+            self.assertAlmostEqual(on["cost"]["total"], 5.151, delta=0.006, msg=setting_on)
+            self.assertAlmostEqual(on["cost"]["wasted_on_failures"], 0.606, delta=0.006)
+            self.assertAlmostEqual(on["true_cost_per_part"], 0.5723, places=4)
+            self.assertIs(on["includes_machine_costs"], True)
+            self.assertAlmostEqual(off["cost"]["total"], 2.448, delta=0.006, msg=setting_on)
+            self.assertAlmostEqual(off["cost"]["wasted_on_failures"], 0.288, delta=0.006)
+            self.assertAlmostEqual(off["true_cost_per_part"], 0.272, places=4)
+            self.assertIs(off["includes_machine_costs"], False)
+            self.assertAlmostEqual(on["cost"]["total_with_machine"], off["cost"]["total_with_machine"], places=4)
+            self.assertAlmostEqual(on["cost"]["total"] - off["cost"]["total"],
+                                   on["cost"]["electricity"] + on["cost"]["wear"], delta=0.02)
+
+    def test_no_success_wasted_follows_the_mode(self):
+        off = costs.aggregate([bad_job()], R)
+        on = costs.aggregate([bad_job()], R, include_machine=True)
+        self.assertIsNone(off["true_cost_per_part"])
+        self.assertAlmostEqual(off["cost"]["wasted_on_failures"], 0.288, delta=0.006)
+        self.assertAlmostEqual(on["cost"]["wasted_on_failures"], 0.606, delta=0.006)
+
+    def test_file_costs_follow_the_mode(self):
+        off = costs.file_costs(self.jobs(), R, last_n=20)
+        on = costs.file_costs(self.jobs(), R, last_n=20, include_machine=True)
+        self.assertAlmostEqual(off["true_cost_per_part"], 0.272, places=4)
+        self.assertAlmostEqual(on["true_cost_per_part"], 0.5723, places=4)
+        self.assertIs(off["includes_machine_costs"], False)
+        self.assertIs(on["includes_machine_costs"], True)
+        self.assertEqual(costs.file_costs(self.jobs(), RM, last_n=20, include_machine=False)["true_cost_per_part"],
+                         off["true_cost_per_part"])
+
+    def test_includes_machine_helper(self):
+        self.assertIs(costs.includes_machine(R), False)
+        self.assertIs(costs.includes_machine(RM), True)
+        self.assertIs(costs.includes_machine(R, True), True)
+        self.assertIs(costs.includes_machine(RM, False), False)
+        self.assertIs(costs.includes_machine(object()), False)     # no attribute -> off
 
 
 class SeriesTests(unittest.TestCase):

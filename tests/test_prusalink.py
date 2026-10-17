@@ -25,6 +25,7 @@ import urllib.request
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "app"))
 from bambu import PrinterError  # noqa: E402
 from prusalink import PrusaLinkPrinter  # noqa: E402
+import prusalink_fixtures as FX  # noqa: E402
 
 USER, PW, KEY = "maker", "s3cret-pw", "test-api-key"
 JPEG = b"\xff\xd8\xff\xe0fake-jpeg-frame\xff\xd9"
@@ -39,8 +40,11 @@ class FakePrusaLink:
     """A tiny PrusaLink. Attributes are poked directly by tests."""
 
     def __init__(self, auth="digest", dl_style="raw", ignore_range=False,
-                 rotate_after=0, camera=False):
+                 rotate_after=0, camera=False, core=None):
         self.auth, self.dl_style, self.ignore_range = auth, dl_style, ignore_range
+        # core: {short name: file} - answer like a Core One class machine (see prusalink_fixtures.py): a listing with long
+        # names and picture refs but no size, per-file info with `size`, pictures under /thumb/l/<storage>/<short>
+        self.core = core
         self.rotate_after, self.camera = rotate_after, camera
         self.state = "IDLE"
         self.job = None                      # {"id":.., "name":.., "progress":.., "time_remaining":..}
@@ -156,9 +160,45 @@ class FakePrusaLink:
                     return self.reply(200, {"camera_list": cams})
                 if path == "/api/v1/cameras/cam1/snap" and f.camera:
                     return self.reply(200, JPEG, "image/jpeg")
+                if f.core is not None and (path.startswith("/api/v1/files/usb") or path.startswith("/thumb/")):
+                    return self.core_route(m, path)
                 if path.startswith("/api/v1/files/usb"):
                     return self.files_route(m, path[len("/api/v1/files/usb"):])
                 self.reply(404, {"message": "not found"})
+
+            def core_route(self, m, path):
+                f = fake
+                if path.startswith("/thumb/"):
+                    parts = path.split("/")            # "", "thumb", "l"|"s", "usb", short
+                    short = "/".join(parts[4:])
+                    ent = f.core.get(short)
+                    if m != "GET" or parts[2] != "l" or not ent or not ent.get("png"):
+                        return self.reply(404, {"message": "no thumbnail"})
+                    return self.reply(200, ent["png"], "image/png")
+                rest = path[len("/api/v1/files/usb"):]
+                if m == "GET" and rest.endswith("/") and rest.strip("/") == "SUBDIR":
+                    return self.reply(200, {"type": "FOLDER", "name": "SUBDIR", "ro": False, "children": []})
+                if m == "GET" and rest in ("", "/"):
+                    kids = [FX.listing_entry("usb", k, v) for k, v in f.core.items()]
+                    kids.append({"name": "SUBDIR", "ro": False, "type": "FOLDER", "m_timestamp": 1756799943,
+                                 "display_name": "SUBDIR"})
+                    return self.reply(200, {"type": "FOLDER", "name": "usb", "ro": False, "children": kids})
+                short = rest.strip("/")
+                ent = f.core.get(short)
+                if ent is None:
+                    return self.reply(404, {"message": "no such file"})
+                if m == "GET":
+                    info = FX.listing_entry("usb", short, ent)
+                    info["size"] = ent["size"]
+                    if ent.get("meta"):
+                        info["meta"] = ent["meta"]
+                    return self.reply(200, info)
+                if m == "DELETE":
+                    if f.state == "PRINTING":
+                        return self.reply(409, {"message": "File is being printed"})
+                    del f.core[short]
+                    return self.reply(204)
+                self.reply(405, {})
 
             def files_route(self, m, rest):
                 f = fake
@@ -615,8 +655,14 @@ class TestCamera(unittest.TestCase):
 class TestConfig(unittest.TestCase):
     def test_config_fields_shape(self):
         names = [f["name"] for f in PrusaLinkPrinter.CONFIG_FIELDS]
-        for need in ("name", "url", "username", "password", "api_key"):
+        for need in ("name", "url", "username", "password"):
             self.assertIn(need, names)
+        self.assertNotIn("api_key", names)
+        self.assertNotIn("snapshot_url", names)
+        self.assertTrue(next(f for f in PrusaLinkPrinter.CONFIG_FIELDS if f["name"] == "password")["required"])
+        self.assertEqual(getattr(PrusaLinkPrinter, "CONFIG_REQUIRE_ONE_OF", []), [])
+        for adv in ("username", "storage", "model"):
+            self.assertTrue(next(f for f in PrusaLinkPrinter.CONFIG_FIELDS if f["name"] == adv).get("advanced"))
         for f in PrusaLinkPrinter.CONFIG_FIELDS:
             self.assertTrue({"name", "label", "type", "required", "help"} <= set(f))
             self.assertIn(f["type"], ("text", "password", "url"))

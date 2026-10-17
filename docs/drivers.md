@@ -142,8 +142,9 @@ It imports nothing from the drivers (drivers import it), so a new driver needs n
   filament actions run only in `IDLE` / `FINISH` / `FAILED` (never `RUNNING` / `PREPARE` / `PAUSE`,
   never `UNKNOWN` / `DISCONNECTED`). Light is never gated.
 - **Limits**: nozzle 0-300 C, bed 0-120 C; outside that is rejected, not clamped. Both zero = use cooldown.
-- **Presets**: `PLA 215/60, PETG 240/80, ABS 255/100, TPU 225/50`; `preheat_presets:` in `config.yml`
-  overrides/extends (`controls.configure`); a list saved on the Settings page replaces all of them.
+- **Presets**: bed only - `PLA 60, PETG 80, ABS 100` C, set in Settings > Printers & safety (`printers.preheat_bed_*`); a preset sends
+  `set_temps(None, bed)`, so every driver (Bambu `M140`, OctoPrint bed target, Klipper `M140`) sends a bed command and no nozzle command.
+  `preheat_presets:` in `config.yml` may add named presets (their `bed` value only). PrusaLink has no heater control at all.
 - **Auto-off**: every pre-heat arms a timer (Settings > Printers & safety, else `PREHEAT_TIMEOUT_MIN`, default 15; an
   invalid or <= 0 env value means 15; a saved 0 in Settings means no timer - the status line then says so and
   Cool down is the only way off). When it fires it cools down through the *live* driver (looked up by name, so an

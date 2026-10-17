@@ -2,6 +2,13 @@ FROM python:3.14-slim
 ENV PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 WORKDIR /app
+# RTSP cameras (a printer's "Camera address") are read with ffmpeg. Default ON; a Lite build skips it:
+#   docker build --build-arg WITH_FFMPEG=0 .
+ARG WITH_FFMPEG=1
+RUN if [ "$WITH_FFMPEG" = "1" ]; then \
+      apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+      && rm -rf /var/lib/apt/lists/*; \
+    fi
 # Dependencies first: this layer is reused until requirements.txt changes.
 COPY requirements.txt /app/requirements.txt
 RUN pip install -r /app/requirements.txt

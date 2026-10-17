@@ -48,6 +48,21 @@ prints from anywhere on earth without exposing anything to the internet.
   printer shows NOT CONNECTED (Bambus connect on their own)
 - 🖥️ Built-in touch **dashboard** at `/dashboard` (1024×600 kiosk) — same safety gates as the
   tools; every waiting screen has a Back button and a 20 s timeout, never a dead end
+  - **Wall screens have no keyboard.** Open the 1024×600 screen at `/dashboard?kiosk=1` (the 5-inch screen's
+    `?layout=5in` counts as a kiosk too): the file sheet then has no **Rename** button, because a rename field is
+    useless without a keyboard. Desktop and phone keep it. The page never guesses a kiosk from the window size
+    (landscape phones exist), so add `kiosk=1` to the kiosk's startup URL once.
+  - **Open a printer directly.** `/dashboard?printer=<name>` (URL-encoded, not case sensitive) opens that printer's screen; it combines
+    with `group=`, `layout=` and `kiosk=`. An unknown name shows the fleet with a "not found" notice. The "Print finished" message
+    links here (Settings > Notifications > Hub address). The ← Fleet button drops the parameter again.
+  - **Spaghetti on every screen.** Each fleet card says `Spaghetti: WATCHING / READY / OFF / NO CAMERA / DETECTOR DOWN`; a `WARNING` or
+    `FAILURE` is an inverted line plus a heavy frame on the card and a banner above the cards. The printer screen has the on / off switch for
+    that printer (it edits Settings > Detection > "Do not watch these printers").
+- 🗂️ **File list and file sheet.** Each file shows its picture (or the words NO PICTURE), its full name, the
+  material as words (PETG, PLA, PLA PETG ...) before the Print button, and Delete. Tap a file for the sheet: big
+  picture, print time, filament, layer height, nozzle, size, date, storage, the estimated cost and when it was last
+  printed, with Print / Delete / Rename / Back. A PrusaLink printer lists long names and `.bgcode` files; its pictures
+  are read from the printer's own thumbnail service once and cached.
 - 🖼️ **Plate thumbnails** — the dashboard file list shows each job's sliced plate preview.
   Bambu printers: pulled from the same `.3mf` download that already reads print time/weight/
   filaments. MK4/OctoPrint: pulled from the PrusaSlicer preview embedded in the gcode file's
@@ -74,9 +89,10 @@ prints from anywhere on earth without exposing anything to the internet.
 - 💾 **`backup_printer_files` / `backup_status`** — zip up every file on a printer into one
   archive on the Hub ([details below](#file-backups))
 - 🧾 **History and what a print really costs** — every print attempt is logged (finished, failed,
-  cancelled) and priced from your filament, electricity and wear rates; the dashboard's **History**
-  page shows success rate, material used, cost, and the *true* cost per part (failures charged to
-  the good parts), with a CSV download. Tools: `recent_jobs`, `job_stats`, `cost_per_part`.
+  cancelled) and priced from your filament prices (the cost is the filament alone; switch on
+  Settings → Costs → *Include print time costs* to add electricity and machine wear); the dashboard's
+  **History** page shows success rate, material used, cost, and the *true* cost per part (failures
+  charged to the good parts), with a CSV download. Tools: `recent_jobs`, `job_stats`, `cost_per_part`.
   Rates: Settings → Costs. How it works: [docs/joblog.md](joblog.md)
 - 🔎 **Find printers on your network** — **Printers → Discover printers** scans the networks you list
   (works from Docker) and pre-fills the Add form; tool `discover_printers`.
@@ -509,14 +525,16 @@ heaters off after the auto-off time (**Settings > Printers & safety**, or `PREHE
 minutes) unless a print starts or you cool down / re-heat first. Setting it to 0 in Settings turns the
 auto-off off. The controls live on each printer's screen in the dashboard; the fleet cards never show them.
 
-**Presets** default to PLA 215/60, PETG 240/80, ABS 255/100, TPU 225/50 (nozzle/bed, C). Edit them on the
-Settings page (**Printers & Hub**), or put this in `config.yml` (optional; ignored once a list is saved in Settings):
+**Pre-heat heats the bed only.** The nozzle is not touched: the printer heats it itself for a filament change or a print.
+The presets are one bed temperature per material, PLA 60, PETG 80, ABS 100 C by default. Change them on the Settings page
+(**Printers & safety**, "Pre-heat bed"); the wall screens and the dashboard buttons all read those numbers. Extra named presets can still
+be added in `config.yml` for agents (only their `bed` value is used; a `nozzle` there is ignored):
 
 ```yaml
 preheat_presets:
-  PLA:   {nozzle: 205, bed: 55}
-  NYLON: {nozzle: 270, bed: 90}
+  NYLON: {bed: 90}
 ```
+An agent or script can still pass an explicit `nozzle` temperature to the `preheat` tool; no button does.
 
 REST: `POST /api/printer/<name>/control` with `{"action": "light_on|light_off|preheat|cooldown|unload|load",
 "preset": "PETG"}` (or explicit `nozzle` / `bed`; `tray` for a Bambu load) answers 200, 400 (bad input),

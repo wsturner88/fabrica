@@ -38,6 +38,7 @@ from bambu import (BambuPrinter, OctoPrintPrinter, PrinterError, extract_gcode_p
                    extract_plate_png, parse_3mf_meta)
 import fleet_store
 import modelcheck
+import gcodemeta
 import controls
 import settings_store
 import notify
@@ -155,7 +156,8 @@ def _camera_fields(prn) -> dict:
     """`camera` flag (+ webcam flip flags for OctoPrint webcams) for API output."""
     cam = _has_camera(prn)
     info = prn.camera_info() if cam and hasattr(prn, "camera_info") else None
-    return {"camera": cam, **({"camera_orientation": info} if info else {})}
+    src = {"camera_source": "address"} if cam and getattr(prn, "_override_url", None) else {}
+    return {"camera": cam, **src, **({"camera_orientation": info} if info else {})}
 
 
 # ------------------------------------------------------------- settings, notifications, events
@@ -193,7 +195,10 @@ def _event_sink(ev):
         print(f"[notify] could not queue {getattr(ev, 'kind', '?')}: {type(e).__name__}: {e}", flush=True)
 
 
-WATCHER = events.EventWatcher(_event_sink, settings=SETTINGS, snapshot_fetcher=_jpeg_for)
+# job_facts: the job-log resolver (defined below, caches only) tells the "finished" message what the slicer
+# predicted and which materials the job uses. The run is remembered in <data dir>/print_runs.json.
+WATCHER = events.EventWatcher(_event_sink, settings=SETTINGS, snapshot_fetcher=_jpeg_for,
+                              job_facts=lambda printer, job: _job_resolver(printer, job))
 
 # ---- job log + costs (docs/joblog.md). One row per print attempt, priced when it is asked for.
 # The resolver answers from caches only (it runs inside the event sink: no network, ever).
@@ -289,14 +294,12 @@ def _apply_control_settings(_changed=None):
     so the PREHEAT_TIMEOUT_MIN / config.yml behaviour is unchanged until someone uses the page."""
     try:
         sources = SETTINGS.get_all()["sources"]
-        tk, pk = "printers.preheat_auto_off_min", "printers.preheat_presets"
+        tk = "printers.preheat_auto_off_min"
         controls.set_runtime(timeout_min=SETTINGS.get(tk) if sources.get(tk) != "default" else None)
-        if sources.get(pk) == "saved":
-            saved = SETTINGS.get(pk)
-            controls.configure({n: {"nozzle": v["nozzle_c"], "bed": v["bed_c"]} for n, v in saved.items()},
-                               exclusive=True)
-        else:
-            controls.configure(CFG.get("preheat_presets"))
+        # one set of numbers: the three bed temperatures on the Settings page (PLA / PETG / ABS) are the presets every button reads;
+        # extra named presets from config.yml (bed value only) stay available to agents
+        beds = {m: {"bed": SETTINGS.get("printers.preheat_bed_" + m.lower())} for m in ("PLA", "PETG", "ABS")}
+        controls.configure({**(CFG.get("preheat_presets") or {}), **beds})
     except Exception as e:
         print(f"[settings] could not apply the pre-heat settings: {e}", flush=True)
 
@@ -422,8 +425,19 @@ def _detection_public_url(url: str) -> str:
 def _detection_status() -> dict:
     st = DETECTION.status()
     mode, url, _token = _detection_target()
-    st["setup"] = {"mode": mode, "url": _detection_public_url(url), "learn_only": bool(SETTINGS.get("detection.learn_only"))}
+    st["setup"] = {"mode": mode, "url": _detection_public_url(url), "learn_only": bool(SETTINGS.get("detection.learn_only")),
+                   "excluded_printers": [str(x) for x in (SETTINGS.get("detection.excluded_printers") or [])]}   # the per-printer Spaghetti switch on the 5-inch screens reads / writes this list
     return st
+
+
+def _detection_line_ex(name: str) -> dict:
+    """_detection_line plus `learn` (learn-only mode) and `alerts` (how many this print) for the 5-inch board's Spaghetti panel."""
+    out = dict(_detection_line(name))
+    st = DETECTION.status()
+    p = st["printers"].get(name) or next((v for k, v in st["printers"].items() if k.lower() == (name or "").lower()), None) or {}
+    out["learn"] = st["mode"] == "learn"
+    out["alerts"] = len(p.get("alerts") or [])
+    return out
 
 
 def _detection_line(name: str) -> dict:
@@ -436,7 +450,7 @@ def _detection_line(name: str) -> dict:
         return {"state": "no_camera", "text": "No camera, so it cannot be watched"}
     p = st["printers"].get(name) or next((v for k, v in st["printers"].items() if k.lower() == name.lower()), None) or {}
     learn = " \u00b7 learn-only" if st["mode"] == "learn" else ""
-    if p.get("excluded"):
+    if p.get("excluded") or (name or "").lower() in DETECTION.excluded:     # (a printer the loop has not ticked yet is not in `p`)
         return {"state": "excluded", "text": "Off for this printer"}
     if st["detector"]["state"] == "down":
         return {"state": "down", "text": "Detector unreachable - this print is NOT being watched"}
@@ -644,7 +658,12 @@ def _remember_files(prn, files):
     """Keep the latest files() listing of a file-based printer so the job log can price a print from it
     later without a network request of its own."""
     try:
-        _FILES_SEEN[prn.name.lower()] = {costs.file_key(f.get("name")): dict(f) for f in files if f.get("name")}
+        seen = {costs.file_key(f.get("name")): dict(f) for f in files if f.get("name")}
+        for f in files:      # a printer that lists short names (PrusaLink 8.3) logs jobs under the long name: index both
+            dn = f.get("display_name")
+            if f.get("name") and dn and costs.file_key(dn) not in seen:
+                seen[costs.file_key(dn)] = dict(f)
+        _FILES_SEEN[prn.name.lower()] = seen
     except Exception:
         pass
 
@@ -659,29 +678,155 @@ def _octo_thumb_for(prn: OctoPrintPrinter, name: str, size: int):
     entry = cache.get(key)
     return entry.get("thumb") if entry else None
 
+def _octo_gcode_facts(prn, name: str, size: int, head) -> dict:
+    """What the slicer wrote into a file: {"materials": [...], "weight_g", "layer_mm", "nozzle_mm"} (missing keys = not in the file;
+    materials [] = looked and found none: cached, not asked again).
+    `.bgcode` keeps them at the start (the head we already hold), plain G-code at the end (one small ranged read,
+    only for a driver that can do it - OctoPrint). Raises PrinterError on a transport problem (nothing cached)."""
+    if str(name).lower().endswith(".bgcode"):
+        facts = gcodemeta.from_bgcode_head(head) if head else {}
+    elif hasattr(prn, "download_tail"):
+        tail = prn.download_tail(name, size)
+        facts = gcodemeta.from_gcode_tail(tail) if tail else {}
+    else:
+        facts = {}
+    facts.setdefault("materials", [])
+    return facts
+
+
 def _octo_meta_for(prn: OctoPrintPrinter, name: str, size: int):
-    """Download just the gcode header and cache its PrusaSlicer-embedded plate
-    thumbnail, if it has one. Unlike Bambu's _meta_for there's no slice_info
-    to parse here — OctoPrint's own file API already supplies print time/
-    filament — so the cache entry holds only {"thumb": ...}. Only called from
-    _prewarm, off the request path."""
+    """Download just the gcode header (thumbnail, the printer model the slicer named) and the last 64 KB (the
+    material(s) of a plain .gcode) and cache what they say. Unlike Bambu's _meta_for there's no slice_info
+    to parse here — OctoPrint's own file API already supplies print time/filament — so the cache entry holds
+    {"thumb", "slicer_model", "materials"}. Only called from _prewarm / suggest, off the request path."""
     key = f"{prn.name}|{name}|{size}"
     with _octo_lock(prn.name):
         # someone else may have finished this exact file while we waited for the lock
         with _cache_lock:
             cache = _cache_load()
-            if "thumb" in cache.get(key, {}) and "slicer_model" in cache.get(key, {}):
+            have = cache.get(key, {})
+            have_head = "thumb" in have and "slicer_model" in have
+            if have_head and "materials" in have:
                 return cache[key]
-        data = prn.download_head(name)
-        thumb = _save_thumb(key, extract_gcode_png(data))
-        # the printer model the slicer named in the head ("sliced for another printer" check);
-        # None = looked and found nothing, so it is not downloaded again
-        entry_new = {"thumb": thumb, "slicer_model": modelcheck.gcode_head_model(data) or None}
+        entry_new, data = {}, None
+        if not have_head:
+            data = prn.download_head(name)
+            # the printer model the slicer named in the head ("sliced for another printer" check);
+            # None = looked and found nothing, so it is not downloaded again
+            entry_new = {"thumb": _save_thumb(key, extract_gcode_png(data)),
+                         "slicer_model": modelcheck.gcode_head_model(data) or None}
+        if "materials" not in have:
+            entry_new.update(_octo_gcode_facts(prn, name, size, data))
         with _cache_lock:
             cache = _cache_load()
             cache[key] = {**(cache.get(key) or {}), **entry_new}
             _cache_save(cache)
-    return entry_new
+            return cache[key]
+
+# ---- PrusaLink file details + pictures --------------------------------------------------------------
+# A PrusaLink listing carries no size and no metadata (see prusalink.py "per-file details"), and its picture lives
+# at the printer's own thumbnail address. So per file: ONE small details GET + ONE picture GET, read lazily, kept in
+# the metadata cache under "<printer>|<name>|r<m_timestamp>" (a changed file has a new timestamp, so it is read again)
+# and the picture PNG in THUMBS_DIR like every other printer's. Never a G-code download.
+_PL_FIELDS = ("size", "print_seconds", "print_time", "filament_mm", "weight_g", "filament_type", "materials", "nozzle_mm", "layer_mm")
+
+
+def _is_pl(prn) -> bool:
+    return hasattr(prn, "file_details") and hasattr(prn, "thumbnail_png")
+
+
+def _pl_key(prn, name, rev) -> str:
+    return f"{prn.name}|{name}|r{rev if rev is not None else 0}"
+
+
+def _fmt_hm(secs) -> str:
+    secs = int(secs)
+    return f"{secs // 3600}h{(secs % 3600) // 60:02d}m"
+
+
+def _apply_entry(f: dict, entry: dict):
+    """Fill the gaps of a files() row from a cache entry (the row's own values win)."""
+    for k in _PL_FIELDS:
+        v = entry.get(k)
+        if v not in (None, "", 0) and not f.get(k):
+            f[k] = v
+    if f.get("print_seconds") and not f.get("print_time"):
+        f["print_time"] = _fmt_hm(f["print_seconds"])
+    if "thumb" in entry:
+        f["thumb"] = entry.get("thumb")
+
+
+def _pl_overlay(prn, files):
+    """Cache-only: add what the Hub already knows (size, picture) to a fresh PrusaLink listing and hand it to the
+    driver's memory, so every later files() call reports the same size. `thumb_lazy` = picture not looked up yet
+    (the page then asks the Hub for it on demand: /api/printer/<name>/filethumb)."""
+    with _cache_lock:
+        cache = _cache_load()
+    for f in files:
+        e = cache.get(_pl_key(prn, f.get("name"), f.get("rev")))
+        known = isinstance(e, dict)
+        if known:
+            prn.remember_details(f["name"], f.get("rev"), {k: e[k] for k in _PL_FIELDS if e.get(k) not in (None, "")})
+            _apply_entry(f, e)
+        f.setdefault("thumb", None)
+        f["thumb_lazy"] = not (known and "thumb" in e)
+    return files
+
+
+def _pl_details_for(prn, f: dict, thumb=True, details=True) -> dict:
+    """Read (once) the details and/or the picture of one PrusaLink file and cache them. Returns the cache entry.
+    Raises PrinterError on a transport problem (nothing is cached then, so it is tried again later). A file the printer
+    has no picture for is recorded as thumb=None and never asked again."""
+    key = _pl_key(prn, f["name"], f.get("rev"))
+    with _octo_lock(prn.name):
+        with _cache_lock:
+            entry = dict(_cache_load().get(key) or {})
+        changed = False
+        if details and "details" not in entry:
+            entry.update(prn.file_details(f["name"], f.get("rev")))
+            entry["details"] = True
+            changed = True
+        if thumb and "thumb" not in entry:
+            entry["thumb"] = _save_thumb(key, prn.thumbnail_png(f["name"], f.get("thumb_ref")))
+            changed = True
+        if changed:
+            with _cache_lock:
+                cache = _cache_load()
+                cache[key] = entry
+                _cache_save(cache)
+    return entry
+
+
+def _pl_row(prn, filename: str):
+    """The PrusaLink listing row of one file from the last listing the Hub saw (one listing request if it saw none)."""
+    seen = _FILES_SEEN.get(prn.name.lower()) or {}
+    row = next((f for f in seen.values() if f.get("name") == filename), None)
+    if row is None:
+        files = _pl_overlay(prn, prn.files())
+        _remember_files(prn, files)
+        row = next((f for f in files if f.get("name") == filename), None)
+    return dict(row) if row else None
+
+
+def _prewarm_prusalink(prn):
+    """Sizes + pictures of the files not looked up yet, one file at a time, 1 s apart. The printer's own web service
+    answers these small requests (the same ones its web page makes); while it is busy a pass does at most 10 files so
+    a print never sees a burst - the next listing continues where this stopped."""
+    files = _pl_overlay(prn, prn.files())
+    _remember_files(prn, files)
+    todo = [f for f in files if f.get("thumb_lazy")]
+    if not todo:
+        return
+    if not _printer_is_idle(prn):
+        todo = todo[:10]
+    print(f"[prewarm] {prn.name}: reading details of {len(todo)} file(s)", flush=True)
+    for f in todo:
+        try:
+            _pl_details_for(prn, f)
+        except Exception as e:
+            print(f"[prewarm] {prn.name}: failed on {f['name']}: {e}", flush=True)
+        time.sleep(1)
+
 
 def _cache_purge(printer_name: str, filename: str):
     """Drop every cached metadata entry for a printer+filename (any cached
@@ -762,14 +907,20 @@ def _prewarm_octo(prn: OctoPrintPrinter):
     # the OctoPrint Pi's disk over HTTP — the printer itself never sees it, so
     # it's safe mid-job (and MK4 jobs run 9h+; waiting would leave rows blank
     # for most of a day).
+    if _is_pl(prn):
+        _prewarm_prusalink(prn)        # sizes + pictures from the printer's own small answers (never a G-code download)
+        if not _printer_is_idle(prn):
+            return        # the header pull below reads the G-code off the printer's USB stick: only when it is idle
     files = prn.files()
+    if _is_pl(prn):
+        _pl_overlay(prn, files)
     _remember_files(prn, files)
     with _cache_lock:
         cache = _cache_load()
     # unlike Bambu there's no "backfill an old entry" case — the cache entry
     # for an OctoPrint file only ever holds "thumb", so missing the key
     # entirely and missing "thumb" on it are the same condition
-    todo = [f for f in files if "thumb" not in cache.get(f"{prn.name}|{f['name']}|{f['size']}", {})]
+    todo = [f for f in files if not {"thumb", "materials"} <= set(cache.get(f"{prn.name}|{f['name']}|{f['size']}", {}))]
     if not todo:
         return
     print(f"[prewarm] {prn.name}: warming {len(todo)} file(s)", flush=True)
@@ -939,9 +1090,23 @@ def list_sd_files(printer: str, refresh_metadata: bool = False) -> str:
     refresh_metadata = bool(refresh_metadata) and not security.caller_read_only()
     if _is_octo(prn):
         files = prn.files()
+        if _is_pl(prn):
+            _pl_overlay(prn, files)
         _remember_files(prn, files)
+        with _cache_lock:
+            cache = _cache_load()
         for f in files:
-            f["thumb"] = _octo_thumb_for(prn, f["name"], f["size"])
+            e = cache.get(f"{prn.name}|{f['name']}|{f['size']}") or {}
+            if not f.get("thumb"):
+                f["thumb"] = e.get("thumb")
+            if not f.get("materials"):
+                f["materials"] = list(e.get("materials") or [])
+            for k in ("weight_g", "layer_mm", "nozzle_mm"):         # read from the file itself when it was idle enough to look
+                if not f.get(k) and e.get(k):
+                    f[k] = e[k]
+            if f.get("thumb"):
+                f["thumb_lazy"] = False
+            f.pop("thumb_ref", None)
         return json.dumps(files, indent=2)
     files = _sd_list(prn)
     out = []
@@ -1316,10 +1481,18 @@ def suggest_mapping(printer: str, filename: str) -> str:
     prn = _pick(printer)
     may_download = not security.caller_read_only()
     if _is_octo(prn):
-        files = {f["name"]: f for f in prn.files()}
+        listing = prn.files()
+        if _is_pl(prn):
+            _pl_overlay(prn, listing)
+        files = {f["name"]: f for f in listing}
         if filename not in files:
             return f"'{filename}' not on {prn.name}."
         f = files[filename]
+        if _is_pl(prn):
+            try:        # the size is part of the start ticket: read it NOW, so the start sees the same number
+                _apply_entry(f, _pl_details_for(prn, f, thumb=False))
+            except Exception:
+                pass
         size = f.get("size") or 0
         if may_download:
             try:        # one head download (cached): thumbnail + the printer model the slicer wrote
@@ -1332,8 +1505,9 @@ def suggest_mapping(printer: str, filename: str) -> str:
         mc = _model_check(prn, filename, [entry])
         confirm = START_TICKETS.issue(prn, filename, size, [], "", mc.get("model_match") is False)
         return json.dumps({
-            "file": filename, "printer": prn.name, "printer_kind": getattr(prn, "kind", ""),
-            "print_time": f.get("print_time"), "weight_g": None,
+            "file": filename, "display_name": f.get("display_name") or filename,
+            "printer": prn.name, "printer_kind": getattr(prn, "kind", ""),
+            "print_time": f.get("print_time"), "weight_g": f.get("weight_g"),
             "ams_mapping": [], "mapping_described": "the loaded filament (no AMS on this printer)",
             "notes": ["This printer prints with whatever filament is physically loaded — check it."],
             "blocked": None, **mc,
@@ -1610,8 +1784,8 @@ def chamber_light(printer: str, on: bool) -> str:
 
 @_tool
 def preheat(printer: str, preset: str = None, nozzle: int = None, bed: int = None) -> str:
-    """Pre-heat the nozzle and bed so a print or filament change can start warm. Give a material
-    `preset` (PLA, PETG, ABS, TPU by default; see printer_controls for the configured list) and/or
+    """Pre-heat the BED (a preset heats the bed only; the nozzle heats itself for a filament change or a print). Give a material
+    `preset` (PLA, PETG, ABS by default; see printer_controls for the configured list) and/or
     explicit `nozzle` / `bed` temperatures in C (explicit values override the preset; nozzle max 300,
     bed max 120, anything higher is rejected). REFUSED while the printer is printing, preparing or
     paused. The Hub switches the heaters off again after the auto-off time (Settings > Printers & safety,
@@ -1651,7 +1825,8 @@ CAMERA_WAIT_SECONDS = 8.0   # how long a snapshot waits for the first frame
 async def get_camera_snapshot(printer: str):
     """Current chamber-camera picture (JPEG) for a printer — use it to check on
     a print: spaghetti, a detached part, an empty plate. Works for Bambu P1/A1-series
-    printers and for OctoPrint printers with a webcam; others answer with an
+    printers, for printers with a webcam (OctoPrint, Klipper, PrusaLink) and for any
+    printer given a camera address (rtsp:// or a JPEG snapshot URL); others answer with an
     error. The first call wakes the camera (a couple of seconds); the server keeps
     ONE shared camera connection/poller per printer and stops it ~30 s after the
     last request."""
@@ -1660,8 +1835,9 @@ async def get_camera_snapshot(printer: str):
         raise ValueError(f"{prn.name} has no camera available through this server.")
     got = await prn.camera().aget_frame(CAMERA_WAIT_SECONDS)
     if got is None:
+        why = getattr(prn.camera(), "last_error", None)
         raise ValueError(f"No camera frame from {prn.name} within {CAMERA_WAIT_SECONDS:.0f} s — "
-                         "is the printer on and reachable?")
+                         + (f"{why}." if why else "is the printer on and reachable?"))
     jpeg, _ts = got
     if McpImage is not None:
         return McpImage(data=jpeg, format="jpeg")
@@ -2159,9 +2335,14 @@ def _library_save(printer: str, filename: str, folder: str = "", replace: bool =
     prn = _pick(printer)
     if not isinstance(filename, str) or not filename.strip():
         raise _library.InvalidName("Say which file on the printer to save.")
-    clean = _library.name_from_printer_path(filename)
+    try:
+        clean = _library.name_from_printer_path(filename)
+        short_err = None
+    except _library.InvalidName as e:                 # a PrusaLink short name ("NAME~1.GCO") is not a library name: its long name may be
+        clean, short_err = None, e
     folder = _library.sanitize_folder(folder)
-    LIB.check_can_add(clean, replace)
+    if clean is not None:
+        LIB.check_can_add(clean, replace)
     cap = LIB.max_bytes
     src = f"printer:{prn.name}"
     if _is_octo(prn):
@@ -2171,6 +2352,18 @@ def _library_save(printer: str, filename: str, folder: str = "", replace: bool =
         row = next((f for f in prn.files() if f.get("name") == filename), None)
         if row is None:
             raise _library.NotFound(f"'{filename}' is not on {prn.name}'s file list.")
+        # PrusaLink lists an 8.3 short name (`name`, what every call uses) and the file's long name (`display_name`). The library
+        # keeps the long one: the short one has no usable extension and means nothing to a person.
+        long_name = str(row.get("display_name") or "")
+        if long_name and long_name != filename:
+            try:
+                clean = _library.name_from_printer_path(long_name)
+            except _library.InvalidName:
+                if clean is None:
+                    raise short_err
+            LIB.check_can_add(clean, replace)
+        elif clean is None:
+            raise short_err
         if row.get("origin", "local") != "local":
             raise _library.LibraryError(f"'{filename}' is stored on '{row.get('origin')}', not downloadable.")
         if int(row.get("size") or 0) > cap:
@@ -2191,6 +2384,8 @@ def _library_save(printer: str, filename: str, folder: str = "", replace: bool =
         except Exception as e:
             raise _library.LibraryError(security.scrub_text(f"Could not download '{filename}' from {prn.name}: {e}"))
         return LIB.add_streamed_file(tmp, clean, sha, size, folder, src, replace)
+    if clean is None:                                 # a Bambu has no long names: a bad name stays a bad name
+        raise short_err
     if not _printer_is_idle(prn):
         raise _library.LibraryError(f"{prn.name} is busy (printing, paused, preparing or not connected). The Hub does not "
                                     "read a printer's SD card then; try again when it is idle.")
@@ -3411,7 +3606,7 @@ async def _dashboard(request: Request):
 _BRAND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "brand")
 _BRAND_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _BRAND_TYPES = {".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon",
-                ".webmanifest": "application/manifest+json"}
+                ".webmanifest": "application/manifest+json", ".woff2": "font/woff2"}   # woff2: the 5-inch layout's fonts (Inter, JetBrains Mono, Antonio; SIL OFL), served from here because the CSP allows fonts from this origin only
 _BRAND_CACHE = {"Cache-Control": "public, max-age=86400"}
 BRAND_NAME, BRAND_SHORT, BRAND_TAGLINE = "Fabrica — Print Farm", "Fabrica", "printer management, agent-first."
 BRAND_COLORS = {"blueprint": "#0f3b66", "drafting": "#e8f2fb", "amber": "#ffb020", "sky": "#5aa5e6"}
@@ -3519,12 +3714,181 @@ async def _api_thumb(request: Request):
     return Response(data, media_type="image/png", headers={"Cache-Control": "max-age=86400"})
 
 
+@mcp.custom_route("/api/printer/{name}/filethumb", methods=["GET"])
+@_safe_route
+async def _api_filethumb(request: Request):
+    """?file=<name as listed>. The picture of one PrusaLink file, read from the printer's own thumbnail service the
+    first time it is asked for (then served from the Hub's cache). 404 = this printer has no picture for the file."""
+    filename = request.query_params.get("file") or ""
+
+    def work():
+        prn = _pick(request.path_params["name"])
+        if not _is_pl(prn) or not filename:
+            return None
+        row = _pl_row(prn, filename)
+        if row is None:
+            return None
+        entry = _pl_details_for(prn, row)
+        if not entry.get("thumb"):
+            return None
+        try:
+            with open(_thumb_path(entry["thumb"]), "rb") as fh:
+                return fh.read()
+        except OSError:
+            return None
+    try:
+        data = await _run(work)
+    except (ValueError, PrinterError):
+        data = None
+    if data is None:
+        return JSONResponse({"error": "no picture"}, status_code=404)
+    return Response(data, media_type="image/png", headers={"Cache-Control": "private, max-age=3600"})
+
+
+def _storage_words(prn, row: dict) -> str:
+    kind = getattr(prn, "kind", "")
+    if kind == "prusalink":
+        st = str(row.get("storage") or "usb")
+        return "USB stick" if st.lower() == "usb" else f"PrusaLink storage ({st})"
+    if kind == "octoprint":
+        return "OctoPrint storage"
+    if kind == "moonraker":
+        return "Klipper (gcodes folder)"
+    return "SD card"
+
+
+def _file_cost_estimate(prn, d: dict, include_machine=None) -> dict:
+    """What printing this file would cost at today's rates, from the file's own numbers (filament weight / length and
+    print time) with the job log's cost function. Words, not guesses: a missing input is said so."""
+    rates = JOBLOG.rates()
+    fils = [dict(x) for x in (d.get("filaments") or []) if isinstance(x, dict)]
+    grams = d.get("weight_g")
+    if not grams and fils and all(isinstance(x.get("used_g"), (int, float)) for x in fils):
+        grams = sum(x["used_g"] for x in fils)
+    if not grams:
+        grams = costs.grams_from_mm(d.get("filament_mm"), d.get("filament_type"))
+    secs = d.get("print_seconds")
+    base = {"currency": rates.currency, "available": False}
+    if not grams and not secs:
+        return {**base, "reason": "The file does not say how much filament it uses or how long it prints."}
+    if grams and not fils:
+        fils = [{"type": d.get("filament_type") or "", "used_g": grams}]
+    job = {"result": "finished", "grams_est": grams, "filaments": fils, "material": d.get("filament_type") or None,
+           "est_seconds": secs, "printer": prn.name, "model": getattr(prn, "model", "") or "", "parts": 1}
+    c = costs.job_cost(job, rates, include_machine=include_machine)
+    out = {**base, "available": True, "grams": round(grams, 1) if grams else None,
+           "hours": c.get("hours"), "material": c["material"], "electricity": c["electricity"], "wear": c["wear"],
+           "total": c["total"], "includes_machine_costs": bool(c.get("includes_machine_costs")),
+           "total_with_machine": c.get("total_with_machine", round(c["material"] + c["electricity"] + c["wear"], 4)),
+           "note": None}
+    notes = []
+    if not grams:
+        notes.append("Filament cost unknown: the file does not give a filament weight.")
+    if not secs:
+        notes.append("Print time unknown: power and wear cannot be estimated.")
+    if notes:
+        out["note"] = " ".join(notes)
+    return out
+
+
+def _file_detail(prn, filename: str, include_machine=None) -> dict:
+    """Everything the file detail sheet shows, in one answer. Reads only what is already cached, plus (PrusaLink) the
+    two small requests that fill the size and the picture. Never downloads a file; a Bambu is never asked for anything."""
+    d = {"name": filename, "printer": prn.name, "kind": getattr(prn, "kind", "")}
+    row = None
+    if _is_octo(prn):
+        if _is_pl(prn):
+            row = _pl_row(prn, filename)
+            if row is not None:
+                try:
+                    _apply_entry(row, _pl_details_for(prn, row))
+                except PrinterError as e:
+                    d["details_error"] = security.scrub_text(str(e))
+                with _cache_lock:         # what the file itself said (read while the printer was idle enough to look)
+                    e = _cache_load().get(f"{prn.name}|{filename}|{row.get('size') or 0}") or {}
+                row["materials"] = row.get("materials") or list(e.get("materials") or [])
+                for k in ("weight_g", "layer_mm", "nozzle_mm"):
+                    if not row.get(k) and e.get(k):
+                        row[k] = e[k]
+        else:
+            seen = _FILES_SEEN.get(prn.name.lower()) or {}
+            row = next((dict(f) for f in seen.values() if f.get("name") == filename), None)
+            if row is None:
+                files = prn.files()
+                _remember_files(prn, files)
+                row = next((dict(f) for f in files if f.get("name") == filename), None)
+            if row is not None:
+                with _cache_lock:
+                    e = _cache_load().get(f"{prn.name}|{filename}|{row.get('size') or 0}") or {}
+                row["thumb"] = row.get("thumb") or e.get("thumb")
+                row["materials"] = row.get("materials") or list(e.get("materials") or [])
+                for k in ("weight_g", "layer_mm", "nozzle_mm"):
+                    if not row.get(k) and e.get(k):
+                        row[k] = e[k]
+    else:
+        row = next((dict(f) for f in prn.sd_listing_cached() if f.get("name") == filename), None)
+        if row is not None:
+            row["metadata_loaded"] = False       # a Bambu is never asked for the file here: only what is cached
+            with _cache_lock:
+                meta = _cache_load().get(f"{prn.name}|{filename}|{row.get('size')}")
+            if isinstance(meta, dict):
+                row["thumb"] = meta.get("thumb")
+                for k in ("print_seconds", "print_time", "weight_g"):
+                    if meta.get(k) is not None:
+                        row[k] = meta[k]
+                row["filaments"] = [{"type": x.get("type"), "color_name": color_name(x.get("color")), "hex": x.get("color"),
+                                     "used_g": x.get("used_g")} for x in meta.get("filaments") or [] if isinstance(x, dict)]
+                row["metadata_loaded"] = True
+    if row is None:
+        raise ValueError(f"'{filename}' is not on {prn.name}'s file list.")
+    secs = row.get("print_seconds")
+    d.update({
+        "display_name": row.get("display_name") or filename,
+        "thumb": row.get("thumb"), "thumb_lazy": bool(row.get("thumb_lazy")) and not row.get("thumb"),
+        "print_seconds": secs, "print_time": row.get("print_time") or (_fmt_hm(secs) if secs else None),
+        "weight_g": row.get("weight_g"), "filament_type": row.get("filament_type"), "filament_mm": row.get("filament_mm"),
+        "materials": [x.get("type") for x in row.get("filaments") or [] if x.get("type")] or list(row.get("materials") or []),
+        "filaments": row.get("filaments") or [{"type": m, "color_name": None, "hex": None,
+                                               "used_g": row.get("weight_g") if len(row.get("materials") or []) == 1 else None}
+                                              for m in (row.get("materials") or ([row["filament_type"]] if row.get("filament_type") else []))],
+        "layer_mm": row.get("layer_mm"), "nozzle_mm": row.get("nozzle_mm"),
+        "size": row.get("size") or None, "modified": row.get("modified"),
+        "storage": _storage_words(prn, row),
+        "metadata_loaded": bool(row.get("metadata_loaded", True)),
+        "can_rename": bool(_rn_can_move(prn)), "can_delete": True,
+    })
+    d["cost"] = _file_cost_estimate(prn, d, include_machine)
+    try:
+        d["last_printed"] = JOBLOG.last_printed([d["display_name"], filename])
+    except Exception:
+        d["last_printed"] = None
+    return d
+
+
+@mcp.custom_route("/api/printer/{name}/filedetail", methods=["GET"])
+@_safe_route
+async def _api_filedetail(request: Request):
+    """?file=<name as listed>[&machine=0|1]. The file detail sheet's data (see _file_detail). `machine` is the cost view for
+    this request: 1 = filament + power + wear, 0 = filament only, absent = the Settings -> Costs choice."""
+    q = request.query_params
+    mach = {"1": True, "true": True, "0": False, "false": False}.get(str(q.get("machine", "")).lower())
+    try:
+        prn = _pick(request.path_params["name"])
+        d = await _run(_file_detail, prn, q.get("file") or "", mach)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    except PrinterError as e:
+        return JSONResponse({"error": security.scrub_text(str(e))}, status_code=502)
+    return JSONResponse(d)
+
+
 @mcp.custom_route("/api/fleet", methods=["GET"])
 @_safe_route
 async def _api_fleet(request: Request):
     def work():
         group_of = {k.lower(): v for k, v in FLEET.store.groups_by_printer().items()}
-        return [{**prn.snapshot(), **_camera_fields(prn), "groups": group_of.get(str(prn.name).lower(), [])}
+        return [{**prn.snapshot(), **_camera_fields(prn), "groups": group_of.get(str(prn.name).lower(), []),
+                 "can_connect": hasattr(prn, "connect_serial")}      # the NOT CONNECTED chip on a fleet card is only a button when this is true
                 for prn in list(PRINTERS.values())]
     out = await _run(work)
     return JSONResponse(out)
@@ -3544,7 +3908,7 @@ async def _api_printer(request: Request):
                 "palette": sorted(PALETTE.keys()), "materials": list(MATERIALS),
                 "kind": prn.kind, "can_connect": hasattr(prn, "connect_serial"),
                 "controls": controls.summary(prn),
-                "detection": _detection_line(prn.name),
+                "detection": _detection_line_ex(prn.name),
                 **_camera_fields(prn)}
     return JSONResponse(await _run(work))
 
@@ -3603,7 +3967,8 @@ async def _api_snapshot(request: Request):
         return err
     got = await prn.camera().aget_frame(CAMERA_WAIT_SECONDS)
     if got is None:
-        return JSONResponse({"error": "camera unavailable — no frame received"}, status_code=503,
+        why = getattr(prn.camera(), "last_error", None)
+        return JSONResponse({"error": why or "camera unavailable — no frame received"}, status_code=503,
                             headers={"Cache-Control": "no-store"})
     return Response(got[0], media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
@@ -4594,6 +4959,13 @@ def _int_param(request, name, default):
         return default
 
 
+def _machine_param(request):
+    """?machine=1 (add power + machine wear to cost totals) / ?machine=0 (filament only) -> True / False;
+    absent or anything else -> None = follow the Costs setting `costs.include_machine_costs` (default: filament only)."""
+    v = str(request.query_params.get("machine") or "").strip().lower()
+    return True if v in ("1", "true", "yes", "on") else False if v in ("0", "false", "no", "off") else None
+
+
 def _job_filter(groups, printers):
     """History filter -> (printer argument for JobLog, description). `groups` / `printers` are lists of names; the
     result is the UNION: a printer counts if it is named or is in any named group. (None, None) = no filter.
@@ -4620,10 +4992,13 @@ async def _api_jobs(request: Request):
     q = request.query_params
     pf, info = _request_filter(request)
     try:
-        jobs = await _run(JOBLOG.recent_jobs, _int_param(request, "limit", 50), pf, q.get("result") or None)
+        jobs = await _run(JOBLOG.recent_jobs, _int_param(request, "limit", 50), pf, q.get("result") or None,
+                          _machine_param(request))
     except ValueError as e:
         return _bad_request(e)
-    return JSONResponse({"jobs": jobs, "currency": JOBLOG.rates().currency, **({"filter": info} if info else {})})
+    return JSONResponse({"jobs": jobs, "currency": JOBLOG.rates().currency,
+                         "includes_machine_costs": costs.includes_machine(JOBLOG.rates(), _machine_param(request)),
+                         **({"filter": info} if info else {})})
 
 
 @mcp.custom_route("/api/jobs.csv", methods=["GET"])
@@ -4632,7 +5007,7 @@ async def _api_jobs_csv(request: Request):
     q = request.query_params
     pf, _info = _request_filter(request)
     try:
-        text = await _run(JOBLOG.export_csv, pf, q.get("period") or "all")
+        text = await _run(JOBLOG.export_csv, pf, q.get("period") or "all", include_machine=_machine_param(request))
     except ValueError as e:
         return _bad_request(e)
     return Response(text, media_type="text/csv; charset=utf-8",
@@ -4643,7 +5018,7 @@ async def _api_jobs_csv(request: Request):
 @_safe_route
 async def _api_job(request: Request):
     try:
-        job = await _run(JOBLOG.job, request.path_params["job_id"])
+        job = await _run(JOBLOG.job, request.path_params["job_id"], include_machine=_machine_param(request))
     except ValueError:
         job = None
     if job is None:
@@ -4657,7 +5032,8 @@ async def _api_stats(request: Request):
     q = request.query_params
     pf, info = _request_filter(request)
     try:
-        st = await _run(JOBLOG.stats, q.get("period") or "month", pf, None, None, FLEET.store.group_index())
+        st = await _run(JOBLOG.stats, q.get("period") or "month", pf, None, None, FLEET.store.group_index(),
+                        include_machine=_machine_param(request))
     except ValueError as e:
         return _bad_request(e)
     return JSONResponse({**st, **({"filter": info} if info else {})})
@@ -4670,7 +5046,7 @@ async def _api_costs_file(request: Request):
     last_n = _int_param(request, "last_n", 0) or None
     pf, info = _request_filter(request)
     try:
-        d = await _run(JOBLOG.file_costs, q.get("name") or "", last_n, pf)
+        d = await _run(JOBLOG.file_costs, q.get("name") or "", last_n, pf, include_machine=_machine_param(request))
     except ValueError as e:
         return _bad_request(e)
     return JSONResponse({**d, **({"filter": info} if info else {})})
@@ -4694,25 +5070,36 @@ def _tool_job_filter(printer, printers, group):
 
 
 @_tool
-async def recent_jobs(limit: int = 20, printer: str = "", printers: list[str] | None = None, group: str = "") -> str:
+async def recent_jobs(limit: int = 20, printer: str = "", printers: list[str] | None = None, group: str = "",
+                      include_machine_costs: bool | None = None) -> str:
     """The latest print attempts (newest first): printer, file, result (FINISHED / FAILED / CANCELLED /
-    UNKNOWN / RUNNING), parts, grams, duration and what each cost at the Costs settings. Optionally filter to one
+    UNKNOWN / RUNNING), parts, grams, duration and what each cost at the Costs settings. Each job's `cost.total` is
+    the FILAMENT cost only by default; the Costs setting 'Include print time costs' (or `include_machine_costs=true`
+    here) adds electricity + machine wear. `cost.material` / `electricity` / `wear` / `total_with_machine` are always
+    given and `cost.includes_machine_costs` says which one `total` is. Optionally filter to one
     printer, a list of `printers`, and/or a `group` (several groups: comma-separated; see list_groups). Filters add
     up (a print counts if it ran on any named printer or any printer in a named group)."""
     pf, info, refused = _tool_job_filter(printer, printers, group)
     if refused:
         return refused
     try:
-        jobs = await _run(JOBLOG.recent_jobs, limit, pf)
+        jobs = await _run(JOBLOG.recent_jobs, limit, pf, include_machine=include_machine_costs)
     except ValueError as e:
         return f"REFUSED: {e}"
-    return json.dumps({"currency": JOBLOG.rates().currency, **({"filter": info} if info else {}), "jobs": jobs}, indent=2)
+    return json.dumps({"currency": JOBLOG.rates().currency,
+                       "includes_machine_costs": costs.includes_machine(JOBLOG.rates(), include_machine_costs),
+                       **({"filter": info} if info else {}), "jobs": jobs}, indent=2)
 
 
 @_tool
-async def job_stats(period: str = "month", printer: str = "", printers: list[str] | None = None, group: str = "") -> str:
+async def job_stats(period: str = "month", printer: str = "", printers: list[str] | None = None, group: str = "",
+                    include_machine_costs: bool | None = None) -> str:
     """Print totals for a period (day, week, month, year, all, or '<N>d'): jobs, success rate, hours, grams,
-    cost split, true and clean cost per part, and breakdowns by printer, material and file - plus `by_group`
+    cost split, true and clean cost per part, and breakdowns by printer, material and file. Cost totals (`cost.total`,
+    wasted on failures, cost per part, the breakdowns) are the FILAMENT cost only by default; the Costs setting
+    'Include print time costs' (or `include_machine_costs=true` here) adds electricity + machine wear.
+    `cost.total_with_machine` and `cost.material` / `electricity` / `wear` are always given, and
+    `includes_machine_costs` says which one the totals are - plus `by_group`
     (prints, success, hours, grams and cost per printer group; a printer in two groups counts in both). Optionally
     filter to one printer, a list of `printers`, and/or a `group` (several groups: comma-separated; see
     list_groups): totals then cover only those printers (union). Handy for business-vs-hobby cost at tax time."""
@@ -4720,36 +5107,42 @@ async def job_stats(period: str = "month", printer: str = "", printers: list[str
     if refused:
         return refused
     try:
-        st = await _run(JOBLOG.stats, period, pf, None, None, FLEET.store.group_index())
+        st = await _run(JOBLOG.stats, period, pf, None, None, FLEET.store.group_index(),
+                        include_machine=include_machine_costs)
         return json.dumps({**st, **({"filter": info} if info else {})}, indent=2)
     except ValueError as e:
         return f"REFUSED: {e}"
 
 
 @_tool
-async def cost_per_part(file: str, printers: list[str] | None = None, group: str = "") -> str:
+async def cost_per_part(file: str, printers: list[str] | None = None, group: str = "",
+                        include_machine_costs: bool | None = None) -> str:
     """What one part of this file really costs: TRUE cost per part (failed and cancelled attempts charged to the
     good parts) against the CLEAN cost per part (finished prints only), the success rate, and how many attempts
-    the figures are based on. `file` may be written with or without .gcode.3mf. Optionally count only attempts on
-    a list of `printers` and/or a `group` (comma-separated for several; see list_groups)."""
+    the figures are based on. The default is the FILAMENT cost only; the Costs setting 'Include print time costs' (or
+    `include_machine_costs=true` here) adds electricity + machine wear (`true_cost_per_part_with_machine` always has
+    that figure; `includes_machine_costs` says which one `true_cost_per_part` is). `file` may be written with or
+    without .gcode.3mf. Optionally count only attempts on a list of `printers` and/or a `group` (comma-separated
+    for several; see list_groups)."""
     pf, _info, refused = _tool_job_filter("", printers, group)
     if refused:
         return refused
     try:
-        d = await _run(JOBLOG.file_costs, file, None, pf)
+        d = await _run(JOBLOG.file_costs, file, None, pf, include_machine=include_machine_costs)
     except ValueError as e:
         return f"REFUSED: {e}"
     r = JOBLOG.rates()
+    basis = "incl. power + machine wear" if d.get("includes_machine_costs") else "filament only"
     if not d["attempts"]:
         return json.dumps({"summary": f"No finished, failed or cancelled prints of '{file}' are logged yet.", **d}, indent=2)
     rate = "no success rate yet" if d["success_rate"] is None else f"{d['success_rate'] * 100:.0f}% of attempts finished"
     if d["true_cost_per_part"] is None:
         d["summary"] = (f"'{file}': {d['attempts']} attempt(s), none finished, so there is no cost per part yet "
-                        f"({_money(r, d['cost']['wasted_on_failures'])} spent on failures).")
+                        f"({_money(r, d['cost']['wasted_on_failures'])} spent on failures; {basis}).")
     else:
         d["summary"] = (f"'{file}': true cost per part {_money(r, d['true_cost_per_part'])} "
                         f"(clean {_money(r, d['clean_cost_per_part'])} + waste {_money(r, d['waste_per_part'])}), "
-                        f"{rate}, based on the latest {d['attempts']} attempt(s).")
+                        f"{rate}, based on the latest {d['attempts']} attempt(s); {basis}.")
     return json.dumps(d, indent=2)
 
 # ============================================================= end job history + costs
