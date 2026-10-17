@@ -172,6 +172,8 @@ REST_SCOPES = [
     ("GET", "/api/printer/{name}/snapshot", "read"),
     ("GET", "/api/printer/{name}/stream", "read"),
     ("GET", "/api/printer/{name}/files", "read"),
+    ("GET", "/api/printer/{name}/filethumb", "read"),
+    ("GET", "/api/printer/{name}/filedetail", "read"),
     ("POST", "/api/printer/{name}/suggest", "read"),         # computes a mapping, changes nothing
     ("GET", "/api/thumb/{basename}", "read"),
     ("GET", "/api/backups", "read"),                          # the list, not the zip files

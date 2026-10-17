@@ -469,7 +469,7 @@ class EventTruthTests(unittest.TestCase):
             for state, pct in (("IDLE", 0), ("RUNNING", 5), ("FINISH", 100)):
                 w.update({"P": esnap(state, "coin.3mf", pct)}, now=t[0])
                 t[0] += 60
-        finished = [r for r in srv.requests if b"finished" in r["body"].lower() and r["method"] == "POST"]
+        finished = [r for r in srv.requests if b"done " in r["body"].lower() and r["method"] == "POST"]   # "Done 3:42 PM ..." is the finished message
         self.assertEqual(len(finished), 2)
 
     def test_wall_clock_step_does_not_change_print_duration_or_offline_timing(self):

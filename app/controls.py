@@ -55,11 +55,13 @@ NOZZLE_MAX = 300
 BED_MAX = 120
 DEFAULT_TIMEOUT_MIN = 15.0
 
+# Pre-heat by preset heats the BED ONLY (owner decision, 10/17/26): the nozzle is heated by the printer itself for a filament change or a print,
+# so a preset carries no nozzle temperature (nozzle None = that heater is left alone). The numbers are the Settings page's
+# printers.preheat_bed_pla / _petg / _abs; these are only the fallbacks. An explicit `nozzle` argument (API / agents) still works.
 DEFAULT_PRESETS = {
-    "PLA":  {"nozzle": 215, "bed": 60},
-    "PETG": {"nozzle": 240, "bed": 80},
-    "ABS":  {"nozzle": 255, "bed": 100},
-    "TPU":  {"nozzle": 225, "bed": 50},
+    "PLA":  {"nozzle": None, "bed": 60},
+    "PETG": {"nozzle": None, "bed": 80},
+    "ABS":  {"nozzle": None, "bed": 100},
 }
 
 
@@ -166,9 +168,9 @@ def _clean_preset(name, spec):
     if isinstance(spec, (list, tuple)) and len(spec) == 2:
         spec = {"nozzle": spec[0], "bed": spec[1]}
     if not isinstance(spec, dict):
-        raise ControlInvalid(f"preset {name!r} must be {{nozzle, bed}}.")
-    return {"nozzle": check_temp(spec.get("nozzle"), NOZZLE_MAX, f"preset {name} nozzle"),
-            "bed": check_temp(spec.get("bed"), BED_MAX, f"preset {name} bed")}
+        raise ControlInvalid(f"preset {name!r} must be {{bed}}.")
+    # a nozzle value in an older config.yml is read and dropped: a preset heats the bed only
+    return {"nozzle": None, "bed": check_temp(spec.get("bed"), BED_MAX, f"preset {name} bed")}
 
 
 def configure(presets=None, resolver=None, log=print, exclusive=False, data_dir=None, restore=True):
@@ -281,7 +283,7 @@ def resolve_temps(preset=None, nozzle=None, bed=None):
     if bed is not None:
         b = check_temp(bed, BED_MAX, "bed")
     if n is None and b is None:
-        raise ControlInvalid("Give a preset (" + ", ".join(_presets) + ") or a nozzle and/or bed temperature.")
+        raise ControlInvalid("Give a preset (" + ", ".join(_presets) + ") or a bed (and/or nozzle) temperature.")
     if not (n or b):
         raise ControlInvalid("Both temperatures are 0 - use cooldown to switch the heaters off.")
     return n, b, name
@@ -999,8 +1001,9 @@ def perform(prn, action, preset=None, nozzle=None, bed=None, tray=None) -> dict:
         applied = prn.set_temps(n, b) or {"nozzle": n, "bed": b}
         res.update(preset=pname, nozzle=applied.get("nozzle"), bed=applied.get("bed"),
                    auto_off_in_s=round(secs))
-        res["message"] = (f"pre-heat sent (nozzle {applied.get('nozzle')}, bed {applied.get('bed')} C"
-                          + (f", {pname}" if pname else "") + ")"
+        res["message"] = (f"pre-heat sent ("
+                          + (f"nozzle {applied.get('nozzle')}, " if applied.get("nozzle") is not None else "")
+                          + f"bed {applied.get('bed')} C" + (f", {pname}" if pname else "") + ")"
                           + f"; heaters switch off in {round(secs / 60, 1)} min unless a print starts")
         if _unconfirmed(applied):
             res["confirmed"] = False

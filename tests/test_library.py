@@ -841,6 +841,26 @@ class Hub(unittest.TestCase):
         usb.state = "IDLE"
         self.assertEqual(self.c.post("/api/library/save", json={"printer": "Usb", "filename": "Other.gcode"}).status_code, 201)
 
+    def test_save_from_a_prusalink_short_name_uses_the_long_display_name(self):
+        """PrusaLink lists "NAME~1.GCO" (8.3) plus the real name; the short name is not a library name, the long one is."""
+        class LongNames(FakeUsbPrinter):
+            def files(self, with_meta=True):
+                return [{"name": n, "display_name": self.long[n], "size": len(b), "origin": "local"} for n, b in self.files_map.items()]
+        usb = LongNames("Usb")
+        usb.files_map = {"PART_A~1.GCO": make_gcode(), "BRACKE~1.BGC": make_gcode()}
+        usb.long = {"PART_A~1.GCO": "part a 0.2mm PETG 1h25m.gcode", "BRACKE~1.BGC": "bracket v2 0.2mm PLA 32m.bgcode"}
+        server.PRINTERS["usb"] = usb
+        r = self.c.post("/api/library/save", json={"printer": "Usb", "filename": "PART_A~1.GCO"})
+        self.assertEqual(r.status_code, 201, r.text)
+        self.assertEqual(r.json()["name"], "part a 0.2mm PETG 1h25m.gcode")
+        self.assertEqual(usb.opened, ["PART_A~1.GCO"])                  # the printer is still asked for the file by its real (short) name
+        self.assertEqual(self.c.post("/api/library/save", json={"printer": "Usb", "filename": "BRACKE~1.BGC"}).json()["name"], "bracket v2 0.2mm PLA 32m.bgcode")
+        # saving it again is refused as a duplicate of the long name, not as an invalid short one
+        self.assertEqual(self.c.post("/api/library/save", json={"printer": "Usb", "filename": "PART_A~1.GCO"}).status_code, 409)
+        # a short name whose long name is no good either is still refused
+        usb.files_map["JUNK~1.GCO"] = make_gcode(); usb.long["JUNK~1.GCO"] = "notes.txt"
+        self.assertEqual(self.c.post("/api/library/save", json={"printer": "Usb", "filename": "JUNK~1.GCO"}).status_code, 400)
+
     def test_scan_never_opens_a_session_on_a_busy_bambu(self):
         self.p1s.files["a.3mf"] = make_3mf()
         self.busy.files["b.3mf"] = make_3mf()

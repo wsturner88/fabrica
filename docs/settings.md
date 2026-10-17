@@ -63,6 +63,7 @@ quiet hours by default.
 | `notifications.quiet_end` | time | `07:00` |  |
 | `notifications.quiet_breakthrough` | multienum | `["print_failed","backup_failed","spaghetti_suspected"]` |  |
 | `notifications.include_snapshot` | bool | `True` |  |
+| `notifications.hub_url` | url | `` | Address your phone can reach, e.g. `http://192.168.1.50:8000`; adds an "Open in Fabrica" link to "Print finished" messages; the link is `<address>/dashboard?printer=<name>` and opens that printer's screen. Empty = no link |
 | `notifications.duplicate_window_min` | int | `5` | 0-240 |
 | `notifications.offline_grace_s` | int | `90` | 10-3600 |
 | `notifications.muted_printers` | list_str | `[]` |  |
@@ -127,7 +128,9 @@ quiet hours by default.
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `printers.preheat_presets` | presets | `{"PLA":{"nozzle_c":215,"bed_c":60},"PETG":{"nozzle_c":240,"bed_c":80},"ABS":{"nozzle_c":255,"bed_c":100},"TPU":{"nozzle_c":225,"bed_c":50}}` |  |
+| `printers.preheat_bed_pla` | int | `60` | Pre-heat heats the **bed only**; one bed temperature per material (0-120 C). Every Pre-heat button reads these |
+| `printers.preheat_bed_petg` | int | `80` | bed temperature for the PETG button |
+| `printers.preheat_bed_abs` | int | `100` | bed temperature for the ABS button (a best guess: 90 or 100) |
 | `printers.preheat_auto_off_min` | int | `15` | env `PREHEAT_TIMEOUT_MIN` is the default; 0-240 |
 | `printers.require_bed_clear` | bool | `True` | read-only |
 
@@ -152,6 +155,7 @@ Used by the History page, `recent_jobs`, `job_stats` and `cost_per_part` (see [j
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
+| `costs.include_machine_costs` | bool | `false` | off: every cost is the filament cost only; on: electricity + machine wear are added to totals (the rates below only matter then) |
 | `costs.currency` | string | `$` | a symbol, up to 8 characters; nothing is converted |
 | `costs.filament_prices` | list_str (`NAME=price`) | `PLA=20, PETG=22, ABS=22, ASA=25, TPU=35` | price per kg; entries override the built-in ones |
 | `costs.default_price_per_kg` | float | `25` | any other material |
@@ -280,8 +284,7 @@ Done in `server.py` (tests: `tests/test_wiring.py`):
   detector's alerts go through (see [detection.md](detection.md)).
 - **Settings in use**: `backups.keep_per_printer` (BackupManager `keep=`), `printers.preheat_auto_off_min`
   (saved value wins; 1–240 min, **it can never be turned off**; with nothing saved the old `PREHEAT_TIMEOUT_MIN` / 15 min behaviour
-  is unchanged), `printers.preheat_presets` (a saved list replaces the built-in and `config.yml` ones; with
-  nothing saved those still apply), `camera.live_max_min` (live view length) and, in the dashboard,
+  is unchanged), `printers.preheat_bed_pla` / `_petg` / `_abs` (the bed temperature of each Pre-heat button; the nozzle is never heated by a pre-heat preset), `camera.live_max_min` (live view length) and, in the dashboard,
   `general.hub_name`, `temp_unit`, `timezone`, `datetime_format`, `camera.thumb_refresh_s`.
   `agents.tool_count` is the real number of registered MCP tools.
 - **REST**: `GET/PUT /api/settings` (GET = schema + values + sources; PUT takes `{"values": {...},

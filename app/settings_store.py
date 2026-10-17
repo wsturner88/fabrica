@@ -62,6 +62,7 @@ class SettingsError(Exception):
 # use the same names, so this table is the single source of truth.
 EVENT_KINDS = {
     "print_started":      ("Print started",                          "info",    False, False),
+    "first_layer_done":   ("First layer done (check it is sticking)", "info",  True,  False),
     "print_finished":     ("Print finished",                         "info",    True,  False),
     "print_failed":       ("Print failed or cancelled",              "failure", True,  True),
     "print_paused":       ("Print paused (filament runout, error)",  "warning", True,  False),
@@ -77,7 +78,12 @@ EVENT_KINDS = {
 }
 EVENT_HELP = {
     "print_started": "A printer goes from idle to printing. Off by default - it is usually noise.",
-    "print_finished": "A job completes. The message includes the job name and how long it took.",
+    "first_layer_done": "Once per print, when the first layer is finished, with a camera picture so you can check it is sticking. "
+                        "Detected from the layer number (Bambu, Klipper when the slicer reports layers), else from the nozzle height "
+                        "(Klipper, PrusaLink), else a timer (OctoPrint: set below). Not sent for a print already under way when the Hub starts.",
+    "print_finished": "A job completes. The message says which printer and job, when it finished, how long it took against "
+                      "the slicer's estimate (early / late / on time), the material used, a link to the Hub (when "
+                      "'Hub address' under Notifications is set) and the camera picture.",
     "print_failed": "A job fails, is cancelled or stopped before it finished.",
     "print_paused": "A job pauses - filament runout, a printer error, or someone pressed pause. The printer's error text is included when it gives one.",
     "printer_offline": "A printer stays unreachable for longer than the offline grace period.",
@@ -114,12 +120,7 @@ DATETIME_FORMATS = {      # key -> (strftime, example label)
     "eu": "%d/%m/%Y %H:%M",
 }
 
-PREHEAT_DEFAULTS = {
-    "PLA": {"nozzle_c": 215, "bed_c": 60},
-    "PETG": {"nozzle_c": 240, "bed_c": 80},
-    "ABS": {"nozzle_c": 255, "bed_c": 100},
-    "TPU": {"nozzle_c": 225, "bed_c": 50},
-}
+PREHEAT_BED_DEFAULTS = {"PLA": 60, "PETG": 80, "ABS": 100}      # pre-heat heats the BED only; one number per material
 
 _EVENT_FIELDS = [
     _field(kind, label, "bool", on, EVENT_HELP[kind])
@@ -165,12 +166,19 @@ SCHEMA = [
                 options=_opts(*[(k, v[0]) for k, v in EVENT_KINDS.items()])),
          _field("include_snapshot", "Attach a camera picture", "bool", True,
                 "Add the printer's current camera frame to alerts about a print (when the printer has a camera)."),
+         _field("hub_url", "Hub address for message links", "url", "",
+                "Where your phone can reach this Hub, e.g. http://192.168.1.50:8000 - 'Print finished' messages "
+                "then end with an 'Open in Fabrica' link that opens that printer's screen. Leave empty for no link.", placeholder="http://192.168.1.50:8000"),
          _field("duplicate_window_min", "Suppress repeats for (minutes)", "int", 5,
                 "The same event for the same printer (and job) is sent at most once in this window. "
                 "0 = never suppress.", min=0, max=240, unit="min"),
          _field("offline_grace_s", "Offline grace period (seconds)", "int", 90,
                 "A printer must be unreachable this long before it is reported offline, so a "
                 "Wi-Fi blip or reboot does not ping you.", min=10, max=3600, unit="s"),
+         _field("first_layer_fallback_min", "First-layer alert timer (minutes)", "int", 8,
+                "For printers that report neither layers nor nozzle height (OctoPrint): send the "
+                "'First layer done' alert this long after the print starts. 0 = off for those printers.",
+                min=0, max=60, unit="min"),
          _field("muted_printers", "Muted printers", "list_str", [],
                 "No notifications at all for these printers (names exactly as in the fleet list).",
                 item_source="printers"),
@@ -257,11 +265,16 @@ SCHEMA = [
      ]},
 
     {"id": "printers", "label": "Printers & safety", "group": "hub",
-     "description": "Pre-heat and start-print behaviour.",
+     "description": "Pre-heat (bed only) and start-print behaviour.",
      "fields": [
-         _field("preheat_presets", "Pre-heat presets", "presets", copy.deepcopy(PREHEAT_DEFAULTS),
-                "Material name -> nozzle (0-300) and bed (0-120) temperature in °C - the limits the pre-heat tool enforces. Edit, add or remove materials.",
-                max_items=12),
+         _field("preheat_bed_pla", "Pre-heat bed: PLA", "int", PREHEAT_BED_DEFAULTS["PLA"],
+                "The quick Pre-heat buttons (wall screens and dashboard) heat the BED only, to the temperature set here for each material. "
+                "The nozzle is left off: the printer heats it itself for a filament change or a print.",
+                min=0, max=120, unit="°C"),
+         _field("preheat_bed_petg", "Pre-heat bed: PETG", "int", PREHEAT_BED_DEFAULTS["PETG"],
+                "Bed temperature for the PETG button.", min=0, max=120, unit="°C"),
+         _field("preheat_bed_abs", "Pre-heat bed: ABS", "int", PREHEAT_BED_DEFAULTS["ABS"],
+                "Bed temperature for the ABS button. A best guess (90 or 100): set what your ABS likes.", min=0, max=120, unit="°C"),
          _field("preheat_auto_off_min", "Pre-heat auto-off (minutes)", "int", 15,
                 "A pre-heated printer cools down again if no print starts within this time (1-240 min). It cannot be turned off - heaters are never left on indefinitely.",
                 min=1, max=240, unit="min", env="PREHEAT_TIMEOUT_MIN"),
@@ -294,13 +307,18 @@ SCHEMA = [
      ]},
 
     {"id": "costs", "label": "Costs", "group": "hub",
-     "description": "What a print costs: filament, electricity and machine wear. Used by the History page and the cost-per-part figures.",
+     "description": "What a print costs. By default the cost is the filament alone; power and machine wear can be added. Used by the History page and the cost-per-part figures.",
      "help": ("Every print is logged and priced when you look at it, so changing a price re-prices the whole history. "
+              "By default every cost shown is the FILAMENT cost only. Switch on 'Include print time costs' to add electricity and "
+              "machine wear to the totals (the rates below only matter then; the History page can also flip this view on the spot). "
               "Filament prices and printer power are lists of NAME=value, for example PLA=20 (per kg) or P1S=120 (watts). "
               "A printer's power is matched by its name, then by its model. Money is shown in the currency symbol you type; "
               "nothing is converted. Not counted: purge waste on multi-colour prints, supports the slicer did not report, "
               "packaging, fees and your own time."),
      "fields": [
+         _field("include_machine_costs", "Include print time costs (power + machine wear)", "bool", False,
+                "Off (default): every cost shown is the filament cost only. On: electricity and machine wear are added to the "
+                "totals, using the power and wear rates below."),
          _field("currency", "Currency symbol", "string", "$",
                 "Shown in front of every amount (for example $, EUR, GBP). No conversion is done.",
                 max_len=8, placeholder="$"),

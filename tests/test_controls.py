@@ -190,14 +190,13 @@ class TestLimitsAndPresets(unittest.TestCase):
         controls.configure(None)
 
     def test_defaults(self):
-        self.assertEqual(controls.presets()["PLA"], {"nozzle": 215, "bed": 60})
-        self.assertEqual(controls.presets()["PETG"], {"nozzle": 240, "bed": 80})
-        self.assertEqual(controls.presets()["ABS"], {"nozzle": 255, "bed": 100})
-        self.assertEqual(controls.presets()["TPU"], {"nozzle": 225, "bed": 50})
+        # pre-heat by preset heats the BED only: no preset carries a nozzle temperature
+        self.assertEqual(controls.presets(), {"PLA": {"nozzle": None, "bed": 60}, "PETG": {"nozzle": None, "bed": 80},
+                                              "ABS": {"nozzle": None, "bed": 100}})
 
     def test_resolve(self):
-        self.assertEqual(controls.resolve_temps("petg"), (240, 80, "PETG"))
-        self.assertEqual(controls.resolve_temps("PLA", nozzle=200), (200, 60, "PLA"))
+        self.assertEqual(controls.resolve_temps("petg"), (None, 80, "PETG"))
+        self.assertEqual(controls.resolve_temps("PLA", nozzle=200), (200, 60, "PLA"))      # an explicit nozzle (API / agents) still works
         self.assertEqual(controls.resolve_temps(None, nozzle=180), (180, None, None))
         self.assertEqual(controls.resolve_temps(None, bed=55.4), (None, 55, None))
 
@@ -213,14 +212,32 @@ class TestLimitsAndPresets(unittest.TestCase):
     def test_config_presets(self):
         logs = []
         controls.configure({"nylon": {"nozzle": 270, "bed": 90}, "pla": [205, 55],
-                            "hot": {"nozzle": 999, "bed": 0}, "junk": 5}, log=logs.append)
+                            "hot": {"bed": 999}, "junk": 5}, log=logs.append)
         p = controls.presets()
-        self.assertEqual(p["NYLON"], {"nozzle": 270, "bed": 90})
-        self.assertEqual(p["PLA"], {"nozzle": 205, "bed": 55})       # overrides the default
+        self.assertEqual(p["NYLON"], {"nozzle": None, "bed": 90})     # an older config's nozzle value is read and dropped: bed only
+        self.assertEqual(p["PLA"], {"nozzle": None, "bed": 55})       # overrides the default
         self.assertNotIn("HOT", p)                                    # out of range -> skipped, logged
         self.assertNotIn("JUNK", p)
         self.assertEqual(len(logs), 2)
         controls.configure(None)
+
+    def test_a_preset_pre_heat_never_sends_a_nozzle_command_on_any_driver_and_prusalink_sends_nothing(self):
+        """Pre-heat by preset is bed only: Bambu, OctoPrint and Klipper are covered by their own tests above; PrusaLink has no heater control at all."""
+        class NoHeat:
+            name = "pl"
+            def __init__(self): self.sent = []
+            def snapshot(self): return {"connected": True, "state": "IDLE"}
+            def control_caps(self): return controls.all_unsupported("no heater endpoint")
+            def set_temps(self, nozzle=None, bed=None): self.sent.append((nozzle, bed))
+        p = NoHeat()
+        for preset in ("PLA", "PETG", "ABS"):
+            with self.assertRaises(controls.ControlUnsupported):
+                controls.perform(p, "preheat", preset=preset)
+        self.assertEqual(p.sent, [])
+        for preset in ("PLA", "PETG", "ABS"):                                   # and every preset resolves to a bed temperature only
+            n, b, name = controls.resolve_temps(preset)
+            self.assertIsNone(n, preset)
+            self.assertGreater(b, 0, preset)
 
     def test_timeout_env(self):
         for val, want in (("", 900), ("5", 300), ("0", 900), ("-3", 900), ("abc", 900), ("0.5", 30)):
@@ -255,8 +272,8 @@ class TestBambu(unittest.TestCase):
         self.addCleanup(controls.cancel_auto_off, prn)
         m = sent(prn)[0]["print"]
         self.assertEqual(m["command"], "gcode_line")
-        self.assertEqual(m["param"], "M104 S240\nM140 S80\n")
-        self.assertEqual((r["nozzle"], r["bed"]), (240, 80))
+        self.assertEqual(m["param"], "M140 S80\n")                    # the bed only: no M104
+        self.assertEqual((r["nozzle"], r["bed"]), (None, 80))
         controls.perform(prn, "cooldown")
         self.assertEqual(sent(prn)[1]["print"]["param"], "M104 S0\nM140 S0\n")
         self.assertIsNone(controls.auto_off_remaining(prn))
@@ -319,7 +336,7 @@ class TestBambu(unittest.TestCase):
     def test_controls_method(self):
         d = make_bambu().controls()
         self.assertEqual(d["actions"], ["light_on", "light_off", "preheat", "cooldown", "unload", "load"])
-        self.assertEqual(d["preheat"]["presets"]["PLA"]["nozzle"], 215)
+        self.assertEqual(d["preheat"]["presets"]["PLA"], {"nozzle": None, "bed": 60})
         self.assertFalse(d["preheat"]["verified"])
 
 
@@ -333,10 +350,8 @@ class TestOctoPrint(unittest.TestCase):
 
     def test_preheat_endpoints(self):
         r = controls.perform(self.prn, "preheat", preset="PETG")
-        self.assertEqual(self.fake.posts(), [
-            ("/api/printer/tool", {"command": "target", "targets": {"tool0": 240}}),
-            ("/api/printer/bed", {"command": "target", "target": 80})])
-        self.assertEqual((r["nozzle"], r["bed"], r["preset"]), (240, 80, "PETG"))
+        self.assertEqual(self.fake.posts(), [("/api/printer/bed", {"command": "target", "target": 80})])     # no tool0 command
+        self.assertEqual((r["nozzle"], r["bed"], r["preset"]), (None, 80, "PETG"))
 
     def test_cooldown(self):
         controls.perform(self.prn, "cooldown")
@@ -436,14 +451,14 @@ class TestMoonraker(unittest.TestCase):
         fake, prn = self.mk([])
         controls.perform(prn, "preheat", preset="ABS")
         controls.perform(prn, "cooldown")
-        self.assertEqual(fake.scripts(), ["M104 S255\nM140 S100", "M104 S0\nM140 S0"])
+        self.assertEqual(fake.scripts(), ["M140 S100", "M104 S0\nM140 S0"])
 
     def test_heat_without_bed_skips_bed(self):
         fake, prn = make_moon(["extruder", "print_stats", "virtual_sdcard", "webhooks", "display_status"])
         self.addCleanup(fake.close)
         self.addCleanup(controls.cancel_auto_off, prn)
         r = controls.perform(prn, "preheat", preset="PLA")
-        self.assertEqual(fake.scripts(), ["M104 S215"])
+        self.assertEqual(fake.scripts(), [])                          # bed-only pre-heat and no bed to heat: nothing is sent
         self.assertIsNone(r["bed"])
 
     def test_macro_gating(self):
@@ -540,9 +555,10 @@ class TestAutoOff(unittest.TestCase):
         r = controls.perform(self.prn, "preheat", preset="PLA")
         self.assertEqual(r["auto_off_in_s"], 2)                       # 1.5 s rounds to 2
         self.assertIsNotNone(controls.describe(self.prn)["preheat"]["auto_off_in_s"])
-        self.wait_for(4)
-        self.assertEqual(self.targets()[2:], [{"command": "target", "targets": {"tool0": 0}},
-                                              {"command": "target", "target": 0}])
+        self.wait_for(3)
+        self.assertEqual(self.targets(), [{"command": "target", "target": 60},                       # pre-heat: the bed only
+                                          {"command": "target", "targets": {"tool0": 0}},            # auto-off: both heaters off
+                                          {"command": "target", "target": 0}])
         self.assertIsNone(controls.auto_off_remaining(self.prn))
         self.assertIn("cooled down", controls.describe(self.prn)["preheat"]["last_auto_off"]["result"])
 
@@ -552,8 +568,8 @@ class TestAutoOff(unittest.TestCase):
         controls.perform(self.prn, "preheat", preset="PLA")
         self.assertFalse(controls.note_print_start(self.prn))
         self.assertIsNotNone(controls.auto_off_remaining(self.prn))
-        self.wait_for(4)                                              # the printer never started: it cools
-        self.assertEqual(self.targets()[2:], [{"command": "target", "targets": {"tool0": 0}},
+        self.wait_for(3)                                              # the printer never started: it cools
+        self.assertEqual(self.targets()[1:], [{"command": "target", "targets": {"tool0": 0}},
                                               {"command": "target", "target": 0}])
 
     def test_cancelled_when_a_print_is_observed(self):
@@ -568,7 +584,7 @@ class TestAutoOff(unittest.TestCase):
         while time.time() < end and controls.auto_off_remaining(self.prn) is not None:
             time.sleep(0.05)
         self.assertIsNone(controls.auto_off_remaining(self.prn))      # seen RUNNING -> the print owns the heaters
-        self.assertEqual(len(self.targets()), 2)
+        self.assertEqual(len(self.targets()), 1)
 
     def test_cancelled_by_cooldown(self):
         controls.perform(self.prn, "preheat", preset="PLA")
@@ -582,16 +598,16 @@ class TestAutoOff(unittest.TestCase):
         time.sleep(1.0)
         controls.perform(self.prn, "preheat", preset="PETG")
         time.sleep(1.0)                                               # 2 s after the first, 1 s after the second
+        self.assertEqual(len(self.targets()), 2)                      # two bed commands, nothing else yet
+        self.wait_for(4)
         self.assertEqual(len(self.targets()), 4)
-        self.wait_for(6)
-        self.assertEqual(len(self.targets()), 6)
 
     def test_skips_if_print_started_elsewhere(self):
         controls.perform(self.prn, "preheat", preset="PLA")
         self.fake.printing = True                                     # started from the slicer / printer screen
         refresh(self.prn)
         time.sleep(2.2)
-        self.assertEqual(len(self.targets()), 2)
+        self.assertEqual(len(self.targets()), 1)
         self.assertIn("skipped", controls._last_auto_off["mk4"]["result"])
 
     def test_describe_drops_timer_when_printing(self):
@@ -614,8 +630,8 @@ class TestAutoOff(unittest.TestCase):
         self.addCleanup(patcher.stop)
         controls.perform(self.prn, "preheat", preset="PLA")
         time.sleep(2.2)
-        self.assertEqual(len(self.targets()), 2)                      # old driver untouched
-        self.assertEqual(len([1 for p, b in fake2.posts() if p.startswith("/api/printer/")]), 2)
+        self.assertEqual(len(self.targets()), 1)                      # old driver untouched: only its own bed pre-heat
+        self.assertEqual(len([1 for p, b in fake2.posts() if p.startswith("/api/printer/")]), 2)   # the live driver got the cool-down (tool + bed)
 
 
 # ------------------------------------------------------------------ server: routes + MCP tools
@@ -735,8 +751,10 @@ class TestServer(unittest.TestCase):
         self.assertEqual(r.status_code, 422)
 
     def test_mcp_tool_functions(self):
-        self.assertIn("pre-heat sent", server.preheat("mk4", preset="TPU"))
-        self.assertEqual({p: b for p, b in self.fake.posts()}["/api/printer/tool"]["targets"]["tool0"], 225)
+        self.assertIn("pre-heat sent", server.preheat("mk4", preset="ABS"))
+        posts = {p: b for p, b in self.fake.posts()}
+        self.assertEqual(posts["/api/printer/bed"]["target"], 100)
+        self.assertNotIn("/api/printer/tool", posts)                  # a pre-heat preset never touches the nozzle
         self.assertIn("cool-down sent", server.cooldown("mk4"))
         self.assertTrue(server.set_light("mk4", True).startswith("UNSUPPORTED"))
         self.assertTrue(server.chamber_light("mk4", True).startswith("UNSUPPORTED"))
