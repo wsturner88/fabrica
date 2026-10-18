@@ -90,7 +90,8 @@ BAMBU_GUIDE = {
          "text": "P1 and A1 printers show their camera in the Hub automatically (no setup). If there "
                  "is no picture, look for a 'LAN mode liveview' option next to LAN Only Mode. X1 and "
                  "H2 printers use a different video format that the Hub does not support yet - "
-                 "everything else works, just without a picture."},
+                 "everything else works, just without a picture - unless you give the printer a "
+                 "'Camera address' (More options): an rtsp:// address works for any printer."},
     ],
 }
 
@@ -108,22 +109,24 @@ PRUSALINK_GUIDE = {
                  "connected to your network (Wi-Fi or Ethernet). Then open the PrusaLink entry in "
                  "the same menu and make sure it is enabled."},
         {"id": "ip", "title": "Find the address",
-         "text": "Settings > Network shows the printer's IP address. The address to enter below is "
-                 "http:// followed by that number, for example http://192.168.1.50. To check it, "
+         "text": "Settings > Network shows the printer's IP address. Enter just that number below, for "
+                 "example 192.168.1.50 (http:// is added for you). To check it, "
                  "type it into a web browser on any computer on the same network: you should see "
                  "the PrusaLink login page. Tip: give the printer a reserved address in the router."},
         # VERIFIED: user maker + password shown on the PrusaLink screen; 'Generate Password' rotates it.
         {"id": "creds", "title": "Read the username and password",
-         "text": "The PrusaLink screen (Settings > Network > PrusaLink) shows the username, usually "
-                 "maker, and the password. Type them in exactly, capital letters included. If the "
+         "text": "The PrusaLink screen (Settings > Network > PrusaLink) shows the password (and the "
+                 "username, which is almost always maker and is already filled in under More options). "
+                 "Type the password in exactly, capital letters included. If the "
                  "password is unclear, use the screen's Generate Password button to make a new one "
                  "(the old one stops working everywhere)."},
         # VERIFIED: buddy firmware has no legacy API key; its password also works in the API key slot.
         # UNVERIFIED: PrusaLink on older MK3/MINI firmware shows an API key in its web page.
         {"id": "apikey", "title": "If your firmware uses an API key",
          "text": "Some older firmware shows an API key (in the PrusaLink web page under Settings) "
-                 "instead of a password. If so, paste it into the API key box and leave the "
-                 "password empty. Most current printers use the username and password."},
+                 "instead of a password. If so, paste it into the Password box: there is only one "
+                 "box, and the Hub tries it as a password first and as an API key if the printer "
+                 "refuses it."},
         {"id": "usb", "title": "Put in the USB stick",
          "text": "Your G-code files live on the printer's USB stick, so keep a stick inserted. "
                  "Leave Storage on usb unless you know your files are somewhere else."},
@@ -139,8 +142,10 @@ PRUSALINK_GUIDE = {
         # VERIFIED: Core One / PrusaLink has no local camera; Prusa Connect cameras are cloud-only.
         {"id": "camera", "kind": "info", "title": "Camera",
          "text": "PrusaLink has no local camera, and Prusa's own camera view is cloud-only, so the "
-                 "Hub shows no picture by default. If you have another webcam that serves a JPEG "
-                 "still over your network, put its address in 'Camera snapshot URL'."},
+                 "Hub shows no picture by default. If you have a network camera, put its address "
+                 "in 'Camera address' (under More options): for a Prusa Buddy3D camera that is "
+                 "rtsp://<the camera's IP>/live; any rtsp:// address or a web address that returns "
+                 "a JPEG picture works. RTSP needs the full Hub image (it includes ffmpeg)."},
     ],
 }
 
@@ -152,9 +157,9 @@ OCTOPRINT_GUIDE = {
              "Raspberry Pi. About 3 minutes in the OctoPrint web page.",
     "steps": [
         {"id": "url", "title": "Find the OctoPrint address",
-         "text": "It is what you type into a browser to open OctoPrint, like http://octopi.local or "
-                 "http://192.168.1.50. Use the same address here. If you leave off the http:// the "
-                 "Hub adds it."},
+         "text": "It is what you type into a browser to open OctoPrint, like octopi.local or "
+                 "192.168.1.50. Use the same address here (http:// is added for you; type "
+                 "https:// if OctoPrint uses it)."},
         # VERIFIED: a printer with OctoPrint's auto-connect off stayed "not connected" after a power cycle.
         {"id": "connect", "title": "Connect OctoPrint to the printer",
          "text": "In OctoPrint, check the Connection panel says the printer is connected; if not, "
@@ -196,7 +201,7 @@ MOONRAKER_GUIDE = {
         # UNVERIFIED (written from the Moonraker / Mainsail / Fluidd documentation).
         {"id": "address", "title": "Find the address",
          "text": "Use the address you type into a browser to open Mainsail or Fluidd, like "
-                 "http://192.168.1.60 or http://voron.local. The Hub reaches Moonraker on its usual "
+                 "192.168.1.60 or voron.local (http:// is added for you). The Hub reaches Moonraker on its usual "
                  "port, 7125, by itself. Only add :7125 yourself if your web page is on a different "
                  "port."},
         {"id": "trusted", "title": "Let the Hub in",
@@ -287,8 +292,8 @@ HINTS = {
          "when": "Wrong username or password (401)",
          "tip": "Read the username and password again on the printer (Settings > Network > PrusaLink). "
                 "The username is usually maker, the password is case-sensitive, and a newly generated "
-                "password replaces the old one. On firmware that shows an API key instead, use the "
-                "API key box."},
+                "password replaces the old one. On firmware that shows an API key instead, paste "
+                "the key into the Password box."},
         {"contains": ("could not connect",), "step": "enable",
          "when": "Can't reach the printer",
          "tip": "Check PrusaLink is switched on (Settings > Network > PrusaLink), the printer is on "

@@ -60,7 +60,7 @@ The scope of every tool is defined in `TOOL_SCOPES` in `app/security.py`.
 | Print | control | `start_print`, `pause_print`, `resume_print`, `cancel_print`, `connect_printer` |
 | Printer controls | control | `set_light` (alias `chamber_light`), `preheat`, `cooldown`, `unload_filament`, `load_filament`, `set_tray` |
 | Files and backups | control | `delete_sd_file`, `backup_printer_files`, `rename_preview`, `rename_apply` (see [Renaming files](renaming.md): preview, show the human, apply with their yes) |
-| Fleet | control | `test_printer_connection`, `add_printer`, `update_printer`, `remove_printer`, `set_printer_groups`, `discover_printers` |
+| Fleet | control | `test_printer_connection`, `add_printer`, `update_printer`, `remove_printer`, `set_printer_groups`, `set_detection_area`, `discover_printers` |
 | Settings and alerts | control | `update_settings`, `send_test_notification`, `list_api_keys` (list only), `score_snapshot` |
 
 ## Example prompts

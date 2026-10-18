@@ -8,7 +8,13 @@ Per attempt (one row of the job log):
     material    = sum over filaments of  grams_used_i / 1000 * price_per_kg(type_i)
     electricity = hours * watts / 1000 * kwh_price
     wear        = hours * wear_per_hour
-    job cost    = material + electricity + wear
+    job cost    = material                          (the default: filament only)
+    job cost    = material + electricity + wear     (when "include print time costs" is on)
+
+  * The default total is the FILAMENT cost alone, because power and machine wear come from
+    rates most people never set. Turn on `costs.include_machine_costs` (Rates.include_machine),
+    or pass include_machine=True to a function here, to add them. `material`, `electricity` and
+    `wear` are always computed and returned; `total_with_machine` is always the full sum.
 
   * grams_used is the slicer's estimate scaled by how far the print got: a print that failed at
     40 % used 40 % of the plate's filament (a finished print uses 100 %). Filament use is not
@@ -58,6 +64,19 @@ def _f(v, default=None):
     return x if math.isfinite(x) else default
 
 
+def _truthy(v, default=False) -> bool:
+    if isinstance(v, bool):
+        return v
+    if v is None or v == "":
+        return default
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "yes", "on")
+    try:
+        return bool(v)
+    except Exception:
+        return default
+
+
 def parse_pairs(value) -> dict:
     """Turn ["PLA=20", "PETG=22"] (the Settings list_str shape), "PLA=20, PETG=22", or a dict into
     {"PLA": 20.0, "PETG": 22.0}. Names are upper-cased; bad entries are skipped."""
@@ -87,7 +106,9 @@ class Rates:
     or build one from the Hub settings with `Rates.from_settings(get)`."""
 
     def __init__(self, currency="$", per_kg=None, default_per_kg=25.0, kwh_price=0.15,
-                 watts=None, default_watts=120.0, wear_per_hour=0.30, window_n=20):
+                 watts=None, default_watts=120.0, wear_per_hour=0.30, window_n=20,
+                 include_machine=False):
+        self.include_machine = _truthy(include_machine)      # add power + machine wear to totals
         self.currency = str(currency or "$")
         self.per_kg = dict(DEFAULT_PRICE_PER_KG)
         self.per_kg.update(parse_pairs(per_kg))
@@ -115,13 +136,23 @@ class Rates:
                    per_kg=g("costs.filament_prices"), default_per_kg=g("costs.default_price_per_kg", 25.0),
                    kwh_price=g("costs.kwh_price", 0.15),
                    watts=g("costs.printer_watts"), default_watts=g("costs.default_watts", 120.0),
-                   wear_per_hour=g("costs.wear_per_hour", 0.30), window_n=g("costs.window_n", 20))
+                   wear_per_hour=g("costs.wear_per_hour", 0.30), window_n=g("costs.window_n", 20),
+                   include_machine=g("costs.include_machine_costs", False))
 
     def to_dict(self) -> dict:
         return {"currency": self.currency, "per_kg": dict(self.per_kg),
                 "default_per_kg": self.default_per_kg, "kwh_price": self.kwh_price,
                 "watts": dict(self.watts), "default_watts": self.default_watts,
-                "wear_per_hour": self.wear_per_hour, "window_n": self.window_n}
+                "wear_per_hour": self.wear_per_hour, "window_n": self.window_n,
+                "include_machine": self.include_machine}
+
+
+def includes_machine(rates: Rates, include_machine=None) -> bool:
+    """Does a total include power + machine wear? An explicit True / False wins (a per-request
+    override); None means "use the setting" (rates.include_machine, default off)."""
+    if include_machine is None:
+        return bool(getattr(rates, "include_machine", False))
+    return _truthy(include_machine)
 
 
 def price_per_kg(rates: Rates, material) -> float:
@@ -240,9 +271,11 @@ def machine_hours(job):
     return None
 
 
-def job_cost(job: dict, rates: Rates) -> dict:
-    """Cost of one attempt. `partial` is True when an input was missing (no grams or no
-    duration) and that component counts as 0."""
+def job_cost(job: dict, rates: Rates, include_machine=None) -> dict:
+    """Cost of one attempt. `total` (and `per_part`) is the filament cost unless machine costs are
+    on (include_machine=True, or None + the setting): then it is material + electricity + wear.
+    `material` / `electricity` / `wear` / `total_with_machine` are always filled in.
+    `partial` is True when an input was missing (no grams or no duration) and that component counts as 0."""
     mg = material_grams(job)
     material = sum(g / 1000.0 * price_per_kg(rates, t) for t, g in mg.items())
     hours = machine_hours(job)
@@ -250,14 +283,18 @@ def job_cost(job: dict, rates: Rates) -> dict:
     kwh = (hours or 0.0) * watts / 1000.0
     electricity = kwh * rates.kwh_price
     wear = (hours or 0.0) * rates.wear_per_hour
-    total = material + electricity + wear
+    with_machine = material + electricity + wear
+    incl = includes_machine(rates, include_machine)
+    total = with_machine if incl else material
     parts = job.get("parts") or 1
     good = job.get("result") == "finished"
     return {
         "material": round(material, 4), "electricity": round(electricity, 4), "wear": round(wear, 4),
-        "total": round(total, 4), "grams_used": grams_used(job), "hours": None if hours is None else round(hours, 4),
+        "total": round(total, 4), "total_with_machine": round(with_machine, 4),
+        "includes_machine_costs": incl, "grams_used": grams_used(job), "hours": None if hours is None else round(hours, 4),
         "kwh": round(kwh, 4), "watts": watts,
         "per_part": round(total / parts, 4) if good and parts else None,
+        "per_part_with_machine": round(with_machine / parts, 4) if good and parts else None,
         "partial": (not mg) or hours is None,
     }
 
@@ -268,13 +305,17 @@ def _closed(job) -> bool:
     return job.get("ended_at") is not None and job.get("result") in CLOSED_RESULTS
 
 
-def aggregate(jobs, rates: Rates) -> dict:
+def aggregate(jobs, rates: Rates, include_machine=None) -> dict:
     """Roll a list of jobs up: counts, success rate, hours, grams, cost split, and the true
     cost per part (see the module docstring). Running jobs are counted but not costed;
-    `unknown` jobs are counted but excluded from cost and success rate."""
+    `unknown` jobs are counted but excluded from cost and success rate.
+    Totals, wasted_on_failures and the per-part figures are filament-only unless machine costs are
+    on (see job_cost); `total_with_machine` / `wasted_with_machine` / `*_with_machine` always carry the full sum."""
+    incl = includes_machine(rates, include_machine)
     c = {"jobs": 0, "finished": 0, "failed": 0, "cancelled": 0, "unknown": 0, "running": 0}
     mat = elec = wear = 0.0
     good_cost = fail_cost = 0.0
+    good_full = fail_full = 0.0
     hours = grams = 0.0
     good_parts = 0
     partial = 0
@@ -289,7 +330,7 @@ def aggregate(jobs, rates: Rates) -> dict:
         c[r] += 1
         if r == "unknown":
             continue
-        jc = job_cost(j, rates)
+        jc = job_cost(j, rates, incl)
         mat += jc["material"]
         elec += jc["electricity"]
         wear += jc["wear"]
@@ -298,20 +339,29 @@ def aggregate(jobs, rates: Rates) -> dict:
         partial += 1 if jc["partial"] else 0
         if r == "finished":
             good_cost += jc["total"]
+            good_full += jc["total_with_machine"]
             good_parts += int(j.get("parts") or 1)
         else:
             fail_cost += jc["total"]
+            fail_full += jc["total_with_machine"]
     decided = c["finished"] + c["failed"] + c["cancelled"]
     total = good_cost + fail_cost
+    total_full = good_full + fail_full
     out = dict(c)
     out.update({
         "success_rate": round(c["finished"] / decided, 4) if decided else None,
         "hours": round(hours, 3), "grams_used": round(grams, 2), "good_parts": good_parts,
         "cost": {"material": round(mat, 2), "electricity": round(elec, 2), "wear": round(wear, 2),
-                 "total": round(total, 2), "wasted_on_failures": round(fail_cost, 2)},
+                 "total": round(total, 2), "total_with_machine": round(total_full, 2),
+                 "wasted_on_failures": round(fail_cost, 2), "wasted_with_machine": round(fail_full, 2),
+                 "includes_machine_costs": incl},
+        "includes_machine_costs": incl,
         "clean_cost_per_part": round(good_cost / good_parts, 4) if good_parts else None,
         "true_cost_per_part": round(total / good_parts, 4) if good_parts else None,
         "waste_per_part": round(fail_cost / good_parts, 4) if good_parts else None,
+        "true_cost_per_part_with_machine": round(total_full / good_parts, 4) if good_parts else None,
+        "clean_cost_per_part_with_machine": round(good_full / good_parts, 4) if good_parts else None,
+        "waste_per_part_with_machine": round(fail_full / good_parts, 4) if good_parts else None,
         "incomplete_cost_rows": partial,
     })
     return out
@@ -327,13 +377,25 @@ def file_key(name) -> str:
     return n
 
 
-def file_costs(jobs, rates: Rates, last_n=None) -> dict:
-    """Per-file figures over the last N attempts (newest first by start/end time)."""
+def file_label(name) -> str:
+    """The name to SHOW for a file: what the slicer / printer called it, case kept, without the print-file ending
+    (`file_key` is the lower-cased matching key and is never shown)."""
+    n = str(name or "").strip()
+    low = n.lower()
+    for suf in (".gcode.3mf", ".3mf", ".bgcode", ".gcode"):
+        if low.endswith(suf):
+            return n[: -len(suf)]
+    return n
+
+
+def file_costs(jobs, rates: Rates, last_n=None, include_machine=None) -> dict:
+    """Per-file figures over the last N attempts (newest first by start/end time).
+    Costs follow include_machine as in aggregate()."""
     n = last_n or rates.window_n
     closed = [j for j in jobs if _closed(j) and j.get("result") != "unknown"]
     closed.sort(key=lambda j: (j.get("ended_at") or j.get("started_at") or 0), reverse=True)
     window = closed[:n]
-    agg = aggregate(window, rates)
+    agg = aggregate(window, rates, include_machine)
     fin = [j for j in window if j.get("result") == "finished"]
     parts_total = agg["good_parts"]
     agg.update({

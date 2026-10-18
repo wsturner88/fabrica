@@ -27,7 +27,7 @@
 - 🛡️ **Wrong-printer protection** — a file sliced for another printer is blocked before it starts
 - 🍝 **Spaghetti detection** — AI watches every print and warns you when it fails *(Full edition)*
 - 🔔 **Alerts to your phone** — Telegram, Discord, ntfy, email or webhook, with a photo
-- 💰 **True cost per part** — filament, power and wear, failed prints included
+- 💰 **True cost per part** — filament cost (power and machine wear optional), failed prints included
 - 📊 **Print history** — success rate, material used and cost, by printer and by file
 - 🏷️ **Printer groups** — tag printers (Production, Workshop…) and see history and costs per group
 - 📚 **One file library** — every file on every printer in one place: search, folders, details, send to any idle printer

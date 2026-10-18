@@ -191,6 +191,39 @@ Interval: 10 s by default; 15 s / 30 s allowed. `Params.for_interval()` scales `
 * Status words are text (`OK`, `WARNING - possible spaghetti`, `FAILURE - likely spaghetti`,
   `WARMING UP`), never colour alone.
 
+## 5a. What the detector is shown: upright, and only the printer
+
+The detector must see the picture the way a person does. Two things are done to every camera picture **before** it is scored
+(`app/framefix.py`), for every printer:
+
+1. **Turned upright.** The camera's own flip / rotate settings (Moonraker `flip_vertical` / `flip_horizontal` / `rotation`, OctoPrint
+   `flipH` / `flipV` / `rotate90`) are read by the drivers as `camera_orientation {flip_h, flip_v, rotate90}`. The dashboard has always
+   applied the two flips with CSS; the detector used to get the raw picture, so an upside-down camera was scored upside down (that gave
+   a Klipper printer scores of 0.2 to 0.9 on a healthy print). Now the same flags are applied to the picture first: rotate 90 degrees
+   counter-clockwise (when `rotate90`), then the flips. A camera set by a printer's **Camera address** is shown as it comes (no flags).
+2. **Cut to the watch area** (optional, per printer). Many cameras also see the room. Edit printer > More options > *Spaghetti watch
+   area*: drag a box over the part of the picture that shows the printer (or type Left / Top / Width / Height in percent). The box is
+   drawn on the upright picture and stored as `detect_area {x, y, w, h}` (percent of that upright picture, at least 10 % wide and high) in
+   `printers.json` next to the printer's other settings. *Reset* means the whole picture. Hidden on kiosks (wall screens have no mouse).
+   API: `PUT /api/printers/{name}/detection-area` with `{"area": {...}}` (`null` clears), or `detect_area` inside `PUT /api/printers/{name}`;
+   MCP `set_detection_area(printer, area)`. It is a detector setting only: no connection test, the driver is not rebuilt, and it can be
+   changed while a print is running. `GET /api/printers` shows `detect_area` and `camera_orientation`.
+
+**How the pixels are handled.** With **ffmpeg**, which the full image already contains for RTSP cameras (so no new dependency and no
+extra image size): one short `ffmpeg` run per picture (`-vf transpose / hflip / vflip / crop`, one JPEG in, one JPEG out, 6 s timeout, 8 MB
+in, 4 MB out so the adapter's 5 MB limit is never reached). At one picture per 10 s per printer that is about 50 to 100 ms each.
+A **Lite** image (built with `WITH_FFMPEG=0`) cannot do this: pictures go to the detector as they come, **one** warning is logged, and the
+printer screen says *picture not turned or cut: this build has no ffmpeg*. If ffmpeg is there but fails for one picture, that picture is
+skipped (shown as "The camera picture could not be prepared for the detector"), never scored raw, so the baseline is not fed pictures of a
+different view. The notification picture of an alert is the whole picture turned upright, not the cropped part.
+
+**The learned baseline belongs to one view.** Each printer's `detection/<printer>.json` now remembers which view (flips, rotation, area) its
+`long` baseline was learned from. When that changes - the camera was turned, the area was set, moved or reset - the baseline is thrown
+away, the print's smoothing starts over (with the normal warm-up) and the printer screen says **LEARNING - camera view changed** until
+about 360 pictures (an hour at one per 10 s) have been learned again. A baseline file from an older version counts as "the picture as it
+came", so an upside-down camera loses its old baseline once, on the first start after this update. Alerts are not suppressed while
+learning: a clear WARNING / FAILURE is still raised (and says LEARNING as well).
+
 ## 6. Settings
 
 Section `detection` (group "Printers & Hub"), keys `detection.<name>`:
@@ -231,7 +264,7 @@ print shows one line on its printer screen: `Watching - score 0.02 - learn-only`
 * Routes: `GET /api/detection` (read); `POST /api/detection/test` and `POST /api/printer/{name}/detection/score` (control: they make the Hub
   contact an address / send a picture). The test builds its client from the form values in the request and never echoes the token.
   `GET /api/printer/{name}` carries `detection: {state, text}` for the printer screen.
-* MCP: `detection_status` (read), `score_snapshot(printer)` (control).
+* MCP: `detection_status` (read), `score_snapshot(printer)` (control), `set_detection_area(printer, area)` (control; see section 5a).
 * Learn-only scores are appended to `/data/detection/scores.jsonl` (rotated at 1 MB); baselines are `/data/detection/<printer>.json`.
 
 Tests: `tests/test_wiring2.py` runs the loop against a fake adapter on `127.0.0.1` (learn-only logs scores and sends nothing; learn-only
@@ -296,9 +329,9 @@ Tear down: `$C down` (add `--rmi local` to drop the adapter image).
 * One class only ("failure"): a part that detaches and disappears, a clog or a stall is invisible.
   Use the printer's own telemetry (layer progress, errors) alongside it.
 * Chamber light off = black picture; handled as `blind`, not as "all clear".
-* The Hub sends the camera picture as it is. Bambu pictures (about 1280x720) are comfortably inside
-  the 5 MB limit; downscaling to about 640 px would cut bandwidth and is a possible later addition (the
-  Hub has no imaging library today, and the model squashes everything to 416x416 anyway).
+* The Hub sends the camera picture turned upright and cut to the watch area (section 5a, needs ffmpeg), otherwise as it is. Bambu
+  pictures (about 1280x720) are comfortably inside the 5 MB limit; downscaling to about 640 px would cut bandwidth and is a possible
+  later addition (the model squashes everything to 416x416 anyway; a small watch area is upscaled to that, so very small boxes lose detail).
 * Accuracy on a P1S / A1 camera is not yet measured: that is what learn-only mode and tests 13-14 are for.
 * CPU only; an Obico model quirk scales box heights by picture width, which is irrelevant for scores
   and alerts but means boxes should not be drawn on pictures without checking.

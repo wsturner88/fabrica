@@ -36,7 +36,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+import camera as camera_mod
 import controls
+import framefix
 import setup_guides
 from bambu import BambuPrinter, OctoPrintPrinter, make_opener, is_redirect, REDIRECT_MSG
 
@@ -188,6 +190,22 @@ def record_groups(rec) -> list:
             seen.add(g.strip().casefold())
             out.append(g.strip())
     return out
+
+
+def record_detect_area(rec):
+    """The spaghetti watch area of a stored record ({"x","y","w","h"} percent) or None (the whole picture).
+    Read leniently: a hand-edited printers.json never breaks a page."""
+    try:
+        return framefix.clean_area(rec.get("detect_area") if isinstance(rec, dict) else None)
+    except ValueError:
+        return None
+
+
+def _clean_detect_area(value):
+    try:
+        return framefix.clean_area(value)
+    except ValueError as e:
+        raise FleetError(str(e)) from None
 
 
 _HOST_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$|^[0-9A-Fa-f:]+$")
@@ -796,31 +814,49 @@ BAMBU_FIELDS = [
              "and Developer Mode on recent firmware (see the setup steps). Switching either mode can "
              "change this code: read it AFTER you switch, and if the Hub later says 'wrong access "
              "code', read it again and re-enter it via Edit."},
-    {"name": "model", "label": "Model", "type": "select", "required": False,
+    {"name": "model", "label": "Model", "type": "select", "required": False, "advanced": True,
      "options": [{"value": "", "label": "Detect from the serial number"}]
                 + [{"value": m, "label": m} for m in BAMBU_MODELS],
      "help": "Leave on 'Detect' unless the test shows the wrong model. P1 and A1 printers show their "
-             "camera in the Hub automatically; X1 and H2 printers use RTSP video, which the Hub does "
-             "not support yet (no camera view)."},
+             "camera in the Hub automatically. For X1 and H2 printers (RTSP video) type the camera's "
+             "address in 'Camera address' under More options."},
 ]
 
 OCTOPRINT_FIELDS = [
     {"name": "name", "label": "Printer name", "type": "text", "required": True,
      "placeholder": "MK4", "help": NAME_HELP},
     {"name": "url", "label": "OctoPrint address", "type": "url", "required": True,
-     "placeholder": "http://192.168.1.50", "guide_step": "url",
-     "help": "The address you type in a browser to open OctoPrint - for example http://octopi.local or "
-             "http://192.168.1.50. If you leave off http:// the Hub adds it. The printer must be "
+     "placeholder": "192.168.1.50", "guide_step": "url",
+     "help": "The address of OctoPrint - for example octopi.local or 192.168.1.50 (http:// is added for "
+             "you; type https:// if OctoPrint uses it). The printer must be "
              "connected inside OctoPrint (its Connect button) before the Hub can print."},
     {"name": "api_key", "label": "API key", "type": "password", "required": True, "secret": True,
      "guide_step": "apikey",
      "help": "In OctoPrint: Settings > Application Keys - type 'Fabrica' as the name, tap Generate and "
              "copy the long key (recommended: it can be revoked on its own). Older versions: Settings > "
              "API shows the global key."},
-    {"name": "model", "label": "Model", "type": "text", "required": False,
+    {"name": "model", "label": "Model", "type": "text", "required": False, "advanced": True,
      "placeholder": "Prusa MK4S", "help": "Display only - helps you tell printers apart. The webcam is "
                                           "picked up automatically if OctoPrint shows one."},
 ]
+
+
+# One optional camera address per printer, for every family. It is stored like a secret (it may carry a
+# user:pass@ login) but, unlike a password, the API shows it back with the login hidden
+# (`rtsp://***@192.168.1.60/live`); sending that shown form back keeps the stored login, a blank value
+# removes the camera address, and leaving the key out changes nothing.
+CAMERA_FIELD = {
+    "name": "camera_url", "label": "Camera address", "type": "text", "required": False, "secret": True,
+    "advanced": True, "shown_redacted": True, "placeholder": "rtsp://192.168.1.60/live",
+    "help": "Optional. Use a camera instead of the printer's own: an rtsp:// address (for example a Prusa "
+            "Buddy3D camera: rtsp://<its IP>/live, or a Tapo camera: rtsp://user:password@<IP>:554/stream1) "
+            "or an http(s):// address that returns a JPEG picture. A login in the address is kept private. "
+            "RTSP needs ffmpeg, which is in the full Hub image."}
+
+
+def _with_camera_field(fields):
+    fields = [dict(f) for f in fields if f["name"] != "camera_url"]
+    return fields + [dict(CAMERA_FIELD)]
 
 
 # ---------------------------------------------------------------- registry
@@ -846,7 +882,7 @@ class Family:
 
     def describe(self) -> dict:
         return {"type": self.key, "label": self.label, "description": self.description,
-                "fields": [dict(f) for f in self.fields],
+                "fields": [dict(f) for f in self.fields if not f.get("hidden")],
                 "require_one_of": [list(g) for g in self.require_one_of],
                 "setup_guide": setup_guides.guide_for(self.key),
                 "troubleshooting": setup_guides.troubleshooting_for(self.key)}
@@ -858,12 +894,17 @@ class Family:
             r = _result(error=f"The connection test failed unexpectedly: {type(e).__name__}: {e}", code="internal")
         r = {**_result(), **r}
         r["ok"] = bool(r.get("ok"))
+        cam_url = (values.get("camera_url") or "") if isinstance(values, dict) else ""
+        if r["ok"] and cam_url:
+            _camera_check(r, cam_url)
         if r["ok"]:
             bits = []
             if r.get("firmware"):
                 bits.append(f"version {r['firmware']}")
             bits.append("camera available" if r.get("has_camera") else "no camera")
             r["message"] = f"Connected — {r.get('model') or self.label} ({', '.join(bits)})"
+            if cam_url:
+                r["message"] += " " + r["camera_check"]["message"]
         else:
             r["message"] = r.get("error") or "Could not connect."
             hint = setup_guides.match_hint(self.key, r)
@@ -872,13 +913,27 @@ class Family:
         return r
 
     def build(self, values: dict):
-        return self._build(values)
+        prn = self._build(values)
+        return camera_mod.apply_camera_url(prn, (values or {}).get("camera_url") or "")
 
     def probe_result_ok(self, model, firmware, has_camera) -> dict:
         r = {**_result(ok=True, model=model, firmware=firmware or None, has_camera=has_camera)}
         bits = ([f"version {firmware}"] if firmware else []) + ["camera available" if has_camera else "no camera"]
         r["message"] = f"Connected - {model or self.label} ({', '.join(bits)}); already connected to the Hub"
         return r
+
+
+def _camera_check(result: dict, cam_url: str, timeout: float = 8.0) -> dict:
+    """Add the camera test (grab one frame) to a printer test result. A camera problem is a warning, not a
+    failure of the printer test. Nothing here can carry the login."""
+    ok, msg = camera_mod.check_camera(cam_url, timeout)
+    result["camera_check"] = {"ok": ok, "message": msg if not ok else msg}
+    if ok:
+        result["has_camera"] = True
+    else:
+        result["warning"] = msg
+        result["camera_check"]["message"] = "Camera problem: " + msg
+    return result
 
 
 def _build_bambu(v):
@@ -918,6 +973,7 @@ def _generic_family(key, label, description, cls) -> Family:
                   getattr(cls, "CONFIG_REQUIRE_ONE_OF", ()))
 
 
+
 def _make_families() -> dict:
     fam = {}
     fam["bambu"] = Family(
@@ -936,6 +992,8 @@ def _make_families() -> dict:
         fam["moonraker"] = _generic_family(
             "moonraker", "Klipper (Moonraker)",
             "Klipper printers running Moonraker, with Fluidd or Mainsail.", MoonrakerPrinter)
+    for f in fam.values():
+        f.fields = _with_camera_field(f.fields)
     return fam
 
 
@@ -965,7 +1023,12 @@ def normalize_values(fam: Family, values: dict, existing: dict = None, existing_
         if isinstance(raw, (int, float)):
             raw = str(raw)
         raw = raw.strip() if isinstance(raw, str) else ""
-        if is_secret_field(f):
+        if n == "camera_url":
+            kept = (existing_secret(n) or "") if existing_secret is not None else ""
+            if n not in values or (raw and kept and raw == camera_mod.redact_url(kept)):
+                raw = kept                 # untouched / the shown (login-hidden) form sent back: keep it
+            # a blank value that WAS sent clears the camera address
+        elif is_secret_field(f):
             if not raw and existing_secret is not None:
                 raw = existing_secret(n) or ""
         elif n not in values and existing is not None and n in existing:
@@ -980,7 +1043,12 @@ def normalize_values(fam: Family, values: dict, existing: dict = None, existing_
             raise FleetError(f"'{f['label']}' is required.")
         if not v:
             continue
-        if f.get("type") == "url":
+        if n == "camera_url":
+            try:
+                out[n] = camera_mod.validate_camera_url(v)
+            except camera_mod.CameraUrlError as e:
+                raise FleetError(str(e)) from None
+        elif f.get("type") == "url":
             out[n] = _clean_url(v)
         elif f.get("type") == "select":
             if v not in [o["value"] if isinstance(o, dict) else o for o in f.get("options", [])]:
@@ -1096,7 +1164,7 @@ class FleetManager:
         secrets = {}
         if fam:
             secrets = {n: ("set" if self.store.secret_is_set(rec["name"], n) else "not set")
-                       for n in fam.secret_fields}
+                       for n in fam.secret_fields if n != "camera_url"}   # shown (login hidden) as `camera_url`
         elif rec.get("type") == "bambu":
             secrets = {"access_code": "set" if self.store.secret_is_set(rec["name"], "access_code") else "not set"}
         plain = {k: v for k, v in rec.items() if k not in ("legacy_env",)}
@@ -1105,9 +1173,11 @@ class FleetManager:
                 "address": self._address(rec), "model": rec.get("model", ""),
                 "added_at": rec.get("added_at"), "source": rec.get("source", "dashboard"),
                 "values": {k: v for k, v in plain.items()
-                           if k not in ("name", "type", "added_at", "updated_at", "source", "groups")},
+                           if k not in ("name", "type", "added_at", "updated_at", "source", "groups", "detect_area")},
                 "groups": record_groups(rec),
+                "detect_area": record_detect_area(rec),
                 "secrets": secrets,
+                "camera_url": camera_mod.redact_url(self.store.secret(rec["name"], "camera_url")),
                 "loaded": rec["name"].lower() in self.printers,
                 "driver_available": fam is not None}
 
@@ -1122,11 +1192,39 @@ class FleetManager:
             v[n] = self.store.secret(rec["name"], n)
         return v
 
+    def _migrate_legacy(self, rec):
+        """Older stored printers -> today's fields, once, at start-up:
+        * `snapshot_url` (PrusaLink) becomes the printer's camera address;
+        * a PrusaLink printer that only had an API key now keeps it as its (single) password -
+          the driver sends it as the key when the printer rejects it as a password.
+        Never raises; returns the (possibly updated) record."""
+        try:
+            name = rec["name"]
+            snap = str(rec.get("snapshot_url") or "").strip()
+            if snap and not self.store.secret(name, "camera_url"):
+                base = str(rec.get("url") or "")
+                full = urllib.parse.urljoin(base.rstrip("/") + "/", snap)
+                try:
+                    full = camera_mod.validate_camera_url(full)
+                except camera_mod.CameraUrlError:
+                    full = ""
+                self.store.update(name, {"snapshot_url": None}, {"camera_url": full} if full else {})
+                rec = self.store.get(name) or rec
+            if rec.get("type") == "prusalink" and self.store.secret(name, "api_key") \
+                    and not self.store.secret(name, "password"):
+                self.store.update(name, {}, {"password": self.store.secret(name, "api_key")},
+                                  drop_secrets=["api_key"])
+                rec = self.store.get(name) or rec
+        except Exception as e:
+            self.log(f"[fleet] '{rec.get('name')}': settings migration skipped: {type(e).__name__}")
+        return rec
+
     def load_all(self):
         """Construct + connect a driver for every stored printer. A printer that cannot
         be built (unknown/unavailable type, bad record) is logged and skipped - the
         record stays in the store so it is not lost."""
         for rec in self.store.records():
+            rec = self._migrate_legacy(rec)
             fam = self.families.get(rec.get("type"))
             if fam is None:
                 self.log(f"[fleet] '{rec['name']}': printer type '{rec.get('type')}' is not available in "
@@ -1190,6 +1288,9 @@ class FleetManager:
                            "Hub is connected to it - edit that entry instead of testing it again.")
         live = self._live_result(fam, existing, vals)
         if live is not None:
+            if vals.get("camera_url"):
+                _camera_check(live, vals["camera_url"])
+                live["message"] += " " + live["camera_check"]["message"]
             return live
         return self._probe(fam, vals)
 
@@ -1315,25 +1416,48 @@ class FleetManager:
         return {"printer": self.public(self.store.get(vals["name"])), "test": result}
 
     def update(self, name, values, skip_test=False, force=False) -> dict:
-        """Edit a printer. `values` may carry "groups": a groups-only edit never probes, never disconnects and is
-        allowed while the printer is printing (it is a label, not a connection setting)."""
+        """Edit a printer. `values` may carry "groups" and / or "detect_area" (the spaghetti watch area): such an
+        edit never probes, never disconnects and is allowed while the printer is printing (a label and a
+        picture setting, not connection settings)."""
         values = dict(values) if isinstance(values, dict) else {}
-        if "groups" not in values:
+        meta = {k: values.pop(k) for k in ("groups", "detect_area") if k in values}
+        if not meta:
             return self._update_connection(name, values, skip_test, force)
         rec = self.store.get(name)
         if rec is None:
             raise NotFound(f"No printer named '{name}'.")
-        groups = normalize_groups(values.pop("groups"), self.store.group_spellings(skip=rec["name"]))   # bad input: nothing changes
+        groups = normalize_groups(meta["groups"], self.store.group_spellings(skip=rec["name"])) if "groups" in meta else None
+        area = _clean_detect_area(meta["detect_area"]) if "detect_area" in meta else None   # bad input: nothing changes
         if set(values) - {"name"}:
             res = self._update_connection(name, values, skip_test, force)
         else:
             res = {"printer": self.public(rec), "test": None, "changed": []}
-        if groups != record_groups(self.store.get(rec["name"])):
+        if groups is not None and groups != record_groups(self.store.get(rec["name"])):
             self.store.set_groups(rec["name"], groups)
             res = {**res, "printer": self.public(self.store.get(rec["name"])),
                    "changed": sorted({*res.get("changed", []), "groups"})}
             self.log(f"[fleet] '{rec['name']}': groups now {', '.join(groups) or '(none)'}")
+        if "detect_area" in meta:
+            sub = self.set_detect_area(rec["name"], area)
+            if sub["changed"]:
+                res = {**res, "printer": sub["printer"], "changed": sorted({*res.get("changed", []), "detect_area"})}
         return res
+
+    def set_detect_area(self, name, area) -> dict:
+        """Set (or, with None / "" / the whole picture, clear) the printer's spaghetti watch area: a box in percent
+        of the picture as it is shown upright. Only a setting for the detector: the printer's connection is not
+        touched and it works while a print is running. The detector notices at its next pass and learns that
+        printer's baseline afresh (the learned baseline belongs to the view it was made from)."""
+        rec = self.store.get(name)
+        if rec is None:
+            raise NotFound(f"No printer named '{name}'.")
+        new = _clean_detect_area(area)
+        before = record_detect_area(rec)
+        if new != before:
+            self.store.update(rec["name"], {"detect_area": new})
+            self.log(f"[fleet] '{rec['name']}': spaghetti watch area now "
+                     + (f"{new['w']:g} x {new['h']:g} percent at {new['x']:g}, {new['y']:g}" if new else "the whole picture"))
+        return {"printer": self.public(self.store.get(rec["name"])), "detect_area": new, "changed": new != before}
 
     def set_groups(self, name, groups) -> dict:
         rec = self.store.get(name)
@@ -1377,7 +1501,9 @@ class FleetManager:
             why = _need_secrets_message(fam, values)
             if why:
                 raise FleetError(why)
-        vals = normalize_values(fam, values, rec, (lambda n: "") if moved else esec, editing=True)
+        # the camera address goes to the camera, never to the printer, so a moved printer keeps it
+        vals = normalize_values(fam, values, rec,
+                                (lambda n: esec(n) if n == "camera_url" else "") if moved else esec, editing=True)
         other = self._duplicate_of(fam, vals, skip=rec["name"])
         if other:
             raise Conflict(f"'{other}' is already a printer with that serial number or IP address.")
@@ -1385,7 +1511,10 @@ class FleetManager:
         # the secrets as they are NOW, captured before anything is written, so a failed edit can put
         # back exactly these (never the rejected new ones)
         old_secrets = {k: esec(k) for k in fam.secret_fields}
-        drop = [k for k in fam.secret_fields if moved and old_secrets[k] and not secrets.get(k)]
+        drop = [k for k in fam.secret_fields
+                if k != "camera_url" and moved and old_secrets[k] and not secrets.get(k)]
+        if old_secrets.get("camera_url") and not secrets.get("camera_url") and "camera_url" in fam.secret_fields:
+            drop.append("camera_url")          # cleared on purpose (normalize keeps it when the key is absent)
         # which parts changed? (a blank secret = keep, so it never counts as a change)
         changed = {k for k, v in plain.items() if str(rec.get(k, "") or "") != v}
         changed |= {k for k, v in secrets.items() if v != old_secrets[k]}
@@ -1397,7 +1526,7 @@ class FleetManager:
             if why:
                 raise Busy(why)
         result = None
-        needs_probe = not skip_test and bool(changed - {"model"})
+        needs_probe = not skip_test and bool(changed - {"model", "camera_url"})
         bambu_live = fam.key == "bambu" and self.printers.get(rec["name"].lower()) is not None
         if needs_probe and not bambu_live:
             result = self._probe(fam, vals, use_cache=True)

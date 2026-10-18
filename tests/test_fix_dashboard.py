@@ -123,7 +123,7 @@ class TestStatic(unittest.TestCase):
         r"^req$", r"^input$", r"^fields$", r"^banner$", r"^steps$", r"^notes$", r"^head$", r"^intro$", r"^help$",
         r"^inner$", r"^state$", r"^act$", r"^doubt$", r"^tip$", r"^k$", r"^v$", r"^m$", r"^unit$", r"^type$",
         r"^busy$", r"^dis$", r"^dl$", r"^on$", r"^thumb$", r"^warn$", r"^fam$", r"^modelHtml$", r"^spoolHtml$",
-        r"^camHtml$", r"^errHtml$", r"^soon$", r"^cls \|\| ''$", r"^hiChip\(j\.result\)$", r"^SEC_MODES\.map\(",
+        r"^camHtml$", r"^errHtml$", r"^picHtml$", r"^badgeBlock$", r"^soon$", r"^cls \|\| ''$", r"^hiChip\(j\.result\)$", r"^SEC_MODES\.map\(",
     )
 
     def test_every_interpolation_that_names_untrusted_data_is_escaped(self):

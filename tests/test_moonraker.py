@@ -420,8 +420,18 @@ class TestJobControl(Base):
         with self.assertRaises(PrinterError):
             self.p.sd_delete("benchy.gcode")
 
-    def test_connect_serial_is_firmware_restart(self):
-        self.assertIn("restart", self.p.connect_serial())
+    def test_connect_serial_never_restarts_a_ready_klipper(self):
+        # was a blind FIRMWARE_RESTART; see tests/test_safe_connect.py for the full guard
+        self.assertIn("nothing was sent", self.p.connect_serial())
+        self.assertEqual(self.fake.calls("POST"), [])
+
+    def test_connect_serial_restarts_a_shut_down_klipper_only_after_confirm(self):
+        self.fake.klippy = "shutdown"
+        from bambu import ConnectNeedsConfirm
+        with self.assertRaises(ConnectNeedsConfirm):
+            self.p.connect_serial()
+        self.assertEqual(self.fake.calls("POST"), [])
+        self.assertIn("restart", self.p.connect_serial(confirm_restart=True))
         self.assertIn(("POST", "/printer/firmware_restart"), self.fake.calls())
 
     def test_unreachable_is_printererror(self):

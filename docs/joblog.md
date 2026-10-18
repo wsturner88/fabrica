@@ -103,9 +103,22 @@ material     = sum over filaments:  grams_used_i / 1000 x price_per_kg(type_i)
 hours        = real duration / 3600   (estimate x fraction if the duration was not captured)
 electricity  = hours x watts / 1000 x kwh_price
 wear         = hours x wear_per_hour
-job cost     = material + electricity + wear
+job cost     = material                          (the default: filament only)
+job cost     = material + electricity + wear     (when "Include print time costs" is on)
 cost per part (one finished job) = job cost / parts
 ```
+
+**By default every cost shown is the filament cost alone.** Power and machine wear come from rates most people never
+set, so they are opt-in: Settings -> Costs -> *Include print time costs (power + machine wear)* (`costs.include_machine_costs`,
+off by default). It changes every total: the History cost tile, per-job costs, true / clean cost per part, wasted on failures,
+the per-printer / per-file / per-group tables, the CSV `total_cost` and `cost_per_part`, and the MCP tools. The rate fields
+below only matter when it is on. The History page also has a **Filament only / + Print time** switch that flips the view
+without changing the setting.
+
+Every cost block always carries `material`, `electricity` and `wear` (computed from the rates either way), `total` (the mode
+in force), `total_with_machine` (always the full sum) and `includes_machine_costs` (which mode `total` is). A request can
+override the setting: REST `?machine=1` (include) / `?machine=0` (filament only), Python `include_machine=True / False`, MCP
+`include_machine_costs`; absent = use the setting.
 
 **True cost per part** (per file, per printer, or over a period) charges failures to the good parts:
 
@@ -125,7 +138,8 @@ as a failure (the filament and hours are gone either way), `unknown` and `runnin
 
 ### Worked example
 
-Rates: PLA 20/kg, 0.15 per kWh, P1S 120 W, wear 0.30/h. File `stand`: a plate of 3 parts, 36 g PLA,
+Rates (print time costs switched ON, so the totals below are the full sum; with the default setting a total is just the
+Material column): PLA 20/kg, 0.15 per kWh, P1S 120 W, wear 0.30/h. File `stand`: a plate of 3 parts, 36 g PLA,
 estimated 2 h 30 min. Four attempts on the P1S: three finish in 2 h 30 min; one fails at 40 % after 1 h.
 
 | Attempt | Material | Electricity | Wear | Job cost |
@@ -147,12 +161,12 @@ multi-colour prints, supports the slicer did not count, packaging, fees, labour.
 
 | Call | Returns |
 |---|---|
-| `recent_jobs(limit=50, printer=None, result=None)` | Newest first; each job with its `cost` block (None while open / unknown), ISO times in the Hub timezone, `time_vs_estimate_pct`. |
-| `job(id)` | One job or None. |
-| `stats(period="month", printer=None)` | Period = `day` (24 h) / `week` (7 d) / `month` (30 d) / `year` / `all` / `<N>d`. Counts, `success_rate`, `hours`, `grams_used`, `cost{material,electricity,wear,total,wasted_on_failures}`, `clean_cost_per_part`, `true_cost_per_part`, `waste_per_part`, plus `by_printer`, `by_file` (top 25 by spend), `by_material`, and `material_series` (grams per day, or per month for year / all). |
+| `recent_jobs(limit=50, printer=None, result=None, include_machine=None)` | Newest first; each job with its `cost` block (None while open / unknown), ISO times in the Hub timezone, `time_vs_estimate_pct`. |
+| `job(id, include_machine=None)` | One job or None. |
+| `stats(period="month", printer=None, include_machine=None)` | Period = `day` (24 h) / `week` (7 d) / `month` (30 d) / `year` / `all` / `<N>d`. Counts, `success_rate`, `hours`, `grams_used`, `cost{material,electricity,wear,total,total_with_machine,wasted_on_failures,wasted_with_machine,includes_machine_costs}`, `includes_machine_costs`, `clean_cost_per_part`, `true_cost_per_part`, `waste_per_part`, plus `by_printer`, `by_file` (top 25 by spend), `by_material`, and `material_series` (grams per day, or per month for year / all). |
 | `material_usage(bucket="day"/"week"/"month", period, printer)` | Grams by material per bucket. |
-| `file_costs(name, last_n=None, printer=None)` | The per-file figures over the last N attempts, plus `avg_parts_per_print`, `grams_per_part`, `hours_per_part`. `name` may be written with or without extension. |
-| `export_csv(printer=None, period="all", fp=None)` | CSV text of the jobs (oldest first) with costs at current rates; spreadsheet-formula-looking names are neutralised with a leading `'`. |
+| `file_costs(name, last_n=None, printer=None, include_machine=None)` | The per-file figures over the last N attempts, plus `avg_parts_per_print`, `grams_per_part`, `hours_per_part`. `name` may be written with or without extension. |
+| `export_csv(printer=None, period="all", fp=None, include_machine=None)` | CSV text of the jobs (oldest first) with costs at current rates; spreadsheet-formula-looking names are neutralised with a leading `'`. |
 | `on_event(event)` / `observe(fleet)` | The inputs (see wiring). Neither raises. |
 
 `printer` in `recent_jobs`, `stats`, `file_costs`, `export_csv` (and `material_usage`) is one name **or a list of names**
@@ -218,18 +232,22 @@ Everything below is in `app/server.py` unless it says otherwise.
    * OctoPrint / PrusaLink / Moonraker: the last `files()` listing the Hub already made (`_FILES_SEEN`, refreshed by the file
      list and the pre-warm thread), via `resolved_from_file_entry`.
    * Cold cache: `{}`; the log asks again when the job closes, so a file that was read mid-print still gets its facts.
-5. **Routes** (`read` scope, except the export): `GET /api/jobs?limit=&printer=&result=` -> `{"jobs": [...], "currency"}`;
+5. **Routes** (`read` scope, except the export): `GET /api/jobs?limit=&printer=&result=` -> `{"jobs": [...], "currency", "includes_machine_costs"}`;
    `GET /api/jobs/{job_id}` (404 for an unknown or non-numeric id); `GET /api/stats?period=&printer=`;
    `GET /api/costs/file?name=&last_n=&printer=`; `GET /api/jobs.csv?printer=&period=` (**`control`** - file names can carry order
-   information; `text/csv`, `Content-Disposition: attachment; filename="jobs.csv"`). A bad `period` / `result` / missing name is a 400.
-6. **MCP tools** (`read`): `recent_jobs(limit=20, printer="")`, `job_stats(period="month", printer="")`, `cost_per_part(file)` -
-   the last one answers with a sentence ("true cost per part $0.572 (clean $0.505 + waste $0.067), 75% of attempts finished,
+   information; `text/csv`, `Content-Disposition: attachment; filename="jobs.csv"`; the CSV gains `total_with_print_time_cost` and
+   `total_includes_print_time` columns). Every cost route also takes `machine=1` (add power + machine wear) or `machine=0`
+   (filament only); absent = the Costs setting. A bad `period` / `result` / missing name is a 400.
+6. **MCP tools** (`read`): `recent_jobs(limit=20, printer="")`, `job_stats(period="month", printer="")`, `cost_per_part(file)` (each also takes
+   `include_machine_costs: bool | None`; the default is filament only) - the last one answers with a sentence ("true cost per part $0.572 (clean $0.505 + waste $0.067), 75% of attempts finished,
    based on the latest 4 attempt(s)") as well as the figures.
 7. **Settings -> Costs** (`costs.*`): `currency` (string), `filament_prices` and `printer_watts` (lists of `NAME=number`, validated),
-   `default_price_per_kg`, `kwh_price`, `wear_per_hour` (decimals), `default_watts`, `window_n` (whole numbers). `Rates.from_settings`
+   `default_price_per_kg`, `kwh_price`, `wear_per_hour` (decimals), `default_watts`, `window_n` (whole numbers), and
+   `include_machine_costs` (true / false, default false: filament only). `Rates.from_settings`
    reads exactly these.
 8. **Dashboard -> History** (header button, full screen): a printer picker and a period picker (24 hours / 7 days / 30 days / all
-   time), four tiles (prints, success rate, material used, cost with what failures wasted and the true / clean cost per part), a
+   time), four tiles (prints, success rate, material used, cost with what failures wasted and the true / clean cost per part; the cost tile says
+   "Filament only" or lists "Filament / Power / Wear" in words, and has a **Filament only / + Print time** switch for that view), a
    per-printer table, a per-file table (attempts, success, parts, true and clean cost per part), the recent prints (result as a
    word with a symbol, parts, grams, time, cost; tap one for the full detail incl. the error text and the cost breakdown) and a
    **Download CSV** button. It refreshes by itself every 20 seconds. The currency is the Costs setting.

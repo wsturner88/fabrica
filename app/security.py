@@ -172,6 +172,8 @@ REST_SCOPES = [
     ("GET", "/api/printer/{name}/snapshot", "read"),
     ("GET", "/api/printer/{name}/stream", "read"),
     ("GET", "/api/printer/{name}/files", "read"),
+    ("GET", "/api/printer/{name}/filethumb", "read"),
+    ("GET", "/api/printer/{name}/filedetail", "read"),
     ("POST", "/api/printer/{name}/suggest", "read"),         # computes a mapping, changes nothing
     ("GET", "/api/thumb/{basename}", "read"),
     ("GET", "/api/backups", "read"),                          # the list, not the zip files
@@ -226,6 +228,7 @@ REST_SCOPES = [
     ("PUT", "/api/printers/{name}", "control"),
     ("DELETE", "/api/printers/{name}", "control"),
     ("PUT", "/api/printers/{name}/groups", "control"),        # group changes are fleet changes: same level as editing a printer
+    ("PUT", "/api/printers/{name}/detection-area", "control"),  # where the spaghetti detector looks: a fleet setting like the camera address
     ("POST", "/api/groups/rename", "control"),
     ("DELETE", "/api/groups/{name}", "control"),
     ("PUT", "/api/settings", "control"),
@@ -299,6 +302,7 @@ TOOL_SCOPES = {
     "update_printer": "control",
     "remove_printer": "control",
     "set_printer_groups": "control",
+    "set_detection_area": "control",
     "update_settings": "control",
     "send_test_notification": "control",
     "list_api_keys": "control",

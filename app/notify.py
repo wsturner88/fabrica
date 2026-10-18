@@ -32,6 +32,7 @@ import concurrent.futures
 import datetime
 import email.header
 import email.utils
+import html as _html
 import json
 import queue
 import re
@@ -199,8 +200,11 @@ class Channel:
             return False, "not set up yet - missing " + ", ".join(gaps)
         try:
             # a printer's address with user:password@ in it must never leave the Hub inside an alert (N-7)
+            meta = dict(meta or {})
+            if meta.get("html"):
+                meta["html"] = security.scrub_text(str(meta["html"]))
             self._send(security.scrub_text(str(title or "")), security.scrub_text(str(body or "")),
-                       image_jpeg or None, level if level in LEVELS else "info", meta or {})
+                       image_jpeg or None, level if level in LEVELS else "info", meta)
             return True, None
         except ChannelError as e:
             return False, security.scrub_text(redact(str(e), self._secret_values()))
@@ -234,17 +238,49 @@ class TelegramChannel(Channel):
                 desc = "Telegram rejected the bot token (check it with @BotFather)"
             raise ChannelError(f"Telegram: {desc}")
 
+    CAPTION_MAX = 1024
+
+    def _post(self, chat, text, image, parse):
+        """One message: the picture with `text` as its caption when it fits, else the picture and then the text.
+        `parse` = "HTML" when `text` is Telegram HTML. A picture Telegram refuses (too big, not a JPEG) is dropped
+        and the text goes out alone - the words matter more than the camera frame."""
+        extra = {"parse_mode": parse} if parse else {}
+        plain_len = len(_html.unescape(re.sub(r"<[^>]+>", "", text))) if parse else len(text)
+        if image:
+            caption = text if plain_len <= self.CAPTION_MAX else None
+            try:
+                self._call("sendPhoto", {"chat_id": chat, **({"caption": caption, **extra} if caption else {})},
+                           [("photo", "snapshot.jpg", "image/jpeg", image)])
+                if caption:
+                    return
+            except ChannelError as e:
+                if str(e).startswith("Telegram: ") and "parse entities" not in str(e):
+                    image = None             # Telegram answered and said no to the picture: text only
+                else:
+                    raise
+        self._call("sendMessage", {"chat_id": chat, "text": text, **extra,
+                                   "link_preview_options": {"is_disabled": True}})
+
     def _send(self, title, body, image, level, meta):
         chat = self.cfg["chat_id"].strip()
         text = f"{title}\n{body}".strip()
+        rich = (meta or {}).get("html")
+        if rich and len(rich) <= 4000:
+            try:
+                return self._post(chat, rich, image, "HTML")
+            except ChannelError as e:
+                if "parse entities" not in str(e):
+                    raise                    # only a markup problem falls back to plain text
         if image:
-            caption = _clip(text, 1024)
+            caption = _clip(text, self.CAPTION_MAX)
             self._call("sendPhoto", {"chat_id": chat, "caption": caption},
                        [("photo", "snapshot.jpg", "image/jpeg", image)])
-            if len(text) > 1024:
-                self._call("sendMessage", {"chat_id": chat, "text": _clip(text, 4096)})
+            if len(text) > self.CAPTION_MAX:
+                self._call("sendMessage", {"chat_id": chat, "text": _clip(text, 4096),
+                                           "link_preview_options": {"is_disabled": True}})
         else:
-            self._call("sendMessage", {"chat_id": chat, "text": _clip(text, 4096)})
+            self._call("sendMessage", {"chat_id": chat, "text": _clip(text, 4096),
+                                       "link_preview_options": {"is_disabled": True}})
 
 
 def _hdr(value: str) -> str:
@@ -601,7 +637,7 @@ class Notifier:
             return self._record(event, {"sent": False, "skipped": "duplicate", "channels": {}})
         self._cancel_retry(self._dedupe_key(event))        # a fresh identical alert replaces a waiting retry
         image = self._image_for(event)
-        meta = {"event": event.kind, "printer": getattr(event, "printer", ""), "hub_name": self._hub_name()}
+        meta = self._meta(event)
         res = self._fan_out(chans, event.title, event.body, image, getattr(event, "level", None)
                             or ss.event_level(event.kind), meta)
         sent = any(r["ok"] for r in res.values())
@@ -612,6 +648,12 @@ class Notifier:
         self._log_failures(event, res, 1, retry_in)
         return self._record(event, {"sent": sent, "skipped": None, "channels": res, "attempt": 1,
                                     **({"retry_in_s": retry_in} if retry_in is not None else {})})
+
+    def _meta(self, event) -> dict:
+        meta = {"event": event.kind, "printer": getattr(event, "printer", ""), "hub_name": self._hub_name()}
+        if getattr(event, "html", None):
+            meta["html"] = event.html            # Telegram-flavoured twin of title+body; other channels ignore it
+        return meta
 
     def _image_for(self, event):
         if not self.settings.get("notifications.include_snapshot"):
@@ -697,8 +739,11 @@ class Notifier:
             self._record(event, {"sent": False, "skipped": reason or "no_channels", "channels": {},
                                  "attempt": attempt})
             return
-        meta = {"event": event.kind, "printer": getattr(event, "printer", ""), "hub_name": self._hub_name()}
-        body = f"{event.body}\n(Sent late: an earlier delivery attempt failed.)"
+        meta = self._meta(event)
+        late = "(Sent late: an earlier delivery attempt failed.)"
+        if meta.get("html"):
+            meta["html"] += "\n" + _html.escape(late, quote=False)
+        body = f"{event.body}\n{late}"
         res = self._fan_out(chans, event.title, body, self._image_for(event),
                             getattr(event, "level", None) or ss.event_level(event.kind), meta)
         sent = any(r["ok"] for r in res.values())

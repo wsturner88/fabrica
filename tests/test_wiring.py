@@ -545,19 +545,25 @@ class TestControlSettings(Base):
         self.assertIn("detail", d.json()["controls"])
         self.assertEqual(d.json()["controls"]["detail"]["preheat"]["auto_off_timeout_min"], 3)
 
-    def test_presets_from_settings_replace_the_defaults(self):
-        self.assertIn("PLA", controls.presets())
-        self.put(values={"printers.preheat_presets": {"Nylon": {"nozzle_c": 270, "bed_c": 90}}})
-        self.assertEqual(controls.presets(), {"NYLON": {"nozzle": 270, "bed": 90}})
+    def test_the_bed_temperatures_from_settings_are_the_presets(self):
+        self.assertEqual(controls.presets()["PLA"], {"nozzle": None, "bed": 60})
+        self.put(values={"printers.preheat_bed_pla": 55, "printers.preheat_bed_abs": 90})
+        self.assertEqual(controls.presets()["PLA"], {"nozzle": None, "bed": 55})
+        self.assertEqual(controls.presets()["ABS"], {"nozzle": None, "bed": 90})
+        self.assertEqual(controls.presets()["PETG"], {"nozzle": None, "bed": 80})
         p = FakePrinter("Ctl")
-        r = controls.perform(p, "preheat", preset="nylon")
-        self.addCleanup(controls.cancel_auto_off, p)
-        self.assertEqual((r["nozzle"], r["bed"]), (270, 90))
+        server.PRINTERS["ctl"] = p
+        r = controls.perform(p, "preheat", preset="abs")
+        self.assertEqual((r["nozzle"], r["bed"]), (None, 90))
+        self.assertEqual(p.temps, [(None, 90)])                      # the printer was told the bed only
+        d = self.client.get("/api/printer/ctl").json()["controls"]["detail"]["preheat"]["presets"]   # ... and the dashboard's buttons read the same numbers
+        self.assertEqual({k: v["bed"] for k, v in d.items()}, {"PLA": 55, "PETG": 80, "ABS": 90})
+        self.assertEqual({v["nozzle"] for v in d.values()}, {None})
         with self.assertRaises(controls.ControlInvalid):
-            controls.perform(p, "preheat", preset="PLA")
+            controls.perform(p, "preheat", preset="NYLON")
         server.SETTINGS.reset()
         server._apply_control_settings()
-        self.assertEqual(sorted(controls.presets()), ["ABS", "PETG", "PLA", "TPU"])
+        self.assertEqual(controls.presets()["ABS"], {"nozzle": None, "bed": 100})
 
 
 if __name__ == "__main__":

@@ -50,7 +50,8 @@ Revoke any recovery key afterwards under **Settings > Security**.
 | **OctoPrint:** NOT CONNECTED | OctoPrint is up but its USB link to the printer is not | Power the printer on, or ask an agent to run `connect_printer` |
 | **PrusaLink:** authentication failed | Wrong username or password | Re-read them in the printer's network settings |
 | **Klipper:** "wants an API key" | Moonraker does not trust Fabrica's network | Add the network to `[authorization] trusted_clients` in `moonraker.conf` and restart Moonraker, or enter an API key |
-| **Klipper:** NOT CONNECTED | Klipper is in `shutdown` or `error` | Fix it in Mainsail/Fluidd, then run `connect_printer` |
+| **Klipper:** NOT CONNECTED | Klipper itself reports `shutdown`, `error` or `disconnected` | Fix the cause in Mainsail/Fluidd, then tap the chip: Fabrica asks "Restart Klipper?" (a FIRMWARE_RESTART) and only restarts after your second tap. It never restarts a ready or printing printer |
+| A printer shows the last state and "Reconnecting…" | The Hub missed a poll or two (Wi-Fi hiccup, a busy Pi). Nothing is offered to connect, nothing is sent | Wait; after about 30 seconds without an answer it shows OFFLINE |
 | **Discover printers** finds nothing | Inside Docker, Fabrica probes only the networks you list | Type your network (for example `192.168.1.0/24`) and scan. Only private IPv4 ranges up to a /22 are allowed. See [discovery.md](discovery.md) |
 | Controls (pre-heat, load, unload) missing or refused | The printer family cannot do it, or it is busy | The printer screen shows why; they are refused while printing or paused |
 

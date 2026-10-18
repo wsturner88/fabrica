@@ -837,7 +837,7 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(body("list0"), {"printers": []})
         self.assertEqual([t["type"] for t in body("types")["types"]][:2], ["bambu", "octoprint"])
         bambu = body("types")["types"][0]
-        self.assertEqual([f["name"] for f in bambu["fields"]], ["name", "ip", "serial", "access_code", "model"])
+        self.assertEqual([f["name"] for f in bambu["fields"]], ["name", "ip", "serial", "access_code", "model", "camera_url"])
         self.assertFalse(body("badtest")["result"]["ok"])
         self.assertTrue(body("goodtest")["result"]["ok"])
         self.assertEqual(code("nobody"), 400)

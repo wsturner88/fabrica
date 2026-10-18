@@ -161,7 +161,9 @@ class Base(unittest.TestCase):
 
     def make(self, **kw):
         kw.setdefault("resolver", self.resolver)
-        kw.setdefault("rates", costs.Rates(per_kg={"PLA": 20}, kwh_price=0.15, wear_per_hour=0.30))
+        # include_machine=True: these tests check the full material + electricity + wear arithmetic; the default
+        # (filament only) and the per-call override are covered in MachineCostTests below.
+        kw.setdefault("rates", costs.Rates(per_kg={"PLA": 20}, kwh_price=0.15, wear_per_hour=0.30, include_machine=True))
         return joblog.JobLog(self.path, clock=lambda: self.now, **kw)
 
 
@@ -498,6 +500,21 @@ class QueryTests(Base):
         self.assertEqual(files["stand"]["good_parts"], 9)
         self.assertIn("material_series", s)
 
+    def test_by_file_keeps_the_key_lowercase_and_shows_the_original_spelling(self):
+        jl = self.make()
+        self.files["Phone Stand v3"] = {"grams": 10.0, "seconds": 3600, "parts": 1, "material": "PLA", "kind": "bambu"}
+        t = T0
+        jl.on_event(ev("print_started", ts=t, job="phone stand v3.gcode.3mf"))          # an older attempt, spelled differently
+        jl.on_event(ev("print_finished", ts=t + 3600, job="phone stand v3.gcode.3mf", seconds=3600))
+        t += 5000
+        jl.on_event(ev("print_started", ts=t, job="Phone Stand v3.gcode.3mf"))
+        jl.on_event(ev("print_finished", ts=t + 3600, job="Phone Stand v3.gcode.3mf", seconds=3600))
+        files = jl.stats("all")["by_file"]
+        self.assertEqual(len(files), 1)                                                   # still one line: the key matches case-insensitively
+        self.assertEqual((files[0]["file"], files[0]["display"], files[0]["jobs"]), ("phone stand v3", "Phone Stand v3", 2))
+        import costs as _costs
+        self.assertEqual([_costs.file_label(n) for n in ("Benchy.gcode.3mf", "X Y.BGCODE", "Keep.me", "", None)], ["Benchy", "X Y", "Keep.me", "", ""])
+
     def test_stats_per_printer_and_period(self):
         jl = self.make()
         self.seed(jl)
@@ -529,8 +546,10 @@ class QueryTests(Base):
         jl = self.make()
         self.seed(jl)
         before = jl.file_costs("stand")["true_cost_per_part"]
-        jl._rates = costs.Rates(per_kg={"PLA": 40}, kwh_price=0.15, wear_per_hour=0.30)
+        jl._rates = costs.Rates(per_kg={"PLA": 40}, kwh_price=0.15, wear_per_hour=0.30, include_machine=True)
         self.assertGreater(jl.file_costs("stand")["true_cost_per_part"], before)
+        jl._rates = costs.Rates(per_kg={"PLA": 40}, kwh_price=0.15, wear_per_hour=0.30)       # filament only: 2 x the 20/kg price
+        self.assertAlmostEqual(jl.file_costs("stand")["true_cost_per_part"], 2 * 0.272, places=3)
 
     def test_material_usage_buckets(self):
         jl = self.make()
@@ -553,6 +572,7 @@ class QueryTests(Base):
         self.assertEqual((first["printer"], first["file"], first["result"], first["parts"]), ("P1S", "stand", "finished", "3"))
         self.assertEqual(first["total_cost"], "1.515")
         self.assertEqual(first["cost_per_part"], "0.505")
+        self.assertEqual((first["total_with_print_time_cost"], first["total_includes_print_time"]), ("1.515", "yes"))
         failed = [r for r in rows if r["result"] == "failed"][0]
         self.assertEqual((failed["grams_used"], failed["cost_per_part"], failed["error"]), ("14.4", "", "jam"))
         injected = [r for r in rows if r["result"] == "running"][0]
@@ -575,6 +595,101 @@ class QueryTests(Base):
         self.assertEqual((len(rows), rows[0]["material"], rows[0]["parts"], rows[0]["result"]),
                          (1, "PETG", "2", "finished"))
         self.assertEqual(jl.recent_jobs()[0]["filaments"][0]["type"], "PETG")
+
+
+# ============================================================================ filament only vs + print time
+
+class MachineCostTests(Base):
+    """Default = the cost is the FILAMENT alone (power + machine wear are opt-in); a per-call override wins either way."""
+
+    seed = QueryTests.seed
+
+    def both(self):
+        return {on: joblog.JobLog(f"{self.path}.{int(on)}", resolver=self.resolver, clock=lambda: self.now,
+                                  rates=costs.Rates(per_kg={"PLA": 20}, kwh_price=0.15, wear_per_hour=0.30, include_machine=on))
+                for on in (False, True)}          # one database per setting, so a test seeds each exactly once
+
+    def test_job_and_recent_jobs(self):
+        for setting_on, jl in self.both().items():
+            self.seed(jl)
+            for override, want_total, want_part in ((None, 1.515 if setting_on else 0.72, 0.505 if setting_on else 0.24),
+                                                    (True, 1.515, 0.505), (False, 0.72, 0.24)):
+                rows = [r for r in jl.recent_jobs(limit=100, include_machine=override) if r["file"] == "stand" and r["result"] == "finished"]
+                c = rows[0]["cost"]
+                self.assertEqual((c["total"], c["per_part"]), (want_total, want_part), (setting_on, override))
+                self.assertEqual(c["includes_machine_costs"], setting_on if override is None else override)
+                self.assertEqual((c["material"], c["electricity"], c["wear"], c["total_with_machine"]), (0.72, 0.045, 0.75, 1.515))
+                one = jl.job(rows[0]["id"], include_machine=override)["cost"]
+                self.assertEqual((one["total"], one["includes_machine_costs"]), (c["total"], c["includes_machine_costs"]))
+
+    def test_stats_default_is_filament_only(self):
+        jl = self.both()[False]
+        self.seed(jl)
+        s = jl.stats("all", now=self.end + 10)
+        self.assertIs(s["includes_machine_costs"], False)
+        self.assertIs(s["cost"]["includes_machine_costs"], False)
+        self.assertAlmostEqual(s["cost"]["total"], s["cost"]["material"], delta=0.0001)
+        self.assertGreater(s["cost"]["electricity"], 0)                      # still reported
+        self.assertGreater(s["cost"]["wear"], 0)
+        self.assertGreater(s["cost"]["total_with_machine"], s["cost"]["total"])
+        p = s["by_printer"]["P1S"]
+        self.assertAlmostEqual(p["true_cost_per_part"], 0.272, places=4)             # 2.448 / 9 parts
+        self.assertAlmostEqual(p["cost_total_with_machine"], 5.151, delta=0.006)
+        self.assertAlmostEqual(p["cost_total"], 2.448, delta=0.006)
+        stand = [f for f in s["by_file"] if f["file"] == "stand"][0]
+        self.assertAlmostEqual(stand["cost_total"], 2.448, delta=0.006)
+
+    def test_stats_override_both_ways_against_both_settings(self):
+        for setting_on, jl in self.both().items():
+            self.seed(jl)
+            on = jl.stats("all", now=self.end + 10, include_machine=True)
+            off = jl.stats("all", now=self.end + 10, include_machine=False)
+            none = jl.stats("all", now=self.end + 10, include_machine=None)
+            self.assertEqual((on["includes_machine_costs"], off["includes_machine_costs"], none["includes_machine_costs"]),
+                             (True, False, setting_on))
+            self.assertAlmostEqual(on["by_printer"]["P1S"]["true_cost_per_part"], 0.5723, places=4)
+            self.assertAlmostEqual(off["by_printer"]["P1S"]["true_cost_per_part"], 0.272, places=4)
+            self.assertAlmostEqual(on["cost"]["wasted_on_failures"] - off["cost"]["wasted_on_failures"] > 0, True)
+            self.assertAlmostEqual(on["cost"]["total_with_machine"], off["cost"]["total_with_machine"], places=4)
+            self.assertEqual(none["cost"]["total"], (on if setting_on else off)["cost"]["total"])
+
+    def test_by_group_follows_the_mode(self):
+        jl = self.both()[False]
+        self.seed(jl)
+        members = [{"name": "Shop", "printers": ["P1S"]}]
+        off = jl.stats("all", now=self.end + 10, group_members=members)["by_group"][0]
+        on = jl.stats("all", now=self.end + 10, group_members=members, include_machine=True)["by_group"][0]
+        self.assertAlmostEqual(off["cost_total"], 2.448, delta=0.006)
+        self.assertAlmostEqual(on["cost_total"], 5.151, delta=0.006)
+        self.assertAlmostEqual(off["cost_total_with_machine"], on["cost_total_with_machine"], places=4)
+        self.assertLess(off["wasted_on_failures"], on["wasted_on_failures"])
+        self.assertEqual((off["includes_machine_costs"], on["includes_machine_costs"]), (False, True))
+
+    def test_file_costs_both_ways(self):
+        for setting_on, jl in self.both().items():
+            self.seed(jl)
+            default = jl.file_costs("Stand.gcode.3mf")
+            self.assertIs(default["includes_machine_costs"], setting_on)
+            self.assertAlmostEqual(default["true_cost_per_part"], 0.5723 if setting_on else 0.272, places=4)
+            self.assertAlmostEqual(jl.file_costs("stand", include_machine=True)["true_cost_per_part"], 0.5723, places=4)
+            off = jl.file_costs("stand", include_machine=False)
+            self.assertAlmostEqual(off["true_cost_per_part"], 0.272, places=4)
+            self.assertAlmostEqual(off["waste_per_part"], 0.032, places=4)
+            self.assertAlmostEqual(off["cost"]["wasted_on_failures"], 0.288, delta=0.006)
+            self.assertAlmostEqual(off["true_cost_per_part_with_machine"], 0.5723, places=4)
+
+    def test_csv_totals_follow_the_mode(self):
+        for setting_on, jl in self.both().items():
+            self.seed(jl)
+            for override in (None, True, False):
+                incl = setting_on if override is None else override
+                rows = list(csv.DictReader(io.StringIO(jl.export_csv(now=self.end + 200, include_machine=override))))
+                first = rows[0]
+                self.assertEqual(first["total_cost"], "1.515" if incl else "0.72")
+                self.assertEqual(first["cost_per_part"], "0.505" if incl else "0.24")
+                self.assertEqual(first["total_includes_print_time"], "yes" if incl else "no")
+                self.assertEqual((first["material_cost"], first["electricity_cost"], first["wear_cost"]), ("0.72", "0.045", "0.75"))
+                self.assertEqual(first["total_with_print_time_cost"], "1.515")
 
 
 # ============================================================================ migrations
