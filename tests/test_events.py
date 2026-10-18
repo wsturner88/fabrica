@@ -5,6 +5,7 @@ plus one end-to-end run (watcher -> Notifier -> a fake ntfy server on 127.0.0.1)
 
 Time is a fake clock; nothing sleeps and nothing leaves the machine.
 """
+import email.header
 import os
 import shutil
 import sys
@@ -68,7 +69,7 @@ class BaselineTests(Watch):
         self.assertEqual(self.kinds(), [])
         ev = self.feed(snap("FINISH", "benchy", 100))
         self.assertEqual([e.kind for e in ev], ["print_finished"])
-        self.assertIn("benchy", ev[0].body)
+        self.assertIn("benchy", ev[0].title)
 
     def test_restart_with_finished_job_does_not_spam(self):
         self.feed(snap("FINISH", "benchy", 100))
@@ -143,7 +144,7 @@ class TransitionTests(Watch):
         ev = self.feed(snap("FINISH", "benchy", 100, bed_c=62), dt=2 * 3600 + 14 * 60)
         self.assertEqual([e.kind for e in ev], ["print_finished"])
         e = ev[0]
-        self.assertIn("2 h 14 min", e.body)
+        self.assertIn("took 2h 14m", e.body)
         self.assertIn("62", e.body)
         self.assertIn("cool", e.body)
         self.assertEqual(self.fetched, [])               # nothing fetched until the Notifier asks
@@ -151,7 +152,7 @@ class TransitionTests(Watch):
         self.assertEqual(self.fetched, ["P1S"])
         e.get_image()
         self.assertEqual(self.fetched, ["P1S"])          # once
-        self.assertEqual(e.title, "P1S: print FINISHED")
+        self.assertEqual(e.title, "P1S finished \u00b7 benchy")
         self.assertEqual(e.level, "info")
 
     def test_failed_with_error_text(self):
@@ -451,8 +452,9 @@ class EndToEndTests(unittest.TestCase):
         self.assertEqual(fin["method"], "PUT")                   # picture attached
         self.assertEqual(fin["body"], JPEG)
         h = {k.lower(): v for k, v in fin["headers"].items()}
-        self.assertEqual(h["title"], "P1S: print FINISHED")
-        self.assertIn("benchy", h["message"])
+        self.assertEqual(str(email.header.make_header(email.header.decode_header(h["title"]))),
+                         "P1S finished \u00b7 benchy")                # non-ASCII titles travel RFC 2047 encoded
+        self.assertIn("took 1h", str(email.header.make_header(email.header.decode_header(h["message"]))))
         h = {k.lower(): v for k, v in fail["headers"].items()}
         self.assertEqual(h["priority"], "5")
         self.assertEqual(h["title"], "P1S: print FAILED")

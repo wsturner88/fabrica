@@ -1108,7 +1108,10 @@ class TestDashboard(unittest.TestCase):
 
     def test_buttons_and_wiring(self):
         h = self.HTML
-        self.assertIn('data-act="rnOpenFile"', h)
+        # the printer file rows have no Rename button any more: it lives in the file detail sheet, and not on a kiosk
+        self.assertNotIn('data-act="rnOpenFile"', h[h.index("function fileRowHtml("):h.index("// ---- the file detail sheet")])
+        self.assertIn('data-act="fdRename"', h)
+        self.assertIn("fdRename:  () => rnOpen(FD.printer, FD.name),", h)
         self.assertIn('data-act="rnOpenLb"', h)
         self.assertIn("...(typeof RN_ACT !== 'undefined' ? RN_ACT : {})", h)
         blk = h[h.index("<!-- ==== rename ====") if "<!-- ==== rename ==== -->\n<!-- ===== Rename" not in h else h.index("<!-- ==== rename ==== -->\n<!-- ===== Rename"):h.index("<!-- ==== end rename ====")]
@@ -1129,7 +1132,7 @@ class TestDashboard(unittest.TestCase):
         for sink in ("insertAdjacentHTML", "document.write", "eval(", "outerHTML"):
             self.assertNotIn(sink, blk)
         self.assertNotRegex(blk, r"https?://")
-        self.assertIn('data-loc="${esc(CUR)}" data-f="${esc(name)}"', h)
+        self.assertIn('data-act="rnOpenLb"', h)
 
     def test_meaning_is_in_words_and_it_fits_a_phone(self):
         h = self.HTML

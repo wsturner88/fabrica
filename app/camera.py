@@ -24,12 +24,20 @@ Design rules (the printer's camera tolerates very few clients):
 """
 
 import asyncio
+import base64
+import collections
 import logging
+import os
+import re
+import select
+import shutil
 import socket
 import ssl
 import struct
+import subprocess
 import threading
 import time
+import urllib.parse
 import urllib.request
 
 log = logging.getLogger("bambu.camera")
@@ -74,6 +82,7 @@ class _SharedReader:
         self._seq = 0               # increments with every frame
         self.connections_opened = 0  # diagnostics / tests
         self.connected = False
+        self.last_error = None       # plain-language reason the camera has no picture (never holds credentials)
 
     # ---- demand ---------------------------------------------------------
 
@@ -191,6 +200,7 @@ class _SharedReader:
         with self._lock:
             self._frame, self._frame_ts = jpeg, time.time()
             self._seq += 1
+        self.last_error = None
 
     def _session(self):
         raise NotImplementedError
@@ -296,3 +306,360 @@ def fetch_jpeg(url: str, timeout: float = 8.0) -> bytes:
     if len(data) > MAX_FRAME_BYTES or data[:2] != b"\xff\xd8":
         raise ValueError("webcam snapshot is not a JPEG")
     return data
+
+
+# ====================================================================== per-printer camera address
+# Any printer can carry an optional `camera_url`: rtsp:// / rtsps:// (read with ffmpeg) or an
+# http(s):// JPEG snapshot URL. When set it replaces the driver's own camera. The URL may embed
+# `user:pass@` - that is a credential: it is shown only as `rtsp://***@host/path`, and never reaches
+# a log line, an error message or an API answer (see redact_url / plain_url / redact_text).
+
+CAMERA_SCHEMES = ("rtsp", "rtsps", "http", "https")
+NO_FFMPEG_MSG = "RTSP cameras need the full image (ffmpeg)"
+_BAD_CHARS = re.compile(r"[\s\x00-\x1f\x7f\"'`<>\\^{}|]")
+_USERINFO_ANY = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s]*@")
+
+
+class CameraUrlError(ValueError):
+    """A camera address that is not acceptable (the message is safe to show)."""
+
+
+def validate_camera_url(value) -> str:
+    """Clean + validate a camera address; '' stays ''. Raises CameraUrlError. The result is only ever
+    passed to ffmpeg / urllib as ONE argument (never through a shell)."""
+    v = (value or "").strip() if isinstance(value, str) else ""
+    if not v:
+        return ""
+    if len(v) > 600:
+        raise CameraUrlError("The camera address is too long.")
+    if _BAD_CHARS.search(v):
+        raise CameraUrlError("The camera address contains characters that are not allowed (spaces, quotes, "
+                             "brackets or backslashes). Percent-encode them, e.g. an @ in a password as %40.")
+    try:
+        u = urllib.parse.urlsplit(v)
+        host, _port = u.hostname, u.port
+    except ValueError:
+        raise CameraUrlError("That camera address is not valid.") from None
+    if u.scheme.lower() not in CAMERA_SCHEMES or not host:
+        raise CameraUrlError("The camera address must look like rtsp://192.168.1.60/live (rtsp, rtsps, "
+                             "http or https, then the camera's address).")
+    if not re.fullmatch(r"[A-Za-z0-9._:\-\[\]%]+", host):
+        raise CameraUrlError("The camera's host name has characters that are not allowed.")
+    if u.username == "***":
+        raise CameraUrlError("Enter the whole camera address again, including the user name and password.")
+    return v
+
+
+def _split(url):
+    u = urllib.parse.urlsplit(url)
+    host = u.hostname or ""
+    if ":" in host:
+        host = f"[{host}]"
+    netloc = host + (f":{u.port}" if u.port else "")
+    return u, netloc
+
+
+def plain_url(url) -> str:
+    """The address without user:pass - for messages (`rtsp://192.168.1.60/live`)."""
+    try:
+        u, netloc = _split(url)
+    except Exception:
+        return redact_text(str(url))
+    return urllib.parse.urlunsplit((u.scheme, netloc, u.path, u.query, ""))
+
+
+def redact_url(url) -> str:
+    """For API output / forms: `rtsp://***@host/path` when the address carries a login, else unchanged."""
+    if not url:
+        return ""
+    try:
+        u, netloc = _split(url)
+        if "@" in u.netloc:
+            netloc = "***@" + netloc
+        return urllib.parse.urlunsplit((u.scheme, netloc, u.path, u.query, ""))
+    except Exception:
+        return redact_text(str(url))
+
+
+def redact_text(text, url=None) -> str:
+    """Free text (an ffmpeg complaint, an exception) with every login removed, including the exact
+    user / password of `url` even when ffmpeg printed them without the scheme."""
+    t = _USERINFO_ANY.sub(r"\1", str(text))
+    if url:
+        try:
+            u = urllib.parse.urlsplit(url)
+            for bit in (u.password, u.username, urllib.parse.unquote(u.password or ""),
+                        urllib.parse.unquote(u.username or "")):
+                if bit and len(bit) >= 3:
+                    t = t.replace(bit, "***")
+        except ValueError:
+            pass
+    return t
+
+
+_FFMPEG_CACHE = {}
+
+
+def find_ffmpeg():
+    """Path of the ffmpeg binary or None. Looked up every time (cheap) so installing it needs no restart."""
+    return shutil.which(os.environ.get("FABRICA_FFMPEG") or "ffmpeg")
+
+
+def _ffmpeg_cmd(exe, url, one_frame=False):
+    cmd = [exe, "-nostdin", "-hide_banner", "-loglevel", "error"]
+    if url.lower().startswith(("rtsp://", "rtsps://")):
+        cmd += ["-rtsp_transport", "tcp", "-timeout", "10000000"]     # socket I/O timeout, microseconds
+    cmd += ["-analyzeduration", "2000000", "-probesize", "1000000", "-i", url, "-an", "-sn"]
+    if one_frame:
+        cmd += ["-frames:v", "1", "-vf", "scale='min(1280,iw)':-2"]
+    else:
+        cmd += ["-vf", "fps=2,scale='min(1280,iw)':-2"]
+    return cmd + ["-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", "5", "-"]
+
+
+def _ffmpeg_reason(stderr_text, url) -> str:
+    """Plain-language reason from ffmpeg's stderr (login removed)."""
+    low = (stderr_text or "").lower()
+    where = plain_url(url)
+    if "401" in low or "unauthorized" in low or "authorization" in low:
+        return f"camera rejected the user name or password at {where}"
+    return f"camera not reachable at {where}"
+
+
+class JpegSplitter:
+    """Cuts a byte stream of back-to-back JPEGs into frames (SOI ff d8 ... EOI ff d9)."""
+
+    def __init__(self, max_frame=MAX_FRAME_BYTES):
+        self.buf = bytearray()
+        self.max_frame = max_frame
+
+    def feed(self, data: bytes):
+        self.buf += data
+        out = []
+        while True:
+            start = self.buf.find(b"\xff\xd8")
+            if start < 0:
+                self.buf.clear()          # nothing resembling a frame start: drop the noise
+                break
+            if start:
+                del self.buf[:start]
+            end = self.buf.find(b"\xff\xd9", 2)
+            if end < 0:
+                if len(self.buf) > self.max_frame:
+                    self.buf.clear()       # runaway "frame": resync on the next SOI
+                break
+            out.append(bytes(self.buf[:end + 2]))
+            del self.buf[:end + 2]
+        return out
+
+
+def _basic_header(url):
+    u = urllib.parse.urlsplit(url)
+    if u.username is None:
+        return {}
+    tok = f"{urllib.parse.unquote(u.username)}:{urllib.parse.unquote(u.password or '')}".encode()
+    return {"Authorization": "Basic " + base64.b64encode(tok).decode()}
+
+
+def fetch_snapshot_url(url: str, timeout: float = 8.0) -> bytes:
+    """GET an http(s) JPEG snapshot URL; a user:pass@ in it becomes a Basic header (never a log line)."""
+    req = urllib.request.Request(plain_url(url), headers={"User-Agent": "fabrica-camera", **_basic_header(url)})
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(req, timeout=timeout) as r:
+            data = r.read(MAX_FRAME_BYTES + 1)
+    except Exception as e:
+        raise ConnectionError(f"camera not reachable at {plain_url(url)} ({type(e).__name__})") from None
+    if len(data) > MAX_FRAME_BYTES or data[:2] != b"\xff\xd8":
+        raise ValueError(f"camera at {plain_url(url)} did not return a JPEG picture")
+    return data
+
+
+class RtspCameraStream(_SharedReader):
+    """rtsp(s):// camera: ONE long-lived ffmpeg per printer while somebody is watching, JPEG frames
+    (about 2 per second) cut from its stdout. Killed when demand ends; restarted with backoff."""
+
+    def __init__(self, url, label="camera", idle_timeout=IDLE_TIMEOUT):
+        super().__init__(label, idle_timeout)
+        self._url = url
+        self.where = plain_url(url)
+        self.proc = None
+        self.spawns = 0   # diagnostics / tests
+
+    def _session(self):
+        exe = find_ffmpeg()
+        if not exe:
+            self.last_error = NO_FFMPEG_MSG
+            raise ConnectionError(NO_FFMPEG_MSG)
+        err_tail = collections.deque(maxlen=8)
+        proc = subprocess.Popen(self._cmd(exe), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, bufsize=0, close_fds=True)
+        self.proc = proc
+        self.spawns += 1
+        self.connections_opened += 1
+
+        def drain():
+            try:
+                for line in iter(proc.stderr.readline, b""):
+                    err_tail.append(line.decode("utf-8", "replace").strip())
+            except Exception:
+                pass
+        threading.Thread(target=drain, daemon=True, name=f"ffmpeg-err-{self.label}").start()
+        split, last_rx = JpegSplitter(), time.monotonic()
+        try:
+            fd = proc.stdout.fileno()
+            while True:
+                if self._idle_or_stopped():
+                    raise _Done()
+                ready, _, _ = select.select([fd], [], [], 1.0)
+                if not ready:
+                    if time.monotonic() - last_rx > STALL_SECONDS:
+                        raise ConnectionError(f"camera at {self.where} stopped sending pictures")
+                    continue
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    time.sleep(0.2)          # let the stderr drainer finish
+                    self.last_error = _ffmpeg_reason(redact_text(" ".join(err_tail), self._url), self._url)
+                    raise ConnectionError(self.last_error)
+                last_rx = time.monotonic()
+                for jpeg in split.feed(chunk):
+                    self._store_frame(jpeg)
+                    self.connected = True
+        except _Done:
+            raise
+        except Exception as e:
+            if not self.last_error:
+                self.last_error = f"camera not reachable at {self.where}"
+            raise ConnectionError(redact_text(e, self._url)) from None
+        finally:
+            self.connected = False
+            self._kill(proc)
+
+    def _cmd(self, exe):
+        return _ffmpeg_cmd(exe, self._url)
+
+    @staticmethod
+    def _kill(proc):
+        try:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(2)
+            for f in (proc.stdout, proc.stderr):
+                try:
+                    f.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def stop(self):
+        super().stop()
+        proc = self.proc
+        if proc is not None:
+            self._kill(proc)
+
+
+class SnapshotUrlCameraStream(PollingCameraStream):
+    """http(s) JPEG snapshot camera (the address may carry user:pass@)."""
+
+    def __init__(self, url, label="camera", **kw):
+        super().__init__(lambda: plain_url(url), label=label, **kw)
+        self._url = url
+
+    def _session(self):
+        while True:
+            if self._idle_or_stopped():
+                raise _Done()
+            try:
+                self._store_frame(fetch_snapshot_url(self._url, self.fetch_timeout))
+            except Exception as e:
+                self.last_error = redact_text(e, self._url)
+                raise
+            self.fetches += 1
+            self.connected = True
+            end = time.monotonic() + self.interval
+            while time.monotonic() < end:
+                if self._idle_or_stopped():
+                    raise _Done()
+                time.sleep(0.1)
+
+
+def make_camera_stream(url, label="camera"):
+    return RtspCameraStream(url, label) if url.lower().startswith(("rtsp://", "rtsps://")) \
+        else SnapshotUrlCameraStream(url, label)
+
+
+def check_camera(url, timeout=8.0):
+    """'Test connection' for a camera address: grab ONE frame. -> (ok, plain-language message)."""
+    where = plain_url(url)
+    try:
+        if not url.lower().startswith(("rtsp://", "rtsps://")):
+            fetch_snapshot_url(url, timeout)
+            return True, f"Camera picture received from {where}"
+        exe = find_ffmpeg()
+        if not exe:
+            return False, NO_FFMPEG_MSG
+        try:
+            r = subprocess.run(_ffmpeg_cmd(exe, url, one_frame=True), stdin=subprocess.DEVNULL,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return False, f"camera not reachable at {where} (no picture within {timeout:.0f} s)"
+        if r.stdout[:2] == b"\xff\xd8":
+            return True, f"Camera picture received from {where}"
+        return False, _ffmpeg_reason(redact_text(r.stderr.decode("utf-8", "replace"), url), url)
+    except Exception as e:
+        return False, redact_text(e, url)
+
+
+class CameraOverrideMixin:
+    """Mixed into a printer driver (see apply_camera_url) so the printer's camera is the configured
+    address instead of the driver's own. Properties of the driver are overridden, nothing else changes."""
+    _override_url = None
+    _override_stream = None
+    _override_guard = threading.Lock()
+
+    @property
+    def has_camera(self):
+        return True
+
+    def camera(self):
+        with CameraOverrideMixin._override_guard:
+            if self._override_stream is None:
+                self._override_stream = make_camera_stream(self._override_url, label=str(self.name))
+            return self._override_stream
+
+    def camera_info(self):
+        return {"flip_h": False, "flip_v": False, "rotate90": False}
+
+    def disconnect(self):
+        with CameraOverrideMixin._override_guard:
+            cam, self._override_stream = self._override_stream, None
+        if cam is not None:
+            try:
+                cam.stop()
+            except Exception:
+                pass
+        sup = getattr(super(), "disconnect", None)
+        if callable(sup):
+            return sup()
+
+
+_OVERRIDE_CLASSES = {}
+
+
+def apply_camera_url(prn, url):
+    """Make `prn` use `url` as its camera. Returns prn. A blank url changes nothing."""
+    if not url:
+        return prn
+    cls = type(prn)
+    sub = _OVERRIDE_CLASSES.get(cls)
+    if sub is None:
+        sub = _OVERRIDE_CLASSES[cls] = type(cls.__name__, (CameraOverrideMixin, cls), {"__module__": cls.__module__})
+    prn.__class__ = sub
+    prn._override_url = url
+    prn._override_stream = None
+    return prn

@@ -81,9 +81,7 @@ class SchemaTests(Base):
         self.assertTrue(s.get("notifications.print_failed"))
         self.assertEqual(s.get("notifications.muted_printers"), [])
         self.assertEqual(s.get("ntfy.server_url"), "https://ntfy.sh")
-        self.assertEqual(s.get("printers.preheat_presets"),
-                         {"PLA": {"nozzle_c": 215, "bed_c": 60}, "PETG": {"nozzle_c": 240, "bed_c": 80},
-                          "ABS": {"nozzle_c": 255, "bed_c": 100}, "TPU": {"nozzle_c": 225, "bed_c": 50}})
+        self.assertEqual([s.get("printers.preheat_bed_" + m) for m in ("pla", "petg", "abs")], [60, 80, 100])      # pre-heat is bed only
         self.assertEqual(s.get("printers.preheat_auto_off_min"), 15)
         self.assertTrue(s.get("printers.require_bed_clear"))
         self.assertEqual(s.get("backups.keep_per_printer"), 5)
@@ -100,9 +98,9 @@ class SchemaTests(Base):
             self.assertIn(f"notifications.{kind}", ss.FIELDS)
             self.assertIn(kind, opts)
         # the defaults are mutable objects: a caller changing one must not poison the schema
-        v = s.get("printers.preheat_presets")
-        v["PLA"]["nozzle_c"] = 1
-        self.assertEqual(s.get("printers.preheat_presets")["PLA"]["nozzle_c"], 215)
+        v = s.get("backups.keep_per_printer"), s.get("notifications.muted_printers")
+        s.get("notifications.muted_printers").append("x")
+        self.assertEqual(s.get("notifications.muted_printers"), [])
 
     def test_agents_block_is_read_only_info_with_runtime_values(self):
         s = self.store()
@@ -171,16 +169,16 @@ class ValidationTests(Base):
         self.assertEqual(s.get("general.hub_name"), "Fabrica")
         self.assertFalse(os.path.exists(os.path.join(self.dir, "settings.json")))
 
-    def test_presets_validation_and_edit(self):
+    def test_preheat_is_one_bed_temperature_per_material(self):
         s = self.store()
-        s.update({"printers.preheat_presets": {"PLA": {"nozzle_c": 210, "bed_c": 55},
-                                               "Nylon CF": {"nozzle_c": 280, "bed_c": 90}}})
-        self.assertEqual(s.get("printers.preheat_presets")["Nylon CF"], {"nozzle_c": 280, "bed_c": 90})
-        self.bad("printers.preheat_presets", {"PLA": {"nozzle_c": 500, "bed_c": 60}}, "nozzle_c")
-        self.bad("printers.preheat_presets", {"PLA": {"nozzle_c": 200}}, "bed_c")
-        self.bad("printers.preheat_presets", {"": {"nozzle_c": 200, "bed_c": 60}}, "name")
-        self.bad("printers.preheat_presets", {}, "at least one")
-        self.bad("printers.preheat_presets", "PLA", "object")
+        self.assertNotIn("printers.preheat_presets", ss.FIELDS)          # one set of numbers: nothing else carries a pre-heat nozzle value
+        self.assertEqual(sorted(k for k in ss.FIELDS if k.startswith("printers.preheat_bed_")),
+                         ["printers.preheat_bed_abs", "printers.preheat_bed_petg", "printers.preheat_bed_pla"])
+        s.update({"printers.preheat_bed_pla": 55, "printers.preheat_bed_abs": 90})
+        self.assertEqual([s.get("printers.preheat_bed_" + m) for m in ("pla", "petg", "abs")], [55, 80, 90])
+        self.bad("printers.preheat_bed_pla", 121, "120")
+        self.bad("printers.preheat_bed_petg", -1, "0")
+        self.bad("printers.preheat_bed_abs", "hot", "number")
 
     def test_readonly_and_disabled(self):
         s = self.store()
@@ -399,6 +397,50 @@ class ExportImportTests(Base):
         res = s.import_settings({"values": {"general.hub_name": "Dry"}}, dry_run=True)
         self.assertEqual(res["applied"], ["general.hub_name"])
         self.assertEqual(s.get("general.hub_name"), "Fabrica")
+
+
+class CostsMachineSettingTests(Base):
+    """costs.include_machine_costs: off by default (cost = filament only); on adds power + machine wear."""
+
+    def test_declared_in_the_costs_section(self):
+        f = ss.FIELDS["costs.include_machine_costs"]
+        self.assertEqual((f["type"], f["default"], f["secret"]), ("bool", False, False))
+        self.assertIn("print time", f["label"].lower())
+        self.assertIn("filament", f["help"].lower())
+        sec = [x for x in self.store().schema()["sections"] if x["id"] == "costs"][0]
+        self.assertIn("costs.include_machine_costs", [x["key"] for x in sec["fields"]])
+        for rate in ("kwh_price", "wear_per_hour", "printer_watts", "default_watts"):      # the rate fields all remain
+            self.assertIn("costs." + rate, ss.FIELDS)
+
+    def test_default_off_validation_and_round_trip(self):
+        s = self.store()
+        self.assertIs(s.get("costs.include_machine_costs"), False)
+        self.bad_value(s, "maybe")
+        self.bad_value(s, 5)
+        s.update({"costs.include_machine_costs": "on"})
+        self.assertIs(s.get("costs.include_machine_costs"), True)
+        self.assertIs(self.store().get("costs.include_machine_costs"), True)               # persisted
+        doc = s.export_settings()
+        self.assertIs(doc["values"]["costs.include_machine_costs"], True)
+        other = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, other, True)
+        b = ss.SettingsStore(other, env={})
+        b.import_settings(doc)
+        self.assertIs(b.get("costs.include_machine_costs"), True)
+        s.reset(["costs.include_machine_costs"])
+        self.assertIs(s.get("costs.include_machine_costs"), False)
+
+    def bad_value(self, s, value):
+        with self.assertRaises(ss.SettingsError) as cm:
+            s.update({"costs.include_machine_costs": value})
+        self.assertIn("true or false", cm.exception.errors["costs.include_machine_costs"])
+
+    def test_feeds_costs_rates(self):
+        import costs
+        s = self.store()
+        self.assertFalse(costs.Rates.from_settings(s.get).include_machine)
+        s.update({"costs.include_machine_costs": True})
+        self.assertTrue(costs.Rates.from_settings(s.get).include_machine)
 
 
 class FormatTests(unittest.TestCase):

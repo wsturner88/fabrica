@@ -30,7 +30,7 @@ This page is the contract new drivers (and the code that wires them in) follow.
 | `has_camera` (property) | True only when a snapshot source was found AND a test frame was fetched. Cached, re-checked in the background (same TTLs as OctoPrint). |
 | `camera_info()` | `{"flip_h","flip_v","rotate90"}` or `None` — same shape the dashboard already gets for OctoPrint. |
 | `camera()` | The shared `PollingCameraStream` (camera.py) for that printer. |
-| `connect_serial()` | Moonraker only: `FIRMWARE_RESTART` (brings Klipper back from shutdown). PrusaLink has no equivalent. |
+| `connect_serial(confirm_restart=False)` | Safe reconnect, never a blind restart. It looks first: unreachable -> `PrinterUnreachable`, nothing sent; printing / paused -> `PrinterBusy`, always refused; Klipper `ready` / `startup` -> nothing sent. Only when Klipper reports `shutdown` / `error` / `disconnected` can it send `POST /printer/firmware_restart` (FIRMWARE_RESTART, not `/printer/restart`: per the Klipper docs a plain RESTART does not clear the micro-controller's error state), and only with `confirm_restart=True`; without it `ConnectNeedsConfirm` ("This restarts Klipper (FIRMWARE_RESTART). Only do this if the printer shows an error."). OctoPrint: reads `GET /api/connection` first and posts "connect" only when the serial link is closed. PrusaLink has no equivalent. |
 | class traits | `uses_files_api = True` (list with `files()`, not `sd_list()`), `backup_mid_print_ok` (PrusaLink `False`: it reads the printer's USB stick; Moonraker `True`: reads the Pi's disk). |
 
 Failures raise `bambu.PrinterError` with a message fit to show a human. Moonraker
@@ -74,7 +74,8 @@ There is no separate `OFFLINE` state: it is `connected: false` + `state: "UNKNOW
 | cancelled | FAILED | user cancel |
 | error | FAILED | `print_error=1`, `error` = `print_stats.message` |
 | `webhooks.state` startup | DISCONNECTED | Klipper still starting |
-| shutdown / error, or objects query 5xx | DISCONNECTED | `print_error=1`; fix with `connect_serial()` (FIRMWARE_RESTART) |
+| shutdown / error / disconnected (Moonraker's `klippy_state`) | DISCONNECTED | `print_error=1`; `connect_serial(confirm_restart=True)` after a human OK |
+| objects query 5xx but `klippy_state` ready | `connected: false` (no reading) | a hiccup, not a disconnect: no connect is offered |
 | Moonraker unreachable / 401 | UNKNOWN, `connected: false` | |
 
 Percent is `virtual_sdcard.progress` (file position; falls back to `display_status.progress`).
@@ -99,7 +100,8 @@ for p in CFG["printers"]:
 Every `_is_octo(prn)` / `kind == "octoprint"` check that means "file-based HTTP printer, no AMS"
 (start_print confirm rule, `prn.files()` vs `prn.sd_list()`, prewarm, delete, thumbnails) becomes
 `_is_octo(prn) or getattr(prn, "uses_files_api", False)`. `connect_printer` should call
-`prn.connect_serial()` when `hasattr(prn, "connect_serial")` (OctoPrint, Moonraker).
+`prn.connect_serial(confirm_restart=...)` when `hasattr(prn, "connect_serial")` (OctoPrint, Moonraker). A driver's `connect_serial` must look before it sends and
+must never act on a printer that is printing or unreachable.
 `_camera_fields`, `/api/camera/*` already work unchanged (`has_camera`, `camera_info()`, `camera()`).
 
 backup.py (done): `_busy_reason` skips the mid-print refusal when
@@ -142,8 +144,9 @@ It imports nothing from the drivers (drivers import it), so a new driver needs n
   filament actions run only in `IDLE` / `FINISH` / `FAILED` (never `RUNNING` / `PREPARE` / `PAUSE`,
   never `UNKNOWN` / `DISCONNECTED`). Light is never gated.
 - **Limits**: nozzle 0-300 C, bed 0-120 C; outside that is rejected, not clamped. Both zero = use cooldown.
-- **Presets**: `PLA 215/60, PETG 240/80, ABS 255/100, TPU 225/50`; `preheat_presets:` in `config.yml`
-  overrides/extends (`controls.configure`); a list saved on the Settings page replaces all of them.
+- **Presets**: bed only - `PLA 60, PETG 80, ABS 100` C, set in Settings > Printers & safety (`printers.preheat_bed_*`); a preset sends
+  `set_temps(None, bed)`, so every driver (Bambu `M140`, OctoPrint bed target, Klipper `M140`) sends a bed command and no nozzle command.
+  `preheat_presets:` in `config.yml` may add named presets (their `bed` value only). PrusaLink has no heater control at all.
 - **Auto-off**: every pre-heat arms a timer (Settings > Printers & safety, else `PREHEAT_TIMEOUT_MIN`, default 15; an
   invalid or <= 0 env value means 15; a saved 0 in Settings means no timer - the status line then says so and
   Cool down is the only way off). When it fires it cools down through the *live* driver (looked up by name, so an

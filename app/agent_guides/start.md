@@ -20,7 +20,7 @@ MCP tools. Everything you need is in these guides; there is no other file to fet
 - Renaming files on printers: `file_facts`, `rename_preview`, `rename_apply`. See `renaming`.
 - Printer controls: `set_light`, `preheat`, `cooldown`, `load_filament`, `unload_filament`, `set_tray`.
 - Files and backups: `delete_sd_file`, `backup_printer_files`, `backup_status`.
-- Fleet and settings: `list_printer_types`, `add_printer`, `update_printer`, `remove_printer`, `set_printer_groups`, `get_settings`, `update_settings`.
+- Fleet and settings: `list_printer_types`, `add_printer`, `update_printer`, `remove_printer`, `set_printer_groups`, `set_detection_area`, `get_settings`, `update_settings`.
 - Failure watch: `detection_status` (alerts only; it never stops a print).
 
 ## Keys

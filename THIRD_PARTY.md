@@ -1,7 +1,7 @@
 # Third-party software and notices
 
 Fabrica's own code (the Hub in `app/`, the detector adapter in `detector/adapter/`, the brand assets in
-`app/static/brand/`, and the documentation) is original to this project and released under the
+`app/static/brand/` (except the fonts, section 4), and the documentation) is original to this project and released under the
 [MIT licence](LICENSE). This page lists what it depends on, what it merely talks to, and the trademarks
 of other parties it names. Versions are resolved when the image is built; check the installed package
 metadata for exact versions. This page is not legal advice.
@@ -47,14 +47,25 @@ The optional spaghetti detector uses a model container made by the Obico project
 
 ## 4. Fonts
 
-The dashboard and logo SVGs name **IBM Plex Mono** (with system monospace fallbacks) but **do not bundle or
-download it**: it is used only if already installed on the viewer's device. If it were ever bundled, it is
-licensed under the [SIL Open Font Licence 1.1](https://github.com/IBM/plex/blob/master/LICENSE.txt).
+The 5-inch wall-screen layout ships three fonts in `app/static/brand/`, served by the Hub itself (no font
+is downloaded from the internet). They are **not** under the MIT licence: each is licensed under the
+[SIL Open Font Licence 1.1](https://openfontlicense.org); the copyright lines and the full licence text are
+in [`app/static/brand/OFL.txt`](app/static/brand/OFL.txt).
+
+| Font file | Font | Upstream |
+|---|---|---|
+| `Inter-latin.woff2` | Inter (Latin subset) | <https://github.com/rsms/inter> |
+| `JetBrainsMono-latin.woff2` | JetBrains Mono (Latin subset) | <https://github.com/JetBrains/JetBrainsMono> |
+| `Antonio-latin.woff2` | Antonio (Latin subset) | <https://github.com/googlefonts/antonioFont> |
+
+Other layouts and the logo SVGs name **IBM Plex Mono** (with system monospace fallbacks) but do not bundle
+or download it: it is used only if already installed on the viewer's device (also SIL OFL 1.1).
 
 ## 5. Brand assets
 
 The Fabrica name, logo, icons and the SVG/PNG files in `app/static/brand/` are original to this project
-and released under the MIT licence with the rest of the repository.
+and released under the MIT licence with the rest of the repository. The `.woff2` fonts in that folder are
+third-party (section 4).
 
 ## 6. Trademarks
 

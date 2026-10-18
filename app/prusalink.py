@@ -18,9 +18,10 @@ Endpoints used (PrusaLink OpenAPI v1; see "uncertain" notes in docs/drivers.md):
     DELETE /api/v1/files/{storage}/{path}      delete a file
     GET    /api/v1/cameras, /api/v1/cameras/{id}/snap   local camera, if the firmware has one
 
-Authentication: HTTP Digest (user, usually "maker", + password) OR an `X-Api-Key`
-header, depending on firmware / settings. Both are supported; if both are
-configured both are sent. Credentials are only ever sent to the PrusaLink host
+Authentication: ONE secret, the "Password". It is used for HTTP Digest (user, usually "maker");
+if the printer rejects that (older firmware shows an API key instead) the same value is retried
+once as the `X-Api-Key` header and the working way is remembered. A separate stored `api_key`
+(old saved printers / config.yml) is still honoured and sent as before. Credentials are only ever sent to the PrusaLink host
 itself, never to a separately configured camera URL on another host.
 
 Files are `.gcode` / `.bgcode` on the printer's USB stick (storage "usb").
@@ -57,7 +58,7 @@ _CAM_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))   # c
 _UA = "fabrica-prusalink"
 
 _PARAM_RE = re.compile(r'([A-Za-z0-9_-]+)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|([^\s,"]+))')
-_GCODE_EXT = (".gcode", ".bgcode", ".gco", ".g")
+_GCODE_EXT = (".gcode", ".bgcode", ".gco", ".g", ".bgc")   # ".bgc" = the 8.3 short name of a .bgcode on the FAT USB stick
 
 
 # ---------------------------------------------------------------- Digest auth
@@ -196,37 +197,30 @@ class PrusaLinkPrinter:
          "help": "Short name agents and the dashboard use for this printer, e.g. MK4. Letters, digits, "
                  "dash, underscore or dot - no spaces. It cannot be changed later."},
         {"name": "url", "label": "PrusaLink address", "type": "url", "required": True,
-         "placeholder": "http://192.168.1.50", "guide_step": "ip",
-         "help": "http:// plus the printer's IP address. Find the IP on the printer screen: Settings > "
-                 "Network. PrusaLink must be switched on there too. Check it by typing the address in a "
-                 "browser: you should see the PrusaLink login page. Give the printer a DHCP "
-                 "reservation so the address never changes."},
-        {"name": "username", "label": "Username", "type": "text", "required": False,
-         "default": "maker", "guide_step": "creds",
-         "help": "PrusaLink login, usually 'maker'. It is shown on the printer: Settings > Network > "
-                 "PrusaLink."},
-        {"name": "password", "label": "Password", "type": "password", "required": False,
+         "placeholder": "192.168.1.50", "guide_step": "ip",
+         "help": "The printer's IP address, e.g. 192.168.1.50 (http:// is added for you). Find it on the "
+                 "printer screen: Settings > Network. PrusaLink must be switched on there too. Check it by "
+                 "typing the address in a browser: you should see the PrusaLink login page. Give the "
+                 "printer a DHCP reservation so the address never changes."},
+        {"name": "password", "label": "Password", "type": "password", "required": True,
          "secret": True, "guide_step": "creds",
          "help": "The PrusaLink password, shown on the printer: Settings > Network > PrusaLink. Case "
-                 "matters. 'Generate Password' there makes a new one and the old one stops working."},
-        {"name": "api_key", "label": "API key (alternative to password)", "type": "password",
-         "required": False, "secret": True, "guide_step": "apikey",
-         "help": "Only if your firmware shows an API key (in the PrusaLink web page, Settings) instead "
-                 "of a password. Leave empty otherwise."},
+                 "matters. 'Generate Password' there makes a new one and the old one stops working. "
+                 "Older firmware shows an API key instead of a password: paste that here, it works too."},
+        {"name": "username", "label": "Username", "type": "text", "required": False, "advanced": True,
+         "default": "maker", "guide_step": "creds",
+         "help": "PrusaLink login, almost always 'maker' (shown on the printer: Settings > Network > "
+                 "PrusaLink)."},
         {"name": "storage", "label": "Storage", "type": "text", "required": False, "default": "usb",
-         "guide_step": "usb",
+         "advanced": True, "guide_step": "usb",
          "help": "Which printer storage holds your G-code. 'usb' for the USB stick (almost always "
                  "right - keep a stick inserted)."},
-        {"name": "snapshot_url", "label": "Camera snapshot URL", "type": "url", "required": False,
-         "guide_step": "camera",
-         "help": "Optional. A URL returning a JPEG still from a webcam pointed at this printer "
-                 "(PrusaLink has no local camera and Prusa's own cameras are cloud-only, so there is "
-                 "usually none)."},
-        {"name": "model", "label": "Model", "type": "text", "required": False,
+        {"name": "model", "label": "Model", "type": "text", "required": False, "advanced": True,
          "placeholder": "Prusa MK4S", "help": "Display only."},
     ]
-    # At least one of these must be given (UIs: validate before saving).
-    CONFIG_REQUIRE_ONE_OF = [("password", "api_key")]
+    # (The camera address is a per-printer field every driver gets from fleet_store.CAMERA_FIELD; the old
+    # `snapshot_url` field became that, and an old stored `api_key` is now the password - see
+    # FleetManager._migrate_legacy.)
 
     def __init__(self, name, url, creds=None, model="", storage="usb", snapshot_url=""):
         self.name, self.model = name, model
@@ -235,6 +229,7 @@ class PrusaLinkPrinter:
         self.username, self.password, self.api_key = c["username"], c["password"], c["api_key"]
         self.storage = (storage or "usb").strip("/")
         self.snapshot_url = snapshot_url or ""
+        self._auth_mode = None           # None | "digest" | "apikey": what the password turned out to be
         self._digest = DigestAuth(self.username, self.password) if self.password else None
         self._dl_style = None            # "raw" | "plain" once we know which download URL works
         self._last = None                # last parsed status dict (or None when failing)
@@ -251,6 +246,8 @@ class PrusaLinkPrinter:
         self._cam_auth = False           # True when that URL is on the PrusaLink host (send creds)
         self._cam_refreshing = False
         self._camera = None
+        self._finfo = {}                 # (path, m_timestamp) -> per-file details already read (size, print time, ...)
+        self._finfo_lock = threading.Lock()
 
     # ---- construction helpers ----------------------------------------------
 
@@ -278,12 +275,21 @@ class PrusaLinkPrinter:
         return u.path + (("?" + u.query) if u.query else "")
 
     def _open(self, method, path, body=None, headers=None, timeout=8):
-        """Open a request to the printer (raises urllib errors). Caller closes the response."""
-        for attempt in (0, 1):
+        """Open a request to the printer (raises urllib errors). Caller closes the response.
+
+        Auth: HTTP Digest with username + password. If the printer still answers 401 and the only secret we
+        hold is that password, it is sent once as `X-Api-Key` instead (older firmware shows an API key where
+        newer shows a password) and whichever worked is remembered. A separately stored `api_key` (older
+        saved printers / config.yml) is sent as before."""
+        learned = tried_key = False
+        for _ in range(3):
+            key_mode = self._auth_mode == "apikey" or tried_key
             h = {"User-Agent": _UA, **(headers or {})}
             if self.api_key:
                 h["X-Api-Key"] = self.api_key
-            if self._digest:
+            elif key_mode and self.password:
+                h["X-Api-Key"] = self.password
+            if self._digest and not key_mode:
                 a = self._digest.header(method, self._target(path))
                 if a:
                     h["Authorization"] = a
@@ -292,13 +298,22 @@ class PrusaLinkPrinter:
             except ValueError as e:      # malformed address ("unknown url type", ...)
                 raise urllib.error.URLError(f"invalid address {self.url!r}") from e
             try:
-                return _OPENER.open(req, timeout=timeout)
+                r = _OPENER.open(req, timeout=timeout)
             except urllib.error.HTTPError as e:
-                if (e.code == 401 and attempt == 0 and self._digest
-                        and self._digest.learn(e.headers.get_all("WWW-Authenticate"))):
-                    e.close()
-                    continue    # retry once with the (fresh) challenge
+                if e.code == 401:
+                    if (self._digest and not key_mode and not learned
+                            and self._digest.learn(e.headers.get_all("WWW-Authenticate"))):
+                        learned = True
+                        e.close()
+                        continue    # retry once with the (fresh) challenge
+                    if self.password and not self.api_key and not key_mode and "Authorization" in h:
+                        tried_key = True
+                        e.close()
+                        continue    # the password is not a login: maybe it is this firmware's API key
                 raise
+            if self.password and not self.api_key and ("Authorization" in h or "X-Api-Key" in h):
+                self._auth_mode = "apikey" if key_mode else "digest"
+            return r
         raise AssertionError("unreachable")
 
     def _call(self, method, path, body=None, headers=None, timeout=8, what="request"):
@@ -311,7 +326,7 @@ class PrusaLinkPrinter:
             try:
                 if e.code in (401, 403):
                     raise PrinterError("PrusaLink rejected the credentials (HTTP %d) — check the "
-                                       "username/password or API key." % e.code) from e
+                                       "password." % e.code) from e
                 raise PrinterError(f"PrusaLink refused to {what} ({_http_msg(e)}).") from e
             finally:
                 e.close()
@@ -380,8 +395,8 @@ class PrusaLinkPrinter:
         except PrinterError as e:
             msg = str(e)
             if "rejected the credentials" in msg:
-                out["error"] = ("Authentication failed — wrong username/password or API key. "
-                                "Find them on the printer: Settings > Network > PrusaLink.")
+                out["error"] = ("Authentication failed — wrong password. "
+                                "Find it on the printer: Settings > Network > PrusaLink.")
             elif "Could not reach" in msg:
                 out["error"] = f"Could not connect to {p.url}: {msg.split(': ', 1)[-1]}"
             else:
@@ -469,6 +484,8 @@ class PrusaLinkPrinter:
             "state": state, "raw": raw, "job": name,
             "percent": round(progress) if isinstance(progress, (int, float)) else None,
             "remaining_min": round(left / 60) if isinstance(left, (int, float)) and left > 0 else None,
+            "z_mm": printer.get("axis_z") if isinstance(printer.get("axis_z"), (int, float))
+                    and not isinstance(printer.get("axis_z"), bool) else None,
             "nozzle_c": printer.get("temp_nozzle"), "nozzle_target_c": printer.get("target_nozzle"),
             "bed_c": printer.get("temp_bed"), "bed_target_c": printer.get("target_bed"),
             "print_error": 1 if raw in ("ERROR", "ATTENTION") else 0,
@@ -495,6 +512,7 @@ class PrusaLinkPrinter:
         s = self._last
         return {**base, "connected": True, "state": s["state"], "job": s["job"],
                 "percent": s["percent"], "remaining_min": s["remaining_min"],
+                "z_mm": s.get("z_mm"),
                 "nozzle_c": s["nozzle_c"], "nozzle_target_c": s["nozzle_target_c"],
                 "bed_c": s["bed_c"], "bed_target_c": s["bed_target_c"],
                 "print_error": s["print_error"], "fault": bool(s.get("fault")),
@@ -556,27 +574,170 @@ class PrusaLinkPrinter:
         walk("", 0)
         return out
 
+    # ---- per-file details ---------------------------------------------------
+    # A real Core One (firmware 6.5, PrusaLink 2.1) lists files WITHOUT size or metadata: each entry is only
+    # {name (8.3 short name), display_name (the long name), type, m_timestamp, ro, refs{icon, thumbnail, download}}.
+    # GET /api/v1/files/<storage>/<path> adds `size` (and a `meta` object on firmware that has one). The details
+    # are therefore read lazily, one small GET per file, and remembered per (path, m_timestamp) so a changed
+    # file is read again. Print time and filament type are also taken from the long name when the slicer put
+    # them there (PrusaSlicer's default: <name>_<nozzle>n_<layer>mm_<filament>_<printer>_<1h25m>.gcode).
+
+    _TIME_RE = re.compile(r"_(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?\.(?:b?gcode|gco|g)$", re.I)
+    _TYPE_RE = re.compile(r"_\d+(?:\.\d+)?mm_([A-Za-z0-9+\-]+(?:\.[A-Za-z0-9+\-]+)*)_")
+    _LAYER_RE = re.compile(r"_(\d+(?:\.\d+)?)n_(\d+(?:\.\d+)?)mm_")
+
+    @classmethod
+    def _secs_from_name(cls, display_name):
+        m = cls._TIME_RE.search(display_name or "")
+        if not m or not any(m.groups()):
+            return None
+        d, h, mi, sec = (int(x or 0) for x in m.groups())
+        total = d * 86400 + h * 3600 + mi * 60 + sec
+        return total or None
+
+    @classmethod
+    def _facts_from_name(cls, display_name):
+        """{print_seconds, filament_type, nozzle_mm, layer_mm} that the slicer wrote into the file name (any may be missing)."""
+        out = {}
+        secs = cls._secs_from_name(display_name)
+        if secs:
+            out["print_seconds"] = secs
+        m = cls._TYPE_RE.search(display_name or "")
+        if m:
+            mats = [x.upper() for x in m.group(1).split(".") if x]
+            out["materials"], out["filament_type"] = mats, mats[0]
+        m = cls._LAYER_RE.search(display_name or "")
+        if m:
+            out["nozzle_mm"], out["layer_mm"] = float(m.group(1)), float(m.group(2))
+        return out
+
+    @staticmethod
+    def _num(v):
+        if isinstance(v, bool):
+            return None
+        if isinstance(v, (int, float)):
+            return float(v)
+        if isinstance(v, str):
+            m = re.match(r"\s*(-?\d+(?:\.\d+)?)", v)
+            return float(m.group(1)) if m else None
+        return None
+
+    @classmethod
+    def _facts_from_meta(cls, meta, display_name=""):
+        """Details out of a PrusaLink `meta` object (all keys optional; absent on some firmware)."""
+        meta = meta if isinstance(meta, dict) else {}
+        out = {}
+        secs = cls._secs(meta)
+        if secs:
+            out["print_seconds"] = secs
+        mm = cls._num(meta.get("filament used [mm]", meta.get("filament_length")))
+        if mm is not None:
+            out["filament_mm"] = mm
+        g = cls._num(meta.get("filament used [g]", meta.get("filament_weight")))
+        if g is not None:
+            out["weight_g"] = g
+        ft = meta.get("filament_type", meta.get("filament type"))
+        if isinstance(ft, str) and ft.strip():
+            mats = [x.strip().upper() for x in re.split(r"[;,]", ft) if x.strip()]
+            out["materials"], out["filament_type"] = mats, mats[0]
+        nz = cls._num(meta.get("nozzle_diameter"))
+        if nz:
+            out["nozzle_mm"] = nz
+        lh = cls._num(meta.get("layer_height"))
+        if lh:
+            out["layer_mm"] = lh
+        return out
+
+    def remember_details(self, name, rev, details):
+        """Seed the in-memory details of a file (the Hub restores them from its disk cache after a restart)."""
+        if isinstance(details, dict):
+            with self._finfo_lock:
+                self._finfo[(name, rev)] = dict(details)
+
+    def known_details(self, name, rev):
+        with self._finfo_lock:
+            return dict(self._finfo.get((name, rev)) or {})
+
+    def file_details(self, name, rev=None):
+        """ONE read-only GET /api/v1/files/<storage>/<path>: size + whatever `meta` the firmware gives.
+        Remembered per (name, rev). Returns the details dict ({"size", ...}); raises PrinterError."""
+        data = self._get_json(self._file_path(name), timeout=8, what="read the file details")
+        data = data if isinstance(data, dict) else {}
+        out = {}
+        size = data.get("size")
+        if isinstance(size, int) and not isinstance(size, bool) and size >= 0:
+            out["size"] = size
+        out.update(self._facts_from_meta(data.get("meta"), data.get("display_name") or ""))
+        self.remember_details(name, rev, out)
+        return out
+
+    def thumbnail_png(self, name, ref=None, max_bytes=4 * 1024 * 1024):
+        """The part picture of a file as PNG bytes (one read-only GET of the printer's own thumbnail service, never a G-code download).
+        `ref` is the `refs.thumbnail` the listing gave ("/thumb/l/<storage>/<path>" - the large size; the "/thumb/s/" icon is smaller
+        and not always present). Returns None when the printer has no picture for the file (404) or sends something that is not a PNG."""
+        if not (isinstance(ref, str) and ref.startswith("/thumb/") and ".." not in ref and "?" not in ref and "#" not in ref):
+            ref = f"/thumb/l/{urllib.parse.quote(self.storage, safe='')}/" + urllib.parse.quote(name.lstrip("/"), safe="/~")
+        else:
+            ref = urllib.parse.quote(urllib.parse.unquote(ref), safe="/~")
+        try:
+            with self._open("GET", ref, timeout=10) as r:
+                data = r.read(max_bytes + 1)
+        except urllib.error.HTTPError as e:
+            code = e.code
+            e.close()
+            if code in (404, 204):
+                return None
+            if code in (401, 403):
+                raise PrinterError("PrusaLink rejected the credentials (HTTP %d) - check the password." % code) from e
+            raise PrinterError(f"PrusaLink could not give the picture (HTTP {code}).") from e
+        except (urllib.error.URLError, socket.timeout, OSError, http.client.HTTPException) as e:
+            raise PrinterError(f"Could not reach PrusaLink at {self.url}: {scrub_text(e)}") from e
+        if len(data) > max_bytes or data[:8] != b"\x89PNG\r\n\x1a\n":
+            return None
+        return data
+
     def _add_child(self, out, rel_folder, it):
         nm = it.get("name") or ""
-        if (it.get("type") or "").upper() in ("FIRMWARE", "FOLDER") or not nm.lower().endswith(_GCODE_EXT):
+        kind = (it.get("type") or "").upper()
+        if kind in ("FIRMWARE", "FOLDER") or not (kind == "PRINT_FILE" or nm.lower().endswith(_GCODE_EXT)):
             return
+        path = rel_folder + nm
+        mts = it.get("m_timestamp", it.get("modified"))
+        long_name = it.get("display_name") or nm
         meta = it.get("meta") or {}
         secs = self._secs({**it, **meta})
-        fil = meta.get("filament used [mm]", meta.get("filament_length", it.get("filament_length")))
+        facts = {**self._facts_from_name(long_name), **self.known_details(path, mts),
+                 **self._facts_from_meta(meta, long_name)}
+        if secs:
+            facts["print_seconds"] = secs
+        secs = facts.get("print_seconds")
+        fil = facts.get("filament_mm", it.get("filament_length"))
         try:
             fil = float(fil) if fil is not None else None
         except (TypeError, ValueError):
             fil = None
+        size = it.get("size")
+        if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
+            size = facts.get("size") or 0
+        refs = it.get("refs") if isinstance(it.get("refs"), dict) else {}
+        ref = refs.get("thumbnail") if isinstance(refs.get("thumbnail"), str) else None
         out.append({
-            "name": rel_folder + nm,
-            "size": it.get("size", 0),
-            "modified": it.get("m_timestamp", it.get("modified")),
+            "name": path,
+            "size": size,
+            "modified": mts,
             "print_seconds": secs,
             "print_time": f"{secs // 3600}h{(secs % 3600) // 60:02d}m" if secs else None,
             "filament_mm": fil,
+            "weight_g": facts.get("weight_g"),
+            "filament_type": facts.get("filament_type"),
+            "materials": list(facts.get("materials") or []),
+            "nozzle_mm": facts.get("nozzle_mm"),
+            "layer_mm": facts.get("layer_mm"),
             "origin": "local",
             "storage": self.storage,
-            "display_name": it.get("display_name") or nm,
+            "display_name": long_name,
+            "thumb_ref": ref,
+            "rev": mts,
         })
 
     def _download_candidates(self, filename):
@@ -699,6 +860,9 @@ class PrusaLinkPrinter:
     def sd_delete(self, filename, origin="local"):
         _require_idle_for_delete(self)       # N-12: re-checked at the moment of the delete (USB stick)
         self._call("DELETE", self._file_path(filename), what="delete the file")
+        with self._finfo_lock:
+            for k in [k for k in self._finfo if k[0] == filename]:
+                del self._finfo[k]
 
     # ---- camera -------------------------------------------------------------
 

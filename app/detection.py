@@ -12,7 +12,8 @@ Three pieces, none of which imports server.py or any driver (stdlib only):
                      against a short and a long rolling mean); no Obico code is used.
     DetectionLoop    the scheduler. Every `interval_s` it asks for the fleet, picks the printers
                      that are RUNNING and have a camera, fetches the Hub's shared camera frame,
-                     scores it, feeds the tracker and - unless learn-only - calls the alert hook.
+                     turns it upright and cuts it to the printer's watch area (framefix.py), scores
+                     it, feeds the tracker and - unless learn-only - calls the alert hook.
 
 Alert only. Nothing in here pauses or stops a print, by design; the owner decides.
 
@@ -34,6 +35,8 @@ import threading
 import time
 import urllib.error
 import urllib.request
+
+import framefix
 
 log = logging.getLogger("bambu.detection")
 
@@ -166,6 +169,10 @@ class FailureTracker:
         self._last_save = clock()
         self._warned_io = False
         self.last = None                 # last Verdict
+        # The view (turned / cropped how) the baseline was learned from, as View.signature(). None = this
+        # printer has no baseline file yet; a file from before this was recorded counts as the untouched picture.
+        self._view = None
+        self.learning = ""               # why the baseline is being re-learned ("" = it is not)
         self._load()
 
     # ---- parameters ----------------------------------------------------
@@ -178,6 +185,43 @@ class FailureTracker:
                 self._short = collections.deque(self._short, maxlen=params.short_window)
             if params.long_window != self._long.maxlen:
                 self._long = collections.deque(self._long, maxlen=params.long_window)
+
+    # ---- the view the baseline belongs to ----------------------------------
+
+    # After a reset, a baseline needs this many pictures (about an hour at one per 10 s) before the
+    # printer screen stops saying LEARNING.
+    LEARN_FRAMES = 360
+
+    def set_view(self, signature: str) -> bool:
+        """Tell the tracker which view (View.signature()) the pictures now come in. The baseline only means
+        something for the view it was learned from: when the view changed (camera turned, watch area
+        moved) the baseline is thrown away and learned again. Returns True when it was reset."""
+        with self._lock:
+            if signature == self._view:
+                return False
+            if self._view is None:                      # nothing learned yet: just remember the view
+                self._view = signature
+                self._dirty = True
+                return False
+            self.reset_baseline("camera view changed", signature)
+            return True
+
+    def reset_baseline(self, reason="camera view changed", signature=None):
+        """Forget the learned baseline AND this print's smoothing (the next pictures go through the warm-up
+        again), and say why in words (`learning`). Written to disk straight away."""
+        with self._lock:
+            self._long.clear()
+            self._short.clear()
+            self._ewm = None
+            self.frame = 0
+            self._flagged = 0
+            self.last = None
+            self.learning = reason or ""
+            if signature is not None:
+                self._view = signature
+            self._dirty = True
+            self._save(force=True)
+        log.info("detection baseline for %s reset: %s", self.printer, reason)
 
     # ---- feeding -------------------------------------------------------
 
@@ -201,6 +245,8 @@ class FailureTracker:
             self._short.append(p)
             self._long.append(p)
             self._dirty = True
+            if self.learning and len(self._long) >= self.LEARN_FRAMES:
+                self.learning = ""
             short_mean = sum(self._short) / len(self._short)
             long_mean = sum(self._long) / len(self._long)
             adjusted = (self._ewm - long_mean) * prm.sensitivity
@@ -265,6 +311,7 @@ class FailureTracker:
             tmp = self.path + ".tmp"
             with open(tmp, "w") as f:
                 json.dump({"v": 1, "printer": self.printer, "saved": self._clock(),
+                           "view": self._view, "learning": self.learning,
                            "long": [round(x, 3) for x in self._long]}, f, separators=(",", ":"))
             os.replace(tmp, self.path)
             self._dirty = False
@@ -279,9 +326,14 @@ class FailureTracker:
             return
         try:
             with open(self.path) as f:
-                vals = json.load(f)["long"]
+                doc = json.load(f)
+            vals = doc["long"]
             clean = [x for x in (_finite(v, None) for v in vals) if x is not None and x >= 0]
             self._long.extend(clean[-self.params.long_window:])
+            v = doc.get("view")
+            self._view = v if isinstance(v, str) and v else framefix.IDENTITY_SIGNATURE   # older file: untouched pictures
+            lr = doc.get("learning")
+            self.learning = lr[:80] if isinstance(lr, str) else ""
         except FileNotFoundError:
             pass
         except (OSError, ValueError, KeyError, TypeError) as e:
@@ -471,6 +523,9 @@ class _PS:
         self.verdict = None          # last Verdict.to_dict() with "at"
         self.scored = 0
         self.print_started = None
+        self.view = framefix.IDENTITY   # how this printer's pictures are turned / cropped before scoring
+        self.prep = "off"            # off (nothing to do) | ok (turned / cropped)
+        self.unprepared = False      # the picture should be turned / cropped but this build has no ffmpeg
 
 
 class DetectionLoop:
@@ -483,6 +538,8 @@ class DetectionLoop:
         on_alert(printer, level, score, jpeg)   level is "warning" or "failure"; score is the
                                       smoothed score clipped to 0..1. Never called in learn-only mode.
         has_camera(name)           -> bool  (default: every printer)
+        view_fetcher(name)         -> framefix.View | None   how this printer's camera picture is turned and
+                                      cut before it is scored (None / absent: it is scored as it is)
 
     `tick()` does one pass and never blocks on more than the detector's timeout per picture;
     `start()` runs it on its own daemon thread. All settings can change at runtime via
@@ -493,9 +550,10 @@ class DetectionLoop:
                  store_dir=None, interval_s=10, sensitivity="medium", learn_only=False,
                  cooldown_s=600, max_backoff_s=300, excluded=(), blind_bytes=2500,
                  scale_to_interval=True, clock=time.time, tick_s=2.0, on_detector=None,
-                 outage_alert_after=3):
+                 outage_alert_after=3, view_fetcher=None):
         self._fleet = fleet_fetcher
         self._jpeg = jpeg_fetcher
+        self._view_fetcher = view_fetcher
         self._on_alert = on_alert
         # on_detector("down", {"error","code","failures"}) once the detector has failed `outage_alert_after`
         # times in a row (a blip is not an outage), and on_detector("up", {}) when it answers again.
@@ -670,6 +728,31 @@ class DetectionLoop:
             ps.job = job
         ps.percent = pct if pct is not None else ps.percent
         ps.state = state
+        self._sync_view(name, ps)
+
+    def _view_for(self, name):
+        """framefix.View in effect for a printer, or None when unknown (no camera, no answer)."""
+        if self._view_fetcher is None:
+            return None
+        try:
+            v = self._view_fetcher(name)
+        except Exception as e:
+            log.info("camera view for %s unavailable: %s", name, e)
+            return None
+        return v if isinstance(v, framefix.View) else None
+
+    def _sync_view(self, name, ps):
+        """Keep the printer's view up to date. When it differs from the one the learned baseline was made
+        from (camera turned, watch area moved) the baseline is reset - it would be compared against
+        pictures that look different - and the printer screen says LEARNING."""
+        wanted = self._view_for(name)
+        if wanted is None:
+            return
+        view = framefix.effective(wanted)          # without ffmpeg nothing is turned: the baseline stays as it is
+        ps.view = view
+        ps.unprepared = view is not wanted and not wanted.identity
+        if ps.tracker.set_view(view.signature()):
+            ps.verdict, ps.scored, ps.last_alert = None, 0, None
 
     def _new_print(self, name, ps, now):
         ps.tracker.start_print()
@@ -709,7 +792,16 @@ class DetectionLoop:
             if ts is not None:
                 ps.last_ts = ts
             return
-        res = client.score(jpeg, name)
+        self._sync_view(name, ps)
+        prepared = framefix.prepare(jpeg, ps.view)
+        ps.prep = {framefix.STATUS_SAME: "off", framefix.STATUS_DONE: "ok"}.get(prepared.status, prepared.status)
+        if prepared.status == framefix.STATUS_FAILED:
+            # Scoring the untouched picture would feed the baseline a view it was not learned from.
+            ps.camera, ps.camera_misses = "unprepared", ps.camera_misses + 1
+            if ts is not None:
+                ps.last_ts = ts
+            return
+        res = client.score(prepared.jpeg, name)
         if not res.ok:
             if res.soft:
                 ps.next_due = now + 1.0
@@ -791,7 +883,9 @@ class DetectionLoop:
         ps.alerts.append({"at": now, "level": v.level, "ewm": round(v.ewm, 3)})
         score = min(1.0, round(v.ewm, 3))
         try:
-            self._on_alert(name, v.level, score, jpeg)
+            # the owner gets the picture the way the dashboard shows it (upright, whole), not the raw camera frame
+            shown = framefix.prepare(jpeg, ps.view.without_area())
+            self._on_alert(name, v.level, score, shown.jpeg if shown.status == framefix.STATUS_DONE else jpeg)
         except Exception as e:
             log.warning("alert hook failed for %s: %s", name, e)
 
@@ -829,12 +923,20 @@ class DetectionLoop:
             return {"ok": False, "printer": printer, "error": f"camera error: {type(e).__name__}"}
         if not jpeg:
             return {"ok": False, "printer": printer, "error": "no camera picture available"}
-        res = client.score(jpeg, printer)
+        wanted = self._view_for(printer) or framefix.IDENTITY
+        view = framefix.effective(wanted)
+        prepared = framefix.prepare(jpeg, view)
+        if prepared.status == framefix.STATUS_FAILED:
+            return {"ok": False, "printer": printer, "error": "the camera picture could not be prepared: " + prepared.error}
+        res = client.score(prepared.jpeg, printer)
         if not res.ok:
             return {"ok": False, "printer": printer, "error": res.error, "code": res.code}
-        return {"ok": True, "printer": printer, "score": round(res.score, 4), "detections": res.detections,
-                "inference_ms": res.ms, "rtt_ms": res.rtt_ms,
-                "note": "raw score of this one picture; alerts use the smoothed per-print score"}
+        out = {"ok": True, "printer": printer, "score": round(res.score, 4), "detections": res.detections,
+               "inference_ms": res.ms, "rtt_ms": res.rtt_ms,
+               "note": "raw score of this one picture; alerts use the smoothed per-print score"}
+        if view is not wanted and not wanted.identity:
+            out["picture_note"] = framefix.note()
+        return out
 
     def status(self) -> dict:
         """Everything the dashboard / the `detection_status` MCP tool needs, JSON-safe.
@@ -852,6 +954,9 @@ class DetectionLoop:
                     "excluded": name.lower() in self.excluded,
                     "state": ps.state, "camera": ps.camera, "frames_scored": ps.scored,
                     "baseline_frames": ps.tracker.baseline_frames,
+                    "learning": ps.tracker.learning,
+                    "picture": dict(ps.view.as_dict(), prep=ps.prep,
+                                    note=framefix.note() if ps.unprepared else ""),
                     "verdict": ps.verdict, "alerts": list(ps.alerts),
                     "detector_down": det["state"] == "down",
                 }

@@ -15,7 +15,7 @@ Endpoints used (Moonraker web API; see "uncertain" notes in docs/drivers.md):
     DELETE /server/files/gcodes/<path>           delete a file
     POST   /printer/print/start?filename=        start printing an existing file
     POST   /printer/print/pause|resume|cancel    job control
-    POST   /printer/firmware_restart             bring Klipper back after a shutdown/error
+    POST   /printer/firmware_restart             bring Klipper back after a shutdown/error (connect_serial, guarded)
     GET    /server/webcams/list                  configured webcams (snapshot_url / stream_url)
 
 Authentication: normally none on a trusted LAN (Moonraker `trusted_clients`).
@@ -39,7 +39,7 @@ import urllib.request
 
 import http.client
 
-from bambu import (PrinterError, make_opener, REDIRECT_MSG, strip_userinfo, scrub_text, _require_idle_for_delete,
+from bambu import (PrinterError, PrinterBusy, PrinterUnreachable, ConnectNeedsConfirm, make_opener, REDIRECT_MSG, strip_userinfo, scrub_text, _require_idle_for_delete,
                    read_capped, multipart_form, FILE_MAX_BYTES)   # read_capped, multipart_form, FILE_MAX_BYTES: rename
 import controls as _controls
 from controls import ControlUnsupported
@@ -54,11 +54,11 @@ MOONRAKER_PORT = 7125
 
 _LIGHT_NAME = re.compile(r"light|led|lamp", re.I)      # also covers "caselight"
 _LIGHT_KINDS = ("output_pin", "led", "neopixel", "dotstar")
-_OBJECTS = "print_stats&virtual_sdcard&display_status&extruder&heater_bed&webhooks"
+_OBJECTS = "print_stats&virtual_sdcard&display_status&extruder&heater_bed&toolhead&webhooks"
 
 
-def _perr(msg: str, status=None) -> PrinterError:
-    e = PrinterError(msg)
+def _perr(msg: str, status=None, cls=PrinterError) -> PrinterError:
+    e = cls(msg)
     e.status = status          # HTTP status when there was one (None for transport errors)
     return e
 
@@ -108,21 +108,21 @@ class MoonrakerPrinter:
          "help": "Short name agents and the dashboard use for this printer, e.g. Voron. Letters, digits, "
                  "dash, underscore or dot - no spaces. It cannot be changed later."},
         {"name": "url", "label": "Moonraker address", "type": "url", "required": True,
-         "placeholder": "http://192.168.1.60", "guide_step": "address",
-         "help": "Address of the Klipper host (Raspberry Pi etc.) - the one you type in a browser to open "
-                 "Mainsail or Fluidd. Moonraker's port 7125 is used automatically; plain "
-                 "http://<address> is enough."},
+         "placeholder": "192.168.1.60", "guide_step": "address",
+         "help": "The address of the Klipper host (Raspberry Pi etc.) - the one you type in a browser to open "
+                 "Mainsail or Fluidd, e.g. 192.168.1.60 (http:// is added for you). Moonraker's port 7125 "
+                 "is used automatically."},
         {"name": "api_key", "label": "API key", "type": "password", "required": False,
          "secret": True, "guide_step": "trusted",
          "help": "Only if Moonraker asks for one. Most home setups do not: Moonraker trusts the local "
                  "network if it is listed under [authorization] trusted_clients in moonraker.conf. "
                  "Leave empty unless the test says a key is needed."},
         {"name": "camera_base_url", "label": "Web UI / camera base address", "type": "url",
-         "required": False, "placeholder": "http://192.168.1.60", "guide_step": "camera",
+         "required": False, "advanced": True, "placeholder": "http://192.168.1.60", "guide_step": "camera",
          "help": "Optional. Where relative webcam links (like /webcam/?action=snapshot) are served "
                  "from, if not the same host on port 80. The webcam itself comes from the Mainsail or "
                  "Fluidd settings automatically."},
-        {"name": "model", "label": "Model", "type": "text", "required": False,
+        {"name": "model", "label": "Model", "type": "text", "required": False, "advanced": True,
          "placeholder": "Voron 2.4", "help": "Display only."},
     ]
     CONFIG_REQUIRE_ONE_OF = []
@@ -189,7 +189,7 @@ class MoonrakerPrinter:
             finally:
                 e.close()
         except (urllib.error.URLError, socket.timeout, OSError, http.client.HTTPException) as e:
-            raise _perr(f"Could not reach Moonraker at {self.url}: {scrub_text(e)}") from e
+            raise _perr(f"Could not reach Moonraker at {self.url}: {scrub_text(e)}", cls=PrinterUnreachable) from e
         if not 200 <= status < 300:
             raise _perr(f"Moonraker did not accept the request to {what} (HTTP {status}).", status)
         if not raw.strip():
@@ -223,12 +223,66 @@ class MoonrakerPrinter:
     def refresh(self, wait=0):
         self._last_ts = 0.0
 
-    def connect_serial(self):
-        """Parity with OctoPrintPrinter.connect_serial: ask Klipper to FIRMWARE_RESTART, which
-        is what brings a printer back from 'shutdown'/'error' or a lost MCU connection."""
+    # Klipper states (Moonraker /server/info `klippy_state`) in which a restart is the right fix
+    _RESTARTABLE = ("shutdown", "error", "disconnected")
+    RESTART_QUESTION = ("This restarts Klipper (FIRMWARE_RESTART). Only do this if the printer shows an error.")
+
+    def connect_serial(self, confirm_restart=False):
+        """Parity with OctoPrintPrinter.connect_serial, but SAFE: "connect" is never a blind restart.
+
+        Looks first (GET /server/info for Moonraker's own klippy_state, then print_stats), then:
+          * Moonraker unreachable          -> PrinterUnreachable, NOTHING sent (a network blip is not a Klipper fault)
+          * print_stats printing / paused  -> PrinterBusy, ALWAYS refused, whatever else is true
+          * klippy_state ready             -> nothing sent: "already connected"
+          * klippy_state startup           -> nothing sent: Klipper is still coming up
+          * klippy_state shutdown / error / disconnected -> a restart is allowed, but only with
+            confirm_restart=True (the UI's explicit second tap); without it ConnectNeedsConfirm, nothing sent.
+
+        Which restart: POST /printer/firmware_restart (= FIRMWARE_RESTART), not /printer/restart (= RESTART).
+        Per the Klipper docs RESTART only reloads the host software and "will not clear error state from the
+        micro-controller"; FIRMWARE_RESTART also resets the MCU, which is what leaves 'shutdown' (and an
+        'error' from a lost MCU). It is a superset of RESTART for a config error, so one call fits every
+        restartable state. (With klippy_state 'disconnected' Moonraker itself cannot reach the Klipper
+        service and answers 503: that is reported in words; restart the Klipper service from Mainsail/Fluidd.)"""
+        try:
+            info = self._call("GET", "/server/info", timeout=5, what="read the Klipper state")
+        except PrinterUnreachable as e:
+            raise PrinterUnreachable(f"Can't reach {self.name} over the network ({scrub_text(e)}). "
+                                     "Nothing was sent.") from e
+        except PrinterError as e:
+            raise _perr(f"{e} Nothing was sent.", getattr(e, "status", None)) from e
+        ks = str(info.get("klippy_state") or "").lower() if isinstance(info, dict) else ""
+        if not ks:
+            raise _perr(f"{self.url} did not answer like Moonraker (no klippy_state); nothing was sent.")
+        # a running print is checked whatever klippy_state says; 500/503 here just means Klipper is down
+        ps = None
+        try:
+            res = self._call("GET", "/printer/objects/query?print_stats", timeout=5, what="read the job state")
+            ps = (((res or {}).get("status") or {}).get("print_stats") or {}) if isinstance(res, dict) else {}
+        except PrinterUnreachable as e:
+            raise PrinterUnreachable(f"Can't reach {self.name} over the network ({scrub_text(e)}). "
+                                     "Nothing was sent.") from e
+        except PrinterError as e:
+            if getattr(e, "status", None) not in (500, 503) or ks == "ready":
+                raise _perr(f"Could not read {self.name}'s job state ({e}); nothing was sent.",
+                            getattr(e, "status", None)) from e
+        job = str((ps or {}).get("state") or "").lower()
+        if job in ("printing", "paused"):
+            raise PrinterBusy(f"{self.name} is {job}: connect is never sent to a printer that is {job} "
+                              "(it would abort the job). Nothing was sent.")
+        if ks == "ready":
+            self.refresh()
+            return f"{self.name} is already connected (Klipper is ready); nothing was sent."
+        if ks == "startup":
+            self.refresh()
+            return f"{self.name}: Klipper is still starting up; nothing was sent. Check again in a minute."
+        if ks not in self._RESTARTABLE:
+            raise _perr(f"{self.name}: unexpected Klipper state '{ks}'; nothing was sent.")
+        if confirm_restart is not True:
+            raise ConnectNeedsConfirm(f"{self.name}: Klipper is '{ks}'. {self.RESTART_QUESTION}")
         self._call("POST", "/printer/firmware_restart", what="restart the firmware", timeout=15)
         self.refresh()
-        return f"firmware restart requested for {self.name}"
+        return f"firmware restart requested for {self.name} (Klipper was '{ks}')"
 
     # ---- probe (powers "Test connection") ----------------------------------
 
@@ -310,6 +364,10 @@ class MoonrakerPrinter:
         ps, vs = status.get("print_stats") or {}, status.get("virtual_sdcard") or {}
         ds, ex = status.get("display_status") or {}, status.get("extruder") or {}
         bed, wh = status.get("heater_bed") or {}, status.get("webhooks") or {}
+        pos = (status.get("toolhead") or {}).get("position")
+        z_mm = self._r1(pos[2]) if isinstance(pos, (list, tuple)) and len(pos) > 2 else None
+        if z_mm is not None:
+            z_mm = round(pos[2], 2)
         if wh.get("state") not in (None, "ready"):
             return self._set_klippy_down(wh.get("state"), wh.get("state_message"))
         raw = (ps.get("state") or "").lower()
@@ -331,7 +389,7 @@ class MoonrakerPrinter:
         name = "" if state in ("IDLE", "UNKNOWN") else _strip_ext(ps.get("filename") or "")
         self._last = {
             "state": state, "raw": raw, "job": name, "percent": pct, "remaining_min": left,
-            "layer": layer,
+            "layer": layer, "z_mm": z_mm,
             "nozzle_c": self._r1(ex.get("temperature")), "nozzle_target_c": self._r1(ex.get("target")),
             "bed_c": self._r1(bed.get("temperature")), "bed_target_c": self._r1(bed.get("target")),
             "print_error": 1 if raw == "error" else 0,
@@ -346,8 +404,15 @@ class MoonrakerPrinter:
         except PrinterError as e:
             self._ok, self._last, self._last_err = False, None, scrub_text(e)
             return
+        ks = info.get("klippy_state") or "disconnected"
+        if ks == "ready":
+            # Moonraker says Klipper is fine but the status query failed (an overloaded Pi, a timeout turned
+            # 5xx): that is a hiccup in the answer, NOT a printer that is disconnected. Report "no reading" so
+            # nothing offers a connect and the Hub's hold-the-last-state logic treats it as a blip.
+            self._ok, self._last, self._last_err = False, None, "Moonraker could not answer the status query just now"
+            return
         self._ok, self._last_err = True, None
-        self._set_klippy_down(info.get("klippy_state") or "disconnected")
+        self._set_klippy_down(ks)
 
     def _set_klippy_down(self, klippy_state, message=None):
         self._last = {
@@ -377,6 +442,7 @@ class MoonrakerPrinter:
         s = self._last
         return {**base, "connected": True, "state": s["state"], "job": s["job"],
                 "percent": s["percent"], "remaining_min": s["remaining_min"], "layer": s["layer"],
+                "z_mm": s.get("z_mm"),
                 "nozzle_c": s["nozzle_c"], "nozzle_target_c": s["nozzle_target_c"],
                 "bed_c": s["bed_c"], "bed_target_c": s["bed_target_c"],
                 "print_error": s["print_error"], "fault": bool(s.get("fault")),
@@ -432,11 +498,17 @@ class MoonrakerPrinter:
             secs = meta.get("estimated_time")
             secs = int(secs) if isinstance(secs, (int, float)) and secs > 0 else None
             fil = meta.get("filament_total")
+            num = lambda v: float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0 else None
+            ftype = meta.get("filament_type")      # "PETG" or, for several materials, "PETG;PLA"
+            mats = [m.strip().upper() for m in re.split(r"[;,]", ftype) if m.strip()] if isinstance(ftype, str) else []
             out.append({
                 "name": nm, "size": size, "modified": mod,
                 "print_seconds": secs,
                 "print_time": f"{secs // 3600}h{(secs % 3600) // 60:02d}m" if secs else None,
                 "filament_mm": float(fil) if isinstance(fil, (int, float)) else None,
+                "weight_g": num(meta.get("filament_weight_total")),
+                "materials": mats, "filament_type": mats[0] if mats else None,
+                "layer_mm": num(meta.get("layer_height")), "nozzle_mm": num(meta.get("nozzle_diameter")),
                 "origin": "local",
             })
         return out

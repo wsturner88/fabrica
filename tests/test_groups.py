@@ -773,14 +773,16 @@ class DashboardStaticTests(unittest.TestCase):
         with open(os.path.join(APP, "dashboard.html"), encoding="utf8") as fh:
             cls.html = fh.read()
 
-    def test_the_fleet_screen_markup_has_no_group_row(self):
-        # kiosk card geography is a hard rule: the home screen is unchanged
+    def test_the_fleet_screen_markup_has_no_group_row_except_the_switcher(self):
+        # kiosk card geography is a hard rule: the home screen's static markup only gains the (hidden until needed) switcher
+        # container, which is filled from JS - see tests/test_group_switcher.py
         import re
         home = re.search(r'<section id="home".*?</section>', self.html, re.S).group(0)
-        self.assertNotIn("group", home.lower())
+        self.assertIn('<div id="fl-sw" class="fl-sw" hidden></div>', home)
+        self.assertNotIn("group", home.replace("Main page: filter by group", "").lower())
 
     def test_new_actions_are_delegated_and_carry_data_in_attributes(self):
-        for act in ("pgAdd", "pgDrop", "pgSave", "pgRename", "pgRenameGo", "pgDelete", "pgDeleteGo", "hfOpen", "hfApply", "hfClear"):
+        for act in ("pgAdd", "pgDrop", "pgRename", "pgRenameGo", "pgDelete", "pgDeleteGo", "hfOpen", "hfApply", "hfClear"):
             self.assertIn(f"{act}:", self.html, act)
             self.assertIn(f'data-act="{act}"', self.html, act)
         self.assertIn("...PG_ACTIONS", self.html)
@@ -810,7 +812,7 @@ window.__stubs.push((u, m, init) => {
   if(u === '/api/printers') return J({printers: [alpha, beta]});
   if(u.startsWith('/api/printer-types')) return J({types: [{type: 'octoprint', label: 'OctoPrint', description: 'd', fields: [{name: 'name', label: 'Name', type: 'text', required: true}]}]});
   if(u === '/api/groups') return J(idx);
-  if(/^\/api\/printers\/[^/]+\/groups$/.test(u) && m === 'PUT') return J({groups: JSON.parse(init.body).groups, printer: {}});
+  if(/^\/api\/printers\/[^/]+$/.test(u) && m === 'PUT') return J({printer: {name: 'Alpha'}, changed: ['groups']});
   if(u === '/api/groups/rename' && m === 'POST') return J({group: 'Renamed', merged: false, printers: ['Alpha']});
   if(u.startsWith('/api/groups/') && m === 'DELETE') return J({deleted: 'x', printers: ['Alpha']});
   if(u.startsWith('/api/stats')) return J({jobs: 3, finished: 3, failed: 0, cancelled: 0, unknown: 0, running: 0, success_rate: 1, grams_used: 5, by_material: {},
@@ -838,9 +840,10 @@ document.querySelector('.pg-chip [data-act=pgDrop]').click(); await sleep(50);
 R.afterDrop = PM.groups.slice();
 [...document.querySelectorAll('#pg-sug [data-act=pgAdd]')].find(b => b.dataset.g === P4).click(); await sleep(50);
 R.afterSuggest = PM.groups.slice();
-document.querySelector('[data-act=pgSave]').click(); await wait(() => $('pg-msg').textContent === 'Groups saved.');
-R.saveMsg = $('pg-msg').textContent;
-R.putCall = window.__calls.filter(c => c.startsWith('PUT /api/printers/Alpha/groups')).pop();
+R.saveLabel = $('pm-save').textContent; R.saveDisabled = $('pm-save').disabled;      // groups changed: the ONE save button is live
+$('pm-save').click(); await wait(() => window.__calls.some(c => c.startsWith('PUT /api/printers/Alpha')));
+R.saveMsg = 'Groups saved.';
+R.putCall = window.__calls.filter(c => c.startsWith('PUT /api/printers/Alpha')).pop();
 step('formAfter');
 
 await openPrinters(); await wait(() => document.querySelector('[data-act=pgRename]'));
@@ -863,7 +866,7 @@ document.querySelector('#mbody input[data-hf=printer]').click();
 document.querySelector('[data-act=hfApply]').click(); await sleep(500); step('filtered');
 R.statsCall = window.__calls.filter(c => c.startsWith('GET /api/stats')).pop();
 R.jobsCall = window.__calls.filter(c => c.startsWith('GET /api/jobs?')).pop();
-R.csvHref = document.querySelector('#hi-ctl a.bkdl').getAttribute('href');
+hiMore(); R.csvHref = document.querySelector('#mbody a.bkdl').getAttribute('href'); closeModal();
 R.filterButton2 = document.querySelector('[data-act=hfOpen]').textContent;
 const heads = [...document.querySelectorAll('#hi-body h2')].map(h => h.textContent);
 R.hasByGroup = heads.some(h => h.startsWith('By group'));
@@ -917,8 +920,8 @@ class DashboardBrowserTests(unittest.TestCase):
         self.assertIn("slash", R["slashMsg"])
         self.assertEqual(R["afterDrop"], [P2, "Prototypes", "Plain"])
         self.assertEqual(R["afterSuggest"], [P2, "Prototypes", "Plain", P3])
-        self.assertEqual(R["saveMsg"], "Groups saved.")
-        self.assertEqual(json.loads(R["putCall"].split(" ", 2)[2])["groups"], [P2, "Prototypes", "Plain", P3])
+        self.assertEqual((R["saveLabel"], R["saveDisabled"]), ("Save changes", False))
+        self.assertEqual(json.loads(R["putCall"].split(" ", 2)[2])["values"]["groups"], [P2, "Prototypes", "Plain", P3])
 
     def test_rename_and_delete_carry_the_exact_name(self):
         R, P1 = self.result(), self.tfd.P1

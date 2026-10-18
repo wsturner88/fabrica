@@ -6,6 +6,148 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- **A real desktop layout, and the dashboard now picks its layout for the screen.** In a big window with a mouse the dashboard uses the
+  whole window instead of the 1024x600 wall-screen box: more cards per row on the fleet page, a large camera beside the progress and
+  controls on the printer screen with the picture grid across the full width, History with Recent prints / By printer / By file side by
+  side, readable widths on Settings, Library and Printers, hover states and tooltips on cut-off names. An iPad (or other touch tablet)
+  gets the 10-inch touch layout scaled to fill its screen. More > Switch view overrides the choice per browser (Desktop / 10-inch touch /
+  Phone / 5-inch wall / Automatic); `?view=` in the address wins over detection. Wall screens (`?kiosk=1`, `?layout=5in`) are unchanged.
+
+### Fixed
+
+- **The printer screen's toolbar stays on one row while printing, even in a wider font.** On the 10-inch layout a print under way now shows ONE
+  "Sort: Recent ▾" button (it opens a chooser in words, with a tick on the active choice) instead of the four sort buttons, so Pause / Resume
+  and Cancel never wrap onto a second row on a Linux screen whose fallback font is wider than the Mac's. An idle printer, the desktop view and
+  the phone keep the four buttons.
+- **Spaghetti detection no longer sees an upside-down camera upside down.** The detector got the raw camera picture while the dashboard
+  turned it with CSS, so a printer whose webcam is set to flip (a Klipper printer with `flip_vertical`) was scored upside down and its
+  scores drifted to 0.2 - 0.9 on a healthy print (a false alarm). Every picture is now turned the way the dashboard shows it (rotate, then
+  flips, for every driver that reports `camera_orientation`) before it is scored. It uses the ffmpeg that is already in the full image; a
+  Lite image sends the picture as it is, logs one note and says so on the printer screen. A picture that cannot be prepared is skipped,
+  never scored raw. See docs/detection.md section 5a.
+- **A baseline is only valid for the view it was learned from.** `detection/<printer>.json` now records the flips / rotation / watch area
+  of its baseline. When they change the baseline is reset and the printer screen says "LEARNING - camera view changed" until it has
+  learned again. An old baseline file counts as "the untouched picture", so an upside-down camera relearns once after this update.
+- **The start-print confirm dialog (the spool picker) fits the screen.** It used to run off the bottom on the 10-inch kiosk, the 5-inch wall
+  screen and phones: a tall header, a full-width line each for the printer family, the file, the notes and the picture, four-line spool buttons,
+  and a bed-clear tick that scrolled away from START. Now the dialog is a header, one scrolling middle and a footer that is always on screen
+  (bed-clear tick + Back + START on one row; a phone wraps the tick onto its own row). On the kiosk, the wall screen and a desktop window the live
+  picture and the file name sit in a left column beside the spool rows, so nothing scrolls; a phone stacks them and scrolls only the middle. The
+  file name is one line (tap for all of it), the notes are short lines under the spool rows, and a chosen spool now carries a tick as well as the
+  border (single-filament jobs too). Nothing was dropped and the start request is the same. Measured by `tests/test_confirm_compact.py`.
+- **Discovery on a routed network.** "Discover printers" on a network reached through a VPN subnet route (about 40 ms away) used to
+  find nothing in a few seconds, while a /29 or a single address worked: 64 parallel connects with a 0.6 s timeout overloaded the route,
+  dropped SYNs read as "nobody is home", and the "two silent ports = skip" shortcut turned them into empty addresses. Now the scan
+  measures how far each network is. A far network gets a small pool that ramps up (at most 16), a 1.5 s connect timeout and a canary that is
+  checked while the scan runs: if the route starts dropping, new hosts are held back, the pool is halved and the dropped hosts are looked at
+  again. A host is empty only when ports 80, 7125 and 8883 all stayed silent (a Pi that only opens 80 is no longer skipped), and quiet hosts
+  get a second look at low concurrency for known printers, for hosts probed during a drop, and when a far network found nothing at all. A
+  local network is as fast as before. A far /24 takes about a minute and the screen says so ("Scanning a remote network - about a minute
+  left"), with a live count, a "Double-checking N quiet addresses" step and a note when the 240 s limit or the second-look time box stopped
+  it. New in the scan status: `phase`, `remote`, `profiles`, `eta_s`, `slowed`, `recheck`. See docs/discovery.md.
+
+### Added
+
+- **Spaghetti watch area, per printer.** A camera that also sees the room can be told where the printer is: Edit printer > More options >
+  *Spaghetti watch area* - drag a box over the upright picture (or type Left / Top / Width / Height), *Reset* = the whole picture. Words and a
+  dashed frame instead of colour, 44 px targets, one compact row, desktop and phone (not on kiosks). Stored as `detect_area` next to the
+  printer's other settings; changing it needs no connection test and works mid-print. `PUT /api/printers/{name}/detection-area`,
+  `detect_area` in `PUT /api/printers/{name}`, MCP `set_detection_area(printer, area)`; `GET /api/printers` shows `detect_area` and
+  `camera_orientation`. The detector is shown only that part of the picture.
+- **A visible Refresh button on the printer's files list, on every layout.** `↻ Refresh` (a word label, 44 px) sits in the existing one toolbar row (the 5-inch
+  files sheet has it in its header); it says "Refreshing…" while it runs, then updates the list in place, keeping the chosen sort and newest first. The
+  slow "Refresh details" entry is gone from More. Opening the files shows the last list at once and looks again in the background when it is older than
+  30 s; an open, idle files screen re-checks every 60 s (not for Bambu, not while a job runs). The automatic looks (`?refresh=1&bg=1`) follow the prewarm's
+  politeness rules: the Hub answers `{"skipped": true}` while the printer is heating, was just controlled or is unreachable. The button always refreshes.
+
+### Fixed
+
+- **"Connect" can no longer restart a healthy or printing Klipper printer.** It used to send a blind FIRMWARE_RESTART, so a few seconds of network trouble
+  followed by a tap on the NOT CONNECTED chip could abort a print. It now looks first: unreachable -> nothing sent ("can't reach the printer, nothing sent",
+  HTTP 503); printing or paused -> refused, always; Klipper ready -> nothing sent ("already connected"). Only when Klipper itself reports
+  shutdown / error / disconnected is a restart possible, and only after a second, explicit tap: "This restarts Klipper (FIRMWARE_RESTART). Only do this
+  if the printer shows an error." (agents: `connect_printer(confirm_restart=true)` after a human OK). OctoPrint's connect now reads its connection state first
+  and never reopens a port that is already open or printing.
+- **A network blip no longer flips a printer to OFFLINE / NOT CONNECTED.** The fleet and printer screens keep the last known state with the word
+  "Reconnecting…" until the printer has been unreachable for 30 s (and missed 2 polls). Connect is only offered when the printer itself reports
+  disconnected, never for an unreachable one. Safety paths (pre-heat auto-off, controls, the offline notice) still see the raw state.
+- **The job list answers 503 in words, not a 500 crash,** when the printer cannot be reached over the network (502 when it answers with a refusal).
+- **The background file prewarm is polite:** it skips and stops while any heater target is above 0 (printer not printing), for 2 minutes after a control
+  action (pre-heat, cool-down, light, filament) and while the printer is unreachable, for every printer type.
+
+### Added
+
+- **Printer deep link: `/dashboard?printer=<name>`** opens straight to that printer's screen (the name is not case sensitive). It combines with
+  `group=`, `layout=` and `kiosk=`; an unknown name leaves the fleet on screen with a short "not found" notice. The "Print finished" message's
+  "Open in Fabrica" link now uses it (`<Hub address>/dashboard?printer=<name>`), so a tap lands on the printer that finished.
+- **The 10-inch kiosk, the desktop page and the phone layout got the 5-inch screen's features.** Every fleet card says `Spaghetti: WATCHING / READY /
+  OFF / NO CAMERA / DETECTOR DOWN`, and a `WARNING` or `FAILURE` is an inverted block with a warning sign, a heavy frame on the card and a banner above
+  the grid (words and shape, never colour alone; the 5-inch card could not show it before: it never read the detector's verdict). Each card shows
+  the same per-state words (Paused with the time left, Ready to print / Last job, Tap to connect, No answer from the printer) and a picture slot
+  that says NO CAMERA or CAMERA OFFLINE. The printer screen has the big percent, time left, `Done ~clock`, layer, a bar (also while paused), the nozzle
+  and bed tiles, the per-printer Spaghetti switch (ON / OFF in words), the live camera (the snapshot is the fallback) with LIVE / SNAPSHOT badges
+  and the Spaghetti word, a status panel in place of a missing camera (with "Add camera" off the kiosk), and AMS slots as 48 px buttons. The files list has
+  sort buttons (Date / Name / Time) in the toolbar row, the date modified, and a "Printing" tag on the file that is running.
+- **History on the 5-inch screen** is rebuilt for 800x480: one toolbar row (period, printers, Filament only / + Print time, More, Close), four compact
+  tiles in one row, tabs (Recent prints | By printer | By file) and a list of jobs that scrolls inside its own box (date, printer, file, result, grams,
+  cost; tap a job for its details). The page no longer scrolls; the first job row starts at y=212 instead of 368.
+
+### Changed (History, every layout)
+
+- The "By file" table shows the file name as it was written (`display`, new in `/api/stats` `by_file`; `file` stays the lower-case matching key).
+  The cost tile says "filament only" once, the tiles are tighter (the tables start about 70 px higher at 1024x600), and the "Print-time costs: switch
+  on in Settings" link moved into **More**.
+- Library "save from printer" keeps a PrusaLink file under its long name instead of failing on `NAME~1.GCO`.
+
+- **"First layer done" alert** with a camera picture ("Check the picture: is it sticking?"), once per print. Detected from the layer count (Bambu, Klipper when the slicer reports layers), else from nozzle height held up for 20 s (Klipper, PrusaLink; z-hops ignored), else a timer for OctoPrint (`notifications.first_layer_fallback_min`, default 8, 0 = off). Never sent for a print already under way when the Hub starts. Toggle: `notifications.first_layer_done`.
+- **Camera address for any printer.** Every printer type has an optional "Camera address": an `rtsp://` / `rtsps://` stream
+  (read with ffmpeg, one shared process per printer, only while someone is watching) or an `http(s)://` JPEG picture URL. It replaces
+  the printer's own camera (e.g. a Prusa Buddy3D camera `rtsp://<ip>/live` on a Core One). A `user:password@` in the address is kept
+  private (shown as `rtsp://***@host/...`, never logged). Test connection grabs one frame. The Docker image installs ffmpeg by default
+  (`--build-arg WITH_FFMPEG=0` for a lite image; RTSP cameras then report "need the full image").
+
+- **File detail sheet.** Tap a file in the list (any printer, any layout) for a big picture, the full long name, print time, filament weight and
+  material(s), layer height and nozzle where the file says them, size, date, storage, the estimated cost (filament only, or with power + wear)
+  and when the file was last printed, with Print / Delete / Rename / Back. The details load when the sheet opens.
+- **Material badge** on every file row, just before Print, as words (`PETG`, `PLA`, `PLA PETG`, ...): Bambu from the cached `.3mf`
+  metadata, PrusaLink from the slicer's file name (and the file head of a `.bgcode` when the printer is idle), Klipper from its
+  file metadata, OctoPrint from the end of the `.gcode` (one small ranged read). Unknown = no badge.
+- **PrusaLink (Core One class) files**: long names, sizes, print time, material and pictures; the list now includes the `.bgcode`
+  files (a printer shows them as `NAME~1.BGC`, which the old filter dropped); Delete works with the same two-tap flow.
+  Pictures are read from the printer's own thumbnail service on first use and cached. Every file without a picture says NO PICTURE.
+
+### Changed
+
+- **Pre-heat heats the bed only, with one set of numbers.** The quick Pre-heat buttons (5-inch wall screen, 10-inch kiosk, dashboard) and
+  the preset names of the `preheat` tool send a bed temperature and no nozzle temperature (the printer heats the nozzle itself for a
+  filament change or a print). The temperatures are three Settings (Printers & safety, "Pre-heat bed"): PLA 60, PETG 80, ABS 100 C, and
+  every screen reads them. The old nozzle/bed preset list is gone (an agent can still pass an explicit `nozzle`). Buttons say it in words
+  ("PLA bed 60°"); the auto-off still switches the heaters off.
+
+- **Costs are filament only by default.** The History "Cost" tile, per-job costs, true cost per part, wasted-on-failures, the CSV
+  `total_cost`, the REST API (`/api/stats`, `/api/jobs`, `/api/jobs/{id}`, `/api/costs/file`) and the MCP tools (`recent_jobs`,
+  `job_stats`, `cost_per_part`) now report the FILAMENT cost; power and machine wear (which came from rates most people never set)
+  are opt-in via **Settings → Costs → Include print time costs** (`costs.include_machine_costs`, off by default). `material`,
+  `electricity` and `wear` are still in every response, plus `total_with_machine` and `includes_machine_costs`; `?machine=1` /
+  `?machine=0` (MCP: `include_machine_costs`) override the setting per request. The History page puts the period, the switch and More (CSV) in one toolbar row, and says "Filament only" or lists
+  Filament / Power / Wear in words, and has a **Filament only / + Print time** switch for that view (not saved).
+- **5-inch wall screen (`/dashboard?layout=5in`) redesigned.** Same-size cards for every printer (name + state, picture or a "NO CAMERA /
+  CAMERA OFFLINE" panel, big number or word + ETA + file, bar, temperatures, `Spaghetti: WATCHING / LEARNING / READY / OFF / NO CAMERA`).
+  The printer screen shows the live camera (the same MJPEG stream as the enlarged view; snapshots if it fails), a control row (Left / Layer /
+  Done while printing, the AMS slots on an AMS printer, PLA / PETG / ABS pre-heat when idle), a per-printer Spaghetti on/off switch (adds /
+  removes the printer from Settings > Detection > "Do not watch these printers"), a status panel instead of the picture when there is no
+  camera, and a 56 px action strip with Files as the primary button. A second look, `?layout=5in&theme=bridge`, re-skins the same screens
+  (remembered per screen in the browser; `theme=quiet` switches back). The fonts (Inter, JetBrains Mono, Antonio; SIL OFL) ship with the Hub.
+  The 1024x600, desktop and phone layouts are unchanged.
+- `/api/printer/<name>` `detection` now also says `learn` (learn-only mode) and `alerts`; `/api/detection` `setup` lists `excluded_printers`.
+  A printer excluded from detection reads "Off for this printer" before the detector has looked at it for the first time.
+
+- **PrusaLink setup has one secret: Password.** An API key pasted there works too (the Hub tries digest login first, then the key).
+  Username, storage, model and camera address are "advanced" fields. Saved printers are migrated (old `snapshot_url` becomes the
+  camera address, an old API key becomes the password). Address fields say that `http://` is added for you.
+
 ## [1.0.0] - 2026-10-13
 
 ### Fixed
@@ -22,6 +164,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `spool_memory.json` in the data folder (owner-only, last 500 files). The next proposal for the same file on the same printer starts from
   those spools, even if they moved to another slot, and says so ("Same spools as your last print of this file (Oct 13)"); if one is no
   longer loaded the normal proposal is used. Agents see the same note. It only changes the proposal: nothing starts without the human.
+
+- **Filter the main page by printer group.** `/dashboard?group=Work` shows only that group's printers (several `group=` = union, case-insensitive;
+  an unknown or deleted group shows everyone plus a "not found" notice). A chip row "All / Work / Home" (only when groups exist) switches it and
+  rewrites the URL, so a reload, bookmark or wall kiosk keeps the choice; the active chip is inverted + bold + underlined + ticked, never colour alone.
+  Client side only (`/api/fleet` already carries each printer's groups).
+
+- **5-inch wall-screen layout.** `/dashboard?layout=5in` (combine with `group=`, e.g. `?group=Home&layout=5in`) is a compact Home screen for an
+  800x480 touchscreen (a Raspberry Pi 5-inch panel): a 48 px header with the pages behind **More**, one row of group chips, and the printers as
+  tiles (1-2 = one big row, 3-4 = 2x2, 5-6 = 3 across, more scroll inside the grid) with name, a state word, job, progress bar + %, "Done ~5:08 PM"
+  and temperatures on one line, no camera on the tiles, no page scroll; text is 14 px or more and every target 44 px or more. It is opt-in only (never
+  detected from the screen size, so landscape phones keep their layout), is read once at load, and survives the group chips. The "HUB NOT RESPONDING"
+  banner stays on screen. Every other layout is unchanged.
 
 - **Name: Fabrica** (title "Fabrica — Print Farm"). README, About screen and the Home Screen app name; repository, image and container stay `fabrica`.
 

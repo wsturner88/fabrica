@@ -209,8 +209,10 @@ def resolved_from_file_entry(entry, material=None, kind=None) -> dict:
     material; pass `material` if known, else PLA is assumed). One part per print is assumed."""
     if not isinstance(entry, dict):
         return {}
-    mat = material or "PLA"
-    grams = _costs.grams_from_mm(entry.get("filament_mm"), mat)
+    mat = material or entry.get("filament_type") or "PLA"
+    w = entry.get("weight_g")
+    grams = round(float(w), 2) if isinstance(w, (int, float)) and not isinstance(w, bool) and w > 0 \
+        else _costs.grams_from_mm(entry.get("filament_mm"), mat)
     return normalize_resolved({
         "file": entry.get("name"), "grams": grams, "seconds": entry.get("print_seconds"),
         "parts": 1, "parts_source": "assumed", "material": mat if grams else material,
@@ -1005,11 +1007,63 @@ class JobLog:
         return {"attempts": sum(1 for r in rows if r["result"] in ("finished", "failed", "cancelled")),
                 "finished": count("finished"), "failed": count("failed"), "cancelled": count("cancelled"),
                 "running": count("running"), "names": names}
+    def last_printed(self, names) -> dict:
+        """The newest finished / failed / cancelled attempt of a file, under any of the given names (a printer's
+        file list and its job names can differ: the short name vs the long name). None when the log has none.
+        -> {"printer", "result", "ts" (epoch s), "when" (ISO), "percent", "attempts"}"""
+        best, attempts, seen = None, 0, set()
+        for nm in names or []:
+            if not nm or _costs.file_key(nm) in seen:
+                continue
+            seen.add(_costs.file_key(nm))
+            try:
+                rows, _key, _rmap = self._rows_for_file(nm)
+            except ValueError:
+                continue
+            for r in rows:
+                if r.get("result") not in ("finished", "failed", "cancelled"):
+                    continue
+                attempts += 1
+                ts = r.get("ended_at") or r.get("started_at") or 0
+                if best is None or ts > best[0]:
+                    best = (ts, r)
+        if best is None:
+            return None
+        ts, r = best
+        return {"printer": r.get("printer"), "result": r.get("result"), "ts": ts, "when": self._iso(ts),
+                "percent": r.get("percent"), "attempts": attempts}
     # ==== end rename ====
+
+    def last_printed_for(self, printer, files) -> list:
+        """When each of several files was last printed on ONE printer, answered with a single query for the whole list.
+        `files` = one tuple of names per file (the short name and the long one); the answer is a list of the same length:
+        epoch seconds of the newest attempt of any result (a print still running counts from its start), or None. Rename links are followed."""
+        pc = _printer_clause(printer)
+        if not pc or not files:
+            return [None for _ in files or []]
+        rmap = self._renames_map()
+        seen = {}
+        for r in self._q("SELECT printer, file, file_key, started_at, ended_at FROM jobs WHERE " + pc[0], tuple(pc[1])):
+            ts = r.get("ended_at") or r.get("started_at") or 0
+            key = r.get("file_key") or _costs.file_key(r.get("file"))
+            if not key or not ts:
+                continue
+            key = self._canonical(r["printer"], key, rmap)[0]
+            if ts > seen.get(key, 0):
+                seen[key] = ts
+        out = []
+        for names in files:
+            best = 0
+            for n in names:
+                k = _costs.file_key(n)
+                if k:
+                    best = max(best, seen.get(self._canonical(printer, k, rmap)[0], 0))
+            out.append(best or None)
+        return out
 
     # ---- queries ----------------------------------------------------------
 
-    def _public(self, r: dict, with_cost=True, rmap=None) -> dict:
+    def _public(self, r: dict, with_cost=True, rmap=None, include_machine=None) -> dict:
         d = dict(r)
         # ==== rename ====
         if rmap:                                # a renamed file shows its newest name (the stored row is untouched)
@@ -1034,7 +1088,7 @@ class JobLog:
             if d["open"] or d["result"] == "unknown":
                 d["cost"] = None
             else:
-                d["cost"] = _costs.job_cost(d, rates)
+                d["cost"] = _costs.job_cost(d, rates, include_machine)
         return d
 
     def _iso(self, ts):
@@ -1042,8 +1096,9 @@ class JobLog:
             return None
         return datetime.datetime.fromtimestamp(ts, self.tz).isoformat(timespec="seconds")
 
-    def recent_jobs(self, limit=50, printer=None, result=None) -> list:
-        """Newest first. `printer` filters (case-insensitive); `result` is one of RESULTS."""
+    def recent_jobs(self, limit=50, printer=None, result=None, include_machine=None) -> list:
+        """Newest first. `printer` filters (case-insensitive); `result` is one of RESULTS.
+        Each job's cost `total` is filament only unless machine costs are on (setting, or include_machine=True)."""
         limit = max(1, min(int(limit or 50), 1000))
         where, args = [], []
         pc = _printer_clause(printer)
@@ -1058,11 +1113,11 @@ class JobLog:
         sql = "SELECT * FROM jobs" + (" WHERE " + " AND ".join(where) if where else "") + \
               " ORDER BY COALESCE(started_at, ended_at) DESC, id DESC LIMIT ?"
         rmap = self._renames_map()      # ==== rename ====
-        return [self._public(r, rmap=rmap) for r in self._q(sql, (*args, limit))]
+        return [self._public(r, rmap=rmap, include_machine=include_machine) for r in self._q(sql, (*args, limit))]
 
-    def job(self, job_id):
+    def job(self, job_id, include_machine=None):
         rows = self._q("SELECT * FROM jobs WHERE id=?", (int(job_id),))
-        return self._public(rows[0], rmap=self._renames_map()) if rows else None
+        return self._public(rows[0], rmap=self._renames_map(), include_machine=include_machine) if rows else None
 
     def _window(self, period, printer=None, now=None):
         secs = _period_seconds(period)
@@ -1081,16 +1136,21 @@ class JobLog:
         rmap = self._renames_map()      # ==== rename ====
         return since, now, [self._public(r, with_cost=False, rmap=rmap) for r in rows]
 
-    def stats(self, period="month", printer=None, now=None, series_bucket=None, group_members=None) -> dict:
+    def stats(self, period="month", printer=None, now=None, series_bucket=None, group_members=None,
+              include_machine=None, file_order="recent") -> dict:
         """Totals for the trailing `period` (day = 24 h, week = 7 d, month = 30 d, year, all, or
         '<N>d'), optionally one printer: counts, success rate, hours, grams, cost split, clean and
         true cost per part, and breakdowns by printer, material and file (with the material
-        series per day / week / month)."""
+        series per day / week / month). Every cost total is filament only unless machine costs are on (the Costs
+        setting, or include_machine=True); `includes_machine_costs` says which, `total_with_machine` always has the full sum.
+        `by_file` lists the 25 files printed most recently first (`last_ts` = when the newest attempt was), or with
+        file_order="spend" the 25 that cost the most first."""
         since, until, rows = self._window(period, printer, now)
         rates = self.rates()
+        incl = _costs.includes_machine(rates, include_machine)
         out = {"period": period, "since": since, "until": until, "printer": _printer_echo(printer),
                "currency": rates.currency}
-        out.update(_costs.aggregate(rows, rates))
+        out.update(_costs.aggregate(rows, rates, incl))
         by_printer, by_file, by_mat = {}, {}, {}
         for r in rows:
             by_printer.setdefault(r["printer"], []).append(r)
@@ -1102,27 +1162,34 @@ class JobLog:
                 "good_parts", "true_cost_per_part", "clean_cost_per_part")
         out["by_printer"] = {}
         for k, v in sorted(by_printer.items()):
-            a = _costs.aggregate(v, rates)
+            a = _costs.aggregate(v, rates, incl)
             out["by_printer"][k] = {s: a[s] for s in slim}
             out["by_printer"][k]["cost_total"] = a["cost"]["total"]
+            out["by_printer"][k]["cost_total_with_machine"] = a["cost"]["total_with_machine"]
         files = []
         for k, v in by_file.items():
-            a = _costs.aggregate(v, rates)
-            files.append({"file": k, **{s: a[s] for s in slim}, "cost_total": a["cost"]["total"]})
-        files.sort(key=lambda f: (-f["cost_total"], f["file"]))
+            a = _costs.aggregate(v, rates, incl)
+            newest = max(v, key=lambda r: r.get("ended_at") or r.get("started_at") or 0)      # how the newest attempt spelled the name
+            files.append({"file": k, "display": _costs.file_label(newest.get("file")) or k, **{s: a[s] for s in slim}, "cost_total": a["cost"]["total"],
+                          "cost_total_with_machine": a["cost"]["total_with_machine"], "last_ts": newest.get("ended_at") or newest.get("started_at")})
+        if str(file_order or "recent").lower() == "spend":
+            files.sort(key=lambda f: (-f["cost_total"], f["file"]))
+        else:
+            files.sort(key=lambda f: (-(f["last_ts"] or 0), f["file"]))
         out["by_file"] = files[:25]
         out["by_material"] = by_mat
         bucket = series_bucket or ("month" if str(period).lower() in ("year", "all") else "day")
         out["material_series"] = _costs.material_series(rows, bucket, self.tz)
         out["series_bucket"] = bucket
         if group_members is not None:         # [{"name", "printers"}]: the By-group summary, over the same filtered rows
-            out["by_group"] = self.by_group(rows, rates, group_members, keep_empty=printer is None or printer == "")
+            out["by_group"] = self.by_group(rows, rates, group_members, keep_empty=printer is None or printer == "",
+                                         include_machine=incl)
         return out
 
     # ---- printer groups ---------------------------------------------------
 
     @staticmethod
-    def by_group(rows, rates, group_members, keep_empty=True) -> list:
+    def by_group(rows, rates, group_members, keep_empty=True, include_machine=None) -> list:
         """Summary per group over `rows` (already filtered): prints, success, hours, material, cost. A printer in two
         groups counts in BOTH, so the rows do not add up to the total; printers in no group are summed on a
         last row with "group": None (only shown when at least one group exists). Groups with no prints in the
@@ -1131,14 +1198,17 @@ class JobLog:
                 "grams_used", "good_parts", "true_cost_per_part", "clean_cost_per_part")
 
         def summary(sub):
-            a = _costs.aggregate(sub, rates)
+            a = _costs.aggregate(sub, rates, include_machine)
             mats = {}
             for r in sub:
                 if r["result"] in ("finished", "failed", "cancelled"):
                     for t, g in _costs.material_grams(r).items():
                         mats[t] = round(mats.get(t, 0.0) + g, 2)
             return {**{k: a[k] for k in slim}, "cost_total": a["cost"]["total"],
-                    "wasted_on_failures": a["cost"]["wasted_on_failures"], "by_material": mats}
+                    "cost_total_with_machine": a["cost"]["total_with_machine"],
+                    "wasted_on_failures": a["cost"]["wasted_on_failures"],
+                    "wasted_with_machine": a["cost"]["wasted_with_machine"],
+                    "includes_machine_costs": a["includes_machine_costs"], "by_material": mats}
 
         out, grouped = [], set()
         for g in group_members or []:
@@ -1159,21 +1229,23 @@ class JobLog:
         _, _, rows = self._window(period, printer, now)
         return _costs.material_series(rows, bucket, self.tz)
 
-    def file_costs(self, name, last_n=None, printer=None) -> dict:
-        """Cost per part for one file over its last N attempts (default: the Costs 'window_n')."""
+    def file_costs(self, name, last_n=None, printer=None, include_machine=None) -> dict:
+        """Cost per part for one file over its last N attempts (default: the Costs 'window_n').
+        Filament only unless machine costs are on (setting, or include_machine=True)."""
         rows, key, rmap = self._rows_for_file(name, printer)     # ==== rename ==== (every name the file has had)
         rates = self.rates()
         out = {"file": name, "file_key": key, "printer": _printer_echo(printer), "currency": rates.currency}
         fam = self._family(key, rmap)
         if len(fam) > 1:
             out["names"] = sorted({nf for (_l, _ok), (nk, nf) in rmap.items() if nk in fam and nf}, key=str.casefold)
-        out.update(_costs.file_costs(rows, rates, last_n))
+        out.update(_costs.file_costs(rows, rates, last_n, include_machine))
         out["running"] = sum(1 for r in rows if r["result"] == "running")
         return out
 
     CSV_COLUMNS = ["id", "printer", "model", "file", "plate", "started", "ended", "duration_min", "result",
                    "percent", "est_min", "grams_est", "grams_used", "material", "colour", "parts", "pauses",
-                   "material_cost", "electricity_cost", "wear_cost", "total_cost", "cost_per_part", "error"]
+                   "material_cost", "electricity_cost", "wear_cost", "total_cost", "cost_per_part", "error",
+                   "total_with_print_time_cost", "total_includes_print_time"]
 
     # characters a spreadsheet reads as the start of a formula - the ASCII ones and their full-width / math look-alikes
     _CSV_TRIGGERS = frozenset("=+-@\t\r" "\uff1d\uff0b\uff0d\uff20" "\u2212\u2013\u2014\ufe62\ufe63\ufe66")
@@ -1196,9 +1268,10 @@ class JobLog:
             return "'" + v
         return v
 
-    def export_csv(self, printer=None, period="all", fp=None, now=None) -> str:
-        """All jobs in the period as CSV (oldest first), with costs at the current rates.
-        Writes to `fp` if given; always returns the text."""
+    def export_csv(self, printer=None, period="all", fp=None, now=None, include_machine=None) -> str:
+        """All jobs in the period as CSV (oldest first), with costs at the current rates. `total_cost` and
+        `cost_per_part` are filament only unless machine costs are on (setting, or include_machine=True);
+        the material / electricity / wear columns are always filled. Writes to `fp` if given; always returns the text."""
         _, _, rows = self._window(period, printer, now)
         rates = self.rates()
         buf = io.StringIO()
@@ -1206,7 +1279,7 @@ class JobLog:
         csv.writer(buf, lineterminator="\n").writerow(self.CSV_COLUMNS)
         w = csv.writer(buf, lineterminator="\n", quoting=csv.QUOTE_ALL)
         for r in rows:
-            j = self._public(r)
+            j = self._public(r, include_machine=include_machine)
             c = j.get("cost") or {}
             w.writerow([self._csv_safe(x) if x is not None else "" for x in [
                 j["id"], j["printer"], j["model"], j["file"], j["plate"], j["started_iso"], j["ended_iso"],
@@ -1214,7 +1287,8 @@ class JobLog:
                 j["percent"], None if j["est_seconds"] is None else round(j["est_seconds"] / 60, 1),
                 j["grams_est"], j["grams_used"], j["material"], j["colour"], j["parts"], j["pauses"],
                 c.get("material"), c.get("electricity"), c.get("wear"), c.get("total"), c.get("per_part"),
-                j["error"]]])
+                j["error"], c.get("total_with_machine"),
+                None if not c else ("yes" if c.get("includes_machine_costs") else "no")]])
         text = buf.getvalue()
         if fp is not None:
             fp.write(text)

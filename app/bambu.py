@@ -14,6 +14,7 @@ in LAN-only mode; A1 fw 01.08.01.00 in cloud mode) on 2026-08-20:
 """
 
 import base64
+import datetime
 import hashlib
 import http.client
 import io
@@ -39,6 +40,17 @@ from controls import ControlUnsupported
 class PrinterError(Exception):
     """Raised for a printer/backend failure that should be shown to a human,
     not surfaced as an unhandled exception / 500."""
+
+
+class PrinterUnreachable(PrinterError):
+    """The network could not carry the request at all (timeout, refused, no route). Nothing reached the
+    printer. Distinct from a printer that answered and said no: it is a transient fault, never a reason
+    to "reconnect" anything (the Hub answers it with 503, not 500/409)."""
+
+
+class ConnectNeedsConfirm(PrinterError):
+    """connect_serial() found the printer's controller in a real error state and a restart is the fix, but a
+    human has not confirmed it. Nothing was sent. The message is the question to put to the human."""
 
 
 class PrinterBusy(PrinterError):
@@ -201,6 +213,43 @@ class ImplicitFTPTLS(FTP_TLS):
 # ---------------------------------------------------------------- helpers
 
 _MISSING = object()
+
+
+_LIST_MONTHS = {m: i for i, m in enumerate(("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"), 1)}
+
+
+def ftp_list_epoch(text, now=None):
+    """A date from an FTP `LIST` line -> epoch seconds (like the other printer drivers give), or None when it cannot be read.
+
+    LIST dates have no year: `Mon DD HH:MM` is a file from the last ~6 months (this year, or LAST year when this year would
+    put it in the future) and `Mon DD  YYYY` an older one (midnight). The printer's own clock zone is not told, so the Hub's
+    local time is used: a few hours of slack, which does not matter for ordering files."""
+    m = re.fullmatch(r"\s*([A-Za-z]{3})\w*\s+(\d{1,2})\s+(?:(\d{1,2}):(\d{2})|(\d{4}))\s*", str(text or ""))
+    if not m or m.group(1).lower() not in _LIST_MONTHS:
+        return None
+    mon, day = _LIST_MONTHS[m.group(1).lower()], int(m.group(2))
+    now = time.time() if now is None else float(now)
+    try:
+        if m.group(5):
+            return datetime.datetime(int(m.group(5)), mon, day).timestamp()
+        hh, mm = int(m.group(3)), int(m.group(4))
+        year = datetime.datetime.fromtimestamp(now).year
+        for y in (year, year - 1):
+            try:
+                t = datetime.datetime(y, mon, day, hh, mm).timestamp()
+            except ValueError:                       # 29 Feb in a year without one: it belongs to the earlier (leap) year
+                continue
+            if t <= now + 86400:                     # a day of slack for the clocks of printer and Hub
+                return t
+    except (ValueError, OverflowError, OSError):
+        pass
+    return None
+
+
+def _list_modified(text, now=None):
+    """The `modified` field of a listed file: epoch seconds, or the printer's own text when it is not a date we can read."""
+    t = ftp_list_epoch(text, now)
+    return int(t) if t is not None else (text if isinstance(text, (int, float)) else str(text or ""))
 
 
 def _close_ftp(f):
@@ -1102,7 +1151,8 @@ class BambuPrinter:
                     or (doc.get("serial") or "") != (self.serial or ""):
                 return None
             taken = float(doc["taken_at"])
-            rows = [{"name": r["name"], "size": int(r["size"]), "modified": str(r.get("modified", ""))}
+            # (a listing kept by an older Hub holds the printer's text date, "Jun 20 03:25": read it against the day it was taken)
+            rows = [{"name": r["name"], "size": int(r["size"]), "modified": _list_modified(r.get("modified", ""), taken)}
                     for r in doc["files"] if isinstance(r, dict) and isinstance(r.get("name"), str)]
             return (taken, rows)
         except (OSError, ValueError, KeyError, TypeError):
@@ -1151,7 +1201,7 @@ class BambuPrinter:
             m = re.match(r"[-rwx]{10}\s+\d+\s+\S+\s+\S+\s+(\d+)\s+(\w+\s+\d+\s+[\d:]+)\s+(.+)$", r)
             if m and m.group(3).lower().endswith(".3mf"):
                 out.append({"name": m.group(3), "size": int(m.group(1)),
-                            "modified": m.group(2)})
+                            "modified": _list_modified(m.group(2))})
         self._sd_cache = (time.time(), [dict(r) for r in out])
         self._sd_persist(*self._sd_cache)
         return out
@@ -1185,7 +1235,7 @@ class BambuPrinter:
             m = self._LIST_RE.match(r)       # 'd...' (folders) and 'l...' (links) never match
             if m and not m.group(3).startswith(".") and m.group(3).lower().endswith(".3mf"):
                 out.append({"name": f"{d}/{m.group(3)}", "size": int(m.group(1)),
-                            "modified": m.group(2)})
+                            "modified": _list_modified(m.group(2))})
         return out
 
     def sd_download(self, filename: str, max_bytes: int = None) -> bytes:
@@ -1409,16 +1459,43 @@ class OctoPrintPrinter:
     def refresh(self, wait=0):
         pass
 
-    def connect_serial(self):
-        """Ask OctoPrint to open its serial connection to the printer, using its
-        saved port/baud defaults. Invalidates the snapshot cache so the next poll
-        picks up the change immediately."""
+    # OctoPrint's own words for a serial link that is NOT open (GET /api/connection -> current.state). Anything
+    # else (Operational, Connecting, Printing, Paused, Cancelling, ...) means the link exists: a "connect"
+    # would close it and open it again, which kills a running print.
+    _LINK_CLOSED = ("closed", "offline", "error")
+
+    def connect_serial(self, confirm_restart=False):
+        """Ask OctoPrint to open its serial connection to the printer (saved port/baud) - but ONLY when the link
+        is closed. A reachable OctoPrint whose link is already up (idle or printing) gets nothing: re-sending
+        "connect" makes OctoPrint close and reopen the port, which aborts a print. Unreachable OctoPrint:
+        nothing sent (PrinterUnreachable). `confirm_restart` is accepted for parity with Moonraker and ignored.
+        Invalidates the snapshot cache so the next poll picks up the change immediately."""
+        try:
+            cur = self._get("/api/connection")
+        except urllib.error.HTTPError as e:
+            raise PrinterError(f"OctoPrint refused to report its connection state ({e.code} {e.reason}); "
+                               "nothing was sent.") from e
+        except NET_ERRORS as e:
+            raise PrinterUnreachable(f"Can't reach OctoPrint at {self.url} (network): {scrub_text(e)}. "
+                                     "Nothing was sent.") from e
+        except ValueError as e:
+            raise PrinterError(f"{self.url} did not answer like OctoPrint (not JSON); nothing was sent.") from e
+        state = str(((cur or {}).get("current") or {}).get("state") or "") if isinstance(cur, dict) else ""
+        low = state.strip().lower()
+        if not low:
+            raise PrinterError("OctoPrint did not say what its connection state is; nothing was sent.")
+        if not low.startswith(self._LINK_CLOSED):
+            self._last_ts = 0.0
+            if any(w in low for w in ("print", "paus", "cancel", "finish", "resum", "sending", "transfer", "starting")):
+                raise PrinterBusy(f"{self.name} is busy ({state}); connect is never sent to a printer that is "
+                                  "printing - nothing was sent.")
+            return f"{self.name} is already connected ({state}); nothing was sent."
         try:
             self._post("/api/connection", {"command": "connect"})
         except urllib.error.HTTPError as e:
             raise PrinterError(f"OctoPrint refused the connect command ({e.code} {e.reason}).") from e
         except NET_ERRORS as e:
-            raise PrinterError(f"Could not reach OctoPrint at {self.url}: {scrub_text(e)}") from e
+            raise PrinterUnreachable(f"Could not reach OctoPrint at {self.url}: {scrub_text(e)}") from e
         self._last_ts = 0.0
         return f"connect requested for {self.name}"
 
@@ -1544,6 +1621,24 @@ class OctoPrintPrinter:
         except NET_ERRORS as e:
             raise PrinterError(f"Could not reach OctoPrint at {self.url}: {scrub_text(e)}") from e
         return data[:nbytes]
+
+    def download_tail(self, filename: str, size: int, nbytes: int = 65536):
+        """The last `nbytes` of a gcode file (PrusaSlicer / Orca write their config block - material, layer height - at the
+        END). Needs the file size (from the listing). Returns None when the server ignored the Range header (a 200 would
+        be the whole file; it is never read) and b"" for an empty file. Same auth and path-encoding as download_head."""
+        if not isinstance(size, int) or size <= 0:
+            return b""
+        start = max(0, size - nbytes)
+        path = "/downloads/files/local/" + urllib.parse.quote(filename, safe="/")
+        try:
+            with self._get_raw(path, headers={"Range": f"bytes={start}-{size - 1}"}) as r:
+                if start > 0 and getattr(r, "status", 206) != 206:
+                    return None
+                return r.read(nbytes + 1)[-nbytes:]
+        except urllib.error.HTTPError as e:
+            raise PrinterError(f"OctoPrint refused the file download ({e.code} {e.reason}).") from e
+        except NET_ERRORS as e:
+            raise PrinterError(f"Could not reach OctoPrint at {self.url}: {scrub_text(e)}") from e
 
     # ==== rename ====
     def download(self, filename: str, max_bytes: int = FILE_MAX_BYTES) -> bytes:

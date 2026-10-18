@@ -5,6 +5,7 @@ already has - {printer name: snapshot dict} as returned by driver.snapshot() - a
 watcher compares them with what it saw last time:
 
     started     idle/finished/failed -> RUNNING
+    first_layer_done   once per run: layer >= 2, or Z risen and held (and a timer for printers with neither)
     finished    an active job -> FINISH (or back to IDLE having reached ~100 %)
     failed      an active job -> FAILED, or cancelled (back to IDLE well short of done)
     paused      RUNNING/PREPARE -> PAUSE, with the printer's error text when it gives one
@@ -25,10 +26,27 @@ Guard rails:
     so a print that finishes while the Wi-Fi is down is still reported once it returns.
 
 Messages are plain words (FAILED, PAUSED, OFFLINE) - never colour or emoji alone.
+
+The "finished" message also says when it finished, how long it took against the slicer's prediction,
+what material it used and (if the Hub address is set) links back to the Hub. Where the prediction
+comes from, per printer type:
+  * file facts - `job_facts(printer, job)` (the Hub's job-log resolver, caches only): Bambu 3mf
+    `prediction`, and the gcode's estimated print time that OctoPrint / PrusaLink / Moonraker report
+    in their file listings;
+  * otherwise the printer's own remaining-time reading in the first moments of the print
+    (elapsed + remaining), taken once while the print is still under 10 %.
+The run (start time, prediction, pauses, materials) is saved to `print_runs.json` in the data
+directory, so a Hub restart in the middle of a print still reports the right numbers.
 """
 
+import datetime
+import html as _html
+import json
+import os
+import re
 import threading
 import time
+import urllib.parse
 
 import settings_store as ss
 
@@ -41,7 +59,7 @@ class Event:
     `image_fn` fetches one lazily (the Notifier only calls it when it will actually send)."""
 
     def __init__(self, kind, printer, title, body, level=None, ts=None, data=None,
-                 image=None, image_fn=None, dedupe_key=""):
+                 image=None, image_fn=None, dedupe_key="", html=None):
         self.kind = kind
         self.printer = printer or ""
         self.title = title
@@ -52,6 +70,7 @@ class Event:
         self.image = image
         self.image_fn = image_fn
         self.dedupe_key = dedupe_key
+        self.html = html                  # optional Telegram-flavoured twin of title+body (channels that cannot show it use title/body)
         self._image_done = image is not None
 
     def get_image(self):
@@ -95,6 +114,67 @@ def _num(v):
         return None
 
 
+def fmt_hm(seconds) -> str:
+    """Compact duration for the "finished" message: '2h 41m', '3h', '41m', '<1m'."""
+    try:
+        s = int(round(float(seconds)))
+    except (TypeError, ValueError):
+        return ""
+    if s < 60:
+        return "<1m"
+    h, m = divmod(s // 60, 60)
+    return (f"{h}h {m}m" if m else f"{h}h") if h else f"{m}m"
+
+
+_JOB_EXT = re.compile(r"\.(gcode\.3mf|gcode|bgcode|3mf|ufp)$", re.I)
+
+
+def friendly_job(job) -> str:
+    """A job name as a person would say it: no .gcode / .3mf tail; '' for the 'no name' placeholder."""
+    j = " ".join(str(job or "").split())
+    if j.lower() in ("", "the current job"):
+        return ""
+    return _JOB_EXT.sub("", j) or j
+
+
+def time_verdict(took_s, predicted_s) -> str:
+    """'on time' | 'N min early' | 'N min late' (N becomes '1h 05m' past an hour). On time = within 2 min or 2 %."""
+    delta = took_s - predicted_s
+    if abs(delta) <= max(120.0, 0.02 * predicted_s):
+        return "on time"
+    mins = max(1, int(round(abs(delta) / 60.0)))
+    amount = f"{mins} min" if mins < 60 else fmt_hm(mins * 60)
+    return f"{amount} {'early' if delta < 0 else 'late'}"
+
+
+def material_summary(filaments) -> list:
+    """[(type, grams|None)] with the same material merged (two PLA spools = one PLA line), unused ones dropped."""
+    out, order = {}, []
+    for f in filaments or []:
+        if not isinstance(f, dict):
+            continue
+        g = _num(f.get("used_g"))
+        if g is not None and g <= 0:
+            continue
+        t = str(f.get("type") or "").strip().upper()
+        if not t and g is None:
+            continue
+        t = t or "filament"
+        if t not in out:
+            out[t] = None
+            order.append(t)
+        if g is not None:
+            out[t] = (out[t] or 0.0) + g
+    return [(t, out[t]) for t in order]
+
+
+def material_text(filaments) -> str:
+    parts = []
+    for t, g in material_summary(filaments):
+        parts.append(f"{t} {max(1, int(round(g)))} g" if g is not None else t)
+    return " + ".join(parts)
+
+
 class _P:
     """What we remember about one printer."""
 
@@ -115,13 +195,41 @@ class _P:
         self.last_recovered = None   # monotonic time of the last "back online" notice (flap hysteresis)
         self.up_since = None         # first reachable snapshot after an outage
         self.last_state_before_outage = None
+        self.run_reset()
+        self.fl_reset()
+
+    def run_reset(self):
+        """Per-print-run facts for the "finished" message (also saved to disk, see EventWatcher._save_run)."""
+        self.pred_s = None           # the slicer's predicted total (seconds), once known
+        self.pred_src = ""           # "file" (job facts) | "remaining" (printer's own estimate at the start)
+        self.paused_s = 0.0          # seconds spent paused this run
+        self.pause_since = None      # monotonic time the current pause began
+        self.mats = []               # [{"type", "used_g"}] from the job facts
+        self.facts_tries = 0
+        self.facts_m = None
+        self.saved_sig = None
+
+    def fl_reset(self):
+        """Per-print-run state of the "first layer done" detector."""
+        self.fl_done = False         # already fired (or deliberately skipped) for this run
+        self.fl_seen_low = False     # a layer number <= 1 was seen in this run (guards a stale layer from the last print)
+        self.fl_base = None          # lowest Z (mm) seen this run = the first-layer height
+        self.fl_since = None         # monotonic time Z first sat in the "second layer" window
+        self.fl_polls = 0            # consecutive updates inside that window
+        self.fl_run_s = 0.0          # seconds spent RUNNING this run (fallback timer)
+        self.fl_last_m = None
 
 
 class EventWatcher:
     def __init__(self, sink, settings=None, snapshot_fetcher=None, clock=time.time,
                  offline_grace_s=90, confirm_s=5, mono=None, baseline_offline_grace_s=900,
-                 flap_hold_s=600):
+                 flap_hold_s=600, first_layer_hold_s=20, job_facts=None, state_path=None):
         self.sink = sink
+        self.job_facts = job_facts               # callable(printer, job) -> {"seconds", "filaments": [{"type","used_g"}]} (caches only)
+        if state_path is None and settings is not None and getattr(settings, "dir", None):
+            state_path = os.path.join(settings.dir, "print_runs.json")
+        self.state_path = state_path             # where the running prints are remembered across a Hub restart
+        self._runs = None
         self.settings = settings
         self.fetch = snapshot_fetcher            # callable(printer_name) -> JPEG bytes | None
         self.clock = clock
@@ -134,6 +242,7 @@ class EventWatcher:
         self._baseline_grace = baseline_offline_grace_s   # a printer already off when the Hub started
         self._flap_hold = flap_hold_s            # after "back online", a new "offline" must last 3x longer
         self.confirm_s = confirm_s
+        self.first_layer_hold_s = first_layer_hold_s
         self._p = {}
         self._lock = threading.RLock()
 
@@ -163,6 +272,133 @@ class EventWatcher:
 
     def _t(self, c) -> str:
         return ss.format_temp(c, self._unit())
+
+    def _setting(self, key, default=""):
+        if self.settings is not None:
+            try:
+                v = self.settings.get(key)
+                if v is not None:
+                    return v
+            except Exception:
+                pass
+        return default
+
+    # ---- the running print, remembered across a Hub restart ---------------
+
+    def _load_runs(self) -> dict:
+        if self._runs is None:
+            self._runs = {}
+            if self.state_path:
+                try:
+                    with open(self.state_path, encoding="utf-8") as fh:
+                        d = json.load(fh)
+                    if isinstance(d, dict):
+                        self._runs = {k: v for k, v in d.items() if isinstance(v, dict)}
+                except (OSError, ValueError):
+                    pass
+        return self._runs
+
+    def _write_runs(self):
+        if not self.state_path:
+            return
+        try:
+            os.makedirs(os.path.dirname(self.state_path) or ".", exist_ok=True)
+            tmp = self.state_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(self._runs, fh)
+            os.replace(tmp, self.state_path)
+        except OSError as e:
+            print(f"[events] could not save {self.state_path}: {e}", flush=True)
+
+    @staticmethod
+    def _run_record(p) -> dict:
+        return {"job": p.job, "start_wall": p.run_started_wall, "predicted_s": p.pred_s, "pred_src": p.pred_src,
+                "paused_s": round(p.paused_s, 1), "mats": p.mats}
+
+    def _save_run(self, name, p):
+        """Remember this printer's current run (only when something in it changed)."""
+        if p.run_started_wall is None:
+            return
+        rec = self._run_record(p)
+        sig = json.dumps(rec, sort_keys=True)
+        if sig == p.saved_sig:
+            return
+        p.saved_sig = sig
+        self._load_runs()[name] = rec
+        self._write_runs()
+
+    def _clear_run(self, name):
+        if name in self._load_runs():
+            del self._runs[name]
+            self._write_runs()
+
+    def _restore_run(self, name, p, snap, now):
+        """First sight of a printer mid-print (Hub restarted): pick up the run we saved before, if it is
+        the same job and plausibly the same run. Anything else is dropped."""
+        rec = self._load_runs().get(name)
+        if not rec:
+            return
+        start = _num(rec.get("start_wall"))
+        age = None if start is None else now - start
+        pred = _num(rec.get("predicted_s"))
+        jn, jr = friendly_job(snap.get("job")).lower(), friendly_job(rec.get("job")).lower()
+        if (not p.in_job or age is None or age < 0 or age > 7 * 86400 or (jn and jr and jn != jr)
+                or (pred and age > pred * 3 + 3600)):
+            self._clear_run(name)
+            return
+        p.run_started_wall, p.run_started = start, self._m - age
+        p.pred_s, p.pred_src = (pred if pred and pred > 0 else None), str(rec.get("pred_src") or "")
+        p.paused_s = _num(rec.get("paused_s")) or 0.0
+        p.mats = [m for m in rec.get("mats") or [] if isinstance(m, dict)]
+        p.job = p.job or str(rec.get("job") or "")
+        p.saved_sig = json.dumps(self._run_record(p), sort_keys=True)
+
+    # ---- facts about the run: the slicer's prediction, materials, pauses --
+
+    FACTS_RETRY_S = 60               # the file facts may arrive after the print starts (cache fills): look again this often
+    FACTS_MAX_TRIES = 20
+    REMAINING_MAX_PERCENT = 10       # the printer's own estimate only counts as the "prediction" this early in the print
+
+    def _try_facts(self, name, p):
+        p.facts_m, p.facts_tries = self._m, p.facts_tries + 1
+        if self.job_facts is None or not p.job:
+            return
+        try:
+            res = self.job_facts(name, p.job)
+        except Exception:
+            return
+        if not isinstance(res, dict):
+            return
+        secs = _num(res.get("seconds"))
+        if secs and secs > 0:
+            p.pred_s, p.pred_src = secs, "file"
+        mats = [{"type": f.get("type"), "used_g": _num(f.get("used_g"))}
+                for f in res.get("filaments") or [] if isinstance(f, dict)]
+        if not mats and _num(res.get("grams")):
+            mats = [{"type": res.get("material"), "used_g": _num(res.get("grams"))}]
+        if mats and not p.mats:              # what was read at the start stays (the Hub's AMS note expires within minutes)
+            p.mats = mats
+
+    def _track_run(self, name, p, snap):
+        """Per poll, while a print is under way: add up pause time, keep looking for the file facts, and
+        take the printer's own remaining-time estimate as the prediction if nothing better turns up."""
+        if not p.in_job:
+            return
+        if p.state == "PAUSE":
+            if p.pause_since is None:
+                p.pause_since = self._m
+        elif p.pause_since is not None:
+            p.paused_s += max(0.0, self._m - p.pause_since)
+            p.pause_since = None
+        if ((p.pred_s is None or p.pred_src != "file" or not p.mats) and p.facts_tries < self.FACTS_MAX_TRIES
+                and (p.facts_m is None or self._m - p.facts_m >= self.FACTS_RETRY_S)):
+            self._try_facts(name, p)
+        if p.pred_s is None and p.state == "RUNNING" and self._norm(snap) == "RUNNING" and p.run_started is not None:
+            rm, pct = _num(snap.get("remaining_min")), _num(snap.get("percent"))
+            if rm and rm > 0 and (pct is None or pct <= self.REMAINING_MAX_PERCENT):
+                p.pred_s = max(0.0, self._m - p.run_started - p.paused_s) + rm * 60.0
+                p.pred_src = "remaining"
+        self._save_run(name, p)
 
     # ---- emitting ---------------------------------------------------------
 
@@ -218,7 +454,9 @@ class EventWatcher:
                 p.state = self._norm(snap)
                 p.in_job = p.state in ACTIVE
                 p.announced = p.in_job
+                self._fl_baseline(p, snap)
                 self._remember(p, snap)
+                self._restore_run(name, p, snap, now)
             else:
                 p.offline_since, p.baseline_offline = self._m, True
             return
@@ -246,9 +484,13 @@ class EventWatcher:
                 p.state = self._norm(snap)
                 p.in_job = p.state in ACTIVE
                 p.announced = p.in_job
+                self._fl_baseline(p, snap)
                 self._remember(p, snap)
+                self._restore_run(name, p, snap, now)
                 return
         self._transition(name, p, snap, now, events)
+        self._first_layer(name, p, snap, now, events)
+        self._track_run(name, p, snap)
 
     def _offline_after(self, p) -> float:
         """Seconds a printer must stay unreachable before "offline" is announced. A printer that was
@@ -287,7 +529,11 @@ class EventWatcher:
 
         if new in ACTIVE and old not in ACTIVE:         # a job begins
             p.in_job, p.announced, p.run_started, p.run_started_wall = True, False, self._m, now
+            p.fl_reset()
+            p.run_reset()
             p.job = (snap.get("job") or "").strip() or p.job
+            self._try_facts(name, p)
+            self._save_run(name, p)
         if new == "RUNNING" and p.in_job and not p.announced:
             p.announced = True
             self._emit(self._started_event(name, p, snap, now), events)
@@ -307,6 +553,99 @@ class EventWatcher:
                 self._emit(self._failed_event(name, p, snap, now, cancelled=True), events)
         elif new in ("FINISH", "FAILED", "IDLE"):
             p.in_job = False
+        if not p.in_job:
+            self._clear_run(name)
+
+    # ---- "first layer done" -----------------------------------------------
+
+    FIRST_LAYER_HOLD_S = 20          # Z must stay up this long (and for 2 polls): a z-hop is over in seconds
+    FIRST_LAYER_MIN_RISE = 0.1       # mm above the first-layer height
+    FIRST_LAYER_MAX_RISE = 1.0       # ...but not a purge/park move far above it
+
+    @staticmethod
+    def _layer_now(snap):
+        """(current layer, total) from the snapshot's "n/total" string; None when not reported."""
+        m = re.fullmatch(r"\s*(\d+)\s*/\s*(\d+|\?)\s*", str(snap.get("layer") or ""))
+        return int(m.group(1)) if m else None
+
+    @staticmethod
+    def method_for(snap) -> str:
+        """How the first layer is detected for this printer: "layer" (it reports layer numbers), "z" (it
+        reports the nozzle height) or "timer" (neither: a fixed time after the print starts)."""
+        if EventWatcher._layer_now(snap) is not None:
+            return "layer"
+        if _num(snap.get("z_mm")) is not None:
+            return "z"
+        return "timer"
+
+    def _fl_baseline(self, p, snap):
+        """First sight of a printer mid-print: only a print still on layer 1 (reported) can still alert."""
+        cur = self._layer_now(snap)
+        if p.in_job and cur is not None and cur <= 1:
+            p.fl_seen_low = True
+        else:
+            p.fl_done = True
+
+    def _fl_fallback_min(self) -> float:
+        if self.settings is not None:
+            try:
+                return float(self.settings.get("notifications.first_layer_fallback_min"))
+            except Exception:
+                pass
+        return 8.0
+
+    def _first_layer(self, name, p, snap, now, events):
+        last, p.fl_last_m = p.fl_last_m, self._m
+        if not p.in_job or p.fl_done or p.state != "RUNNING" or self._norm(snap) != "RUNNING":
+            p.fl_since, p.fl_polls = None, 0          # paused / preparing: a rising Z there means nothing
+            return
+        if last is not None:
+            p.fl_run_s += min(max(self._m - last, 0.0), 60.0)
+        method = self.method_for(snap)
+        fire, detail = False, {}
+        cur = self._layer_now(snap)
+        if cur is not None and cur <= 1:
+            p.fl_seen_low = True
+        if method == "layer":
+            fire = p.fl_seen_low and cur >= 2
+        elif method == "z":
+            z = _num(snap.get("z_mm"))
+            if z > 0.05 and (p.fl_base is None or z < p.fl_base):
+                p.fl_base = z
+            rise = z - p.fl_base if p.fl_base is not None else 0.0
+            if self.FIRST_LAYER_MIN_RISE <= rise <= self.FIRST_LAYER_MAX_RISE:
+                if p.fl_since is None:
+                    p.fl_since = self._m
+                p.fl_polls += 1
+                fire = p.fl_polls >= 2 and self._m - p.fl_since >= self._fl_hold()
+            else:
+                p.fl_since, p.fl_polls = None, 0
+            detail = {"first_layer_z": p.fl_base, "z": z}
+        else:
+            mins = self._fl_fallback_min()
+            fire = mins > 0 and p.fl_run_s >= mins * 60
+            detail = {"fallback_min": mins}
+            if mins <= 0:
+                return
+        if fire:
+            p.fl_done = True
+            self._emit(self._first_layer_event(name, p, snap, now, method, detail), events)
+
+    def _fl_hold(self) -> float:
+        return self.first_layer_hold_s
+
+    def _first_layer_event(self, name, p, snap, now, method, detail):
+        job = self._job_label(p, snap)
+        pct = self._pct(p, snap)
+        how = {"layer": "layer count", "z": "nozzle height",
+               "timer": f"~{detail.get('fallback_min', 0):g} min in - this printer doesn't report layers"}[method]
+        lead = f"First layer of {job} is done" + (f" ({how})" if method == "timer" else "") + "."
+        prog = f"Now at {pct}." if pct else ""
+        body = self._join(lead, prog, self._left(p, snap), self._temps(snap),
+                          "Check the picture: is it sticking?")
+        return Event("first_layer_done", name, f"First layer done \u2014 {name}", body, ts=now,
+                     data={"job": job, "method": method, **detail}, image_fn=self._img(name),
+                     dedupe_key=self._run_key(p, job))
 
     # ---- message builders -------------------------------------------------
 
@@ -361,16 +700,65 @@ class EventWatcher:
         batch of the same file within the duplicate window is not swallowed as a repeat."""
         return f"{job}@{int(p.run_started_wall)}" if p.run_started_wall else job
 
+    def _clock_text(self, ts) -> str:
+        """Time of day in the Hub's time zone and clock style ('3:42 PM' for the US format, else '15:42')."""
+        dt = datetime.datetime.fromtimestamp(ts, ss.tzinfo_for(self._setting("general.timezone", "UTC")))
+        if self._setting("general.datetime_format", "iso") == "us":
+            return dt.strftime("%I:%M %p").lstrip("0")
+        return dt.strftime("%H:%M")
+
+    def _hub_link(self, printer=None) -> str:
+        """Where "Open in Fabrica" goes: the dashboard at notifications.hub_url ('' = no link). With a printer name the
+        link is <hub_url>/dashboard?printer=<name>, which opens straight to that printer's screen."""
+        base = str(self._setting("notifications.hub_url", "") or "").strip().rstrip("/")
+        if not re.match(r"^https?://\S+$", base, re.I):
+            return ""
+        link = base if base.lower().endswith("/dashboard") else base + "/dashboard"
+        if printer:
+            link += ("&" if "?" in link else "?") + "printer=" + urllib.parse.quote(str(printer), safe="")
+        return link
+
     def _finished_event(self, name, p, snap, now):
         job = self._job_label(p, snap)
+        nice = friendly_job(job)
         secs = (self._m - p.run_started) if p.run_started is not None else None
-        took = f"Took {fmt_duration(secs)}." if secs is not None else ""
+        if p.pause_since is not None:                       # finished while "paused": that time was a pause too
+            p.paused_s += max(0.0, self._m - p.pause_since)
+            p.pause_since = None
+        if p.pred_s is None or not p.mats:                  # one last look at the file facts
+            self._try_facts(name, p)
+        pred = p.pred_s if p.pred_s and p.pred_s > 0 else None
+        paused = p.paused_s >= 60
+
+        head = f"{name} finished" + (f" \u00b7 {nice}" if nice else "")
+        done = f"Done {self._clock_text(now)}"
+        if secs is not None:
+            done += f" \u00b7 took {fmt_hm(secs)}"
+            if pred:
+                done += (f" (slicer said {fmt_hm(pred)}; print was paused)" if paused
+                         else f" (slicer said {fmt_hm(pred)}: {time_verdict(secs, pred)})")
+        mats = material_text(p.mats)
+        used = f"Used {mats}" if mats else ""
         bed = _num(snap.get("bed_c"))
-        warm = f"Bed is still {self._t(bed)} - let it cool before removing the part." if bed and bed > 45 else ""
-        body = self._join(f"{job} finished.", took, warm, "Clear the bed before the next print.")
-        return Event("print_finished", name, f"{name}: print FINISHED", body, ts=now,
-                     data={"job": job, "seconds": secs},
-                     image_fn=self._img(name), dedupe_key=self._run_key(p, job))
+        warm = bed is not None and bed > 45
+        clear = (f"Bed still {self._t(bed)}: let it cool before clearing it." if warm
+                 else "Clear the bed before the next print.")
+        link = self._hub_link(name)
+
+        body = "\n".join(x for x in (done, used, clear, f"Open in Fabrica: {link}" if link else "") if x)
+        esc = _html.escape
+        h_lines = [f"\u2705 {esc(head, quote=False)}", f"\U0001F550 {esc(done, quote=False)}"]
+        if used:
+            h_lines.append(f"\U0001F9F5 {esc(used, quote=False)}")
+        h_lines.append(f"\U0001F6CF {esc(clear, quote=False)}")
+        if link:
+            h_lines.append(f'\U0001F517 <a href="{esc(link, quote=True)}">Open in Fabrica</a>')
+        return Event("print_finished", name, head, body, ts=now,
+                     data={"job": job, "seconds": secs, "predicted_seconds": pred,
+                           "predicted_from": p.pred_src if pred else None, "paused_seconds": round(p.paused_s),
+                           "finished_at": now, "materials": [{"type": t, "grams": g} for t, g in material_summary(p.mats)],
+                           "link": link or None},
+                     image_fn=self._img(name), dedupe_key=self._run_key(p, job), html="\n".join(h_lines))
 
     def _failed_event(self, name, p, snap, now, cancelled):
         job = self._job_label(p, snap)

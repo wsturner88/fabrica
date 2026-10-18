@@ -587,10 +587,11 @@ class TestDashboardStatic(unittest.TestCase):
             self.assertIn(needle, self.HTML, needle)
 
     def test_the_kiosk_and_phone_rules_exist(self):
-        self.assertIn(".cfdlg .msgrid button { min-height:50px;", self.HTML)
-        phone = self.HTML.split("/* ==== phone layout ====")[1]
-        self.assertIn(".msgrid { grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }", phone)
-        self.assertIn(".cfmulti .cfactions .toggle", phone)
+        # the confirm dialog's own rules (see test_confirm_compact.py for the measured layout): a short-screen tier and a phone tier
+        self.assertIn("  @media (max-height:520px) {\n    .cfscroll {", self.HTML)
+        self.assertIn(".msgrid button { min-height:50px; font-size:14px; }", self.HTML)
+        self.assertIn("    .msgrid { grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }", self.HTML)
+        self.assertIn(".cfactions .toggle { flex:1 1 330px;", self.HTML)           # the bed-clear tick rides in the footer with START
 
 
 DRIVER = r"""

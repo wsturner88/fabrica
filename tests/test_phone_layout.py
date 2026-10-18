@@ -67,9 +67,10 @@ class TestPhoneLayout(unittest.TestCase):
     def test_touch_targets_and_sheets(self):
         blk = phone_block()
         self.assertIn("button, a.bkdl { min-height:44px; }", blk)
-        self.assertRegex(blk, r"\.cfactions \{ position:sticky;")                 # START stays on screen
+        self.assertRegex(HTML, r"\.cfactions \{ flex:none; display:flex;")           # the confirm dialog's footer (tick + Back + START) is outside the scrolling part
+        self.assertRegex(HTML, r"#mbody:has\(\.cfdlg\) \{ width:100%; height:100%;")      # ... and on a phone the dialog is a full-screen sheet
         self.assertRegex(blk, r"#modal \{ align-items:stretch;")                  # dialogs are full-screen sheets
-        self.assertIn("#spoolgrid { grid-template-columns:repeat(2,minmax(0,1fr)) !important; }", blk)
+        self.assertIn("    .msgrid { grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }", HTML)   # two spools per row on a portrait phone
         self.assertRegex(blk, r"\.sttabs \{[^}]*overflow-x:auto")                 # settings tabs scroll in their own strip
 
     def test_reload_button_stays_in_the_header(self):

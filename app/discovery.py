@@ -27,6 +27,21 @@ What it does, per host (bounded worker pool, short timeouts):
 Only the printer ports are touched (see DEFAULT_PORTS), no credentials are ever sent, and
 nothing is ever written to a device. One scan at a time; a short cool-down between scans.
 
+Near and far networks. A network the Hub reaches in a millisecond or two (its own LAN) is scanned
+fast: a big pool of workers and a short connect timeout. A network that is routed - a home network
+reached over a VPN subnet route, another site, anything with a round trip of more than FAR_RTT_MS -
+is scanned gently: a small pool that ramps up, a connect timeout long enough for one lost SYN to be
+re-sent, and a "canary" (a host that is known to answer) that is re-checked while the scan runs. If the
+canary stops answering the route is being overloaded: new hosts are held back, the pool is halved, and
+every host that came back silent in the meantime is looked at again. A burst of dozens of parallel
+connects through a routed or NAT-ed path can silently drop SYNs; a dropped SYN looks exactly like
+"nobody is home", which is how a real printer used to be reported as an empty address.
+
+A host is called empty only when all three key ports (80, 7125, 8883) were silent. Such quiet hosts
+get one more look at low concurrency and a long timeout at the end of the scan: always for addresses
+of printers the Hub already knows, for hosts that were probed while the route was dropping, and for
+every quiet host when a far network produced no answer at all and had no canary to vouch for it.
+
 Optional extras (never required): an SSDP listener for Bambu NOTIFY packets (UDP 2021 / 1990)
 for a few seconds, and the `zeroconf` library when it happens to be installed (it is NOT a
 dependency) for host names. Both only fill in details for addresses inside the scanned networks.
@@ -81,6 +96,10 @@ MAX_PREFIX = 22              # biggest single network: /22 = 1024 addresses
 MAX_NETWORKS = 8
 MAX_TOTAL_HOSTS = 2048
 MAX_WORKERS = 128
+
+# Near / far (see the module doc). Numbers come from measurements of a 40 ms routed /24, docs/discovery.md.
+FAR_RTT_MS = 10.0            # slower than this to the first hosts that answer = a far network
+OVERLAY = ipaddress.ip_network("100.64.0.0/10")       # VPN overlay addresses are always routed
 
 FAMILY_LABELS = {"bambu": "Bambu Lab", "octoprint": "OctoPrint", "prusalink": "PrusaLink",
                  "moonraker": "Klipper (Moonraker)"}
@@ -405,6 +424,59 @@ class _Watchdog:
 
 # ---------------------------------------------------------------- the scan itself
 
+class _Profile:
+    """How one network is scanned: pool size, timeouts and whether the pool ramps and is watched."""
+    __slots__ = ("kind", "workers", "connect_timeout", "http_timeout", "gentle")
+
+    def __init__(self, kind, workers, connect_timeout, http_timeout, gentle=False):
+        self.kind, self.workers = kind, int(workers)
+        self.connect_timeout, self.http_timeout, self.gentle = connect_timeout, http_timeout, gentle
+
+
+class _Gate:
+    """How many hosts may be in flight right now. Starts small, grows a step at a time (slow start),
+    is halved by shrink() and held shut by pause() while a routed path is overloaded."""
+
+    def __init__(self, cap, start=4, step=2):
+        self.cap = max(1, int(cap))
+        self.window = min(self.cap, max(1, int(start)))
+        self.step = step
+        self.floor = min(2, self.cap)
+        self.active = 0
+        self.paused = False
+        self.cond = threading.Condition()
+
+    def enter(self, cancel) -> bool:
+        with self.cond:
+            while not cancel.is_set() and (self.paused or self.active >= self.window):
+                self.cond.wait(0.1)
+            if cancel.is_set():
+                return False
+            self.active += 1
+            return True
+
+    def leave(self):
+        with self.cond:
+            self.active -= 1
+            self.cond.notify_all()
+
+    def grow(self):
+        with self.cond:
+            self.window = min(self.cap, self.window + self.step)
+            self.cond.notify_all()
+
+    def shrink(self):
+        """Overload: halve the pool, and do not grow back past the last size that was fine."""
+        with self.cond:
+            self.cap = max(self.floor, min(self.cap, self.window - self.step))
+            self.window = max(self.floor, min(self.cap, self.window // 2))
+
+    def pause(self, on):
+        with self.cond:
+            self.paused = on
+            self.cond.notify_all()
+
+
 class _Scan:
     def __init__(self, scan_id, networks, hosts):
         self.id = scan_id
@@ -423,6 +495,20 @@ class _Scan:
         self.names = set()              # suggested names handed out in this scan
         self.hard_deadline = None       # monotonic: past this the scan is considered wedged
         self.cancelled_at = None        # monotonic time cancel() was called
+        self.phase = "starting"         # starting | checking | scanning | rechecking | finishing
+        self.groups = []                # one dict per near / far group of networks (see _plan)
+        self.cur = None                 # the group being scanned: {"kind","started","base","total"}
+        self.quiet = {}                 # ip -> monotonic time it ended with no clear answer (silent, or some key ports silent)
+        self.tainted = set()            # quiet hosts probed while the route was dropping packets
+        self.retry_total = 0            # quiet hosts being looked at again
+        self.retry_done = 0
+        self.retry_skipped = 0          # quiet hosts the retry did not get to (time box)
+        self.backoffs = 0               # times the route was found overloaded and the pool halved
+        self.responders = 0             # hosts that sent any reply at all
+        self.ctx = (None, None, False)  # (profile, gate, is_retry) for the host tasks now queued
+        self.retry_closed = False       # the second look is over; late results are dropped
+        self.profiles = []              # per network: near / far, round trip, why
+        self.limit_at = None            # monotonic: the hard stop for this scan
 
 
 class DiscoveryManager:
@@ -436,7 +522,11 @@ class DiscoveryManager:
     def __init__(self, fleet_records=None, ports=None, workers=64, connect_timeout=0.6, http_timeout=1.5,
                  cooldown=3.0, ssdp=True, ssdp_seconds=3.0, ssdp_ports=SSDP_PORTS, ssdp_bind="0.0.0.0",
                  ssdp_join=True, zeroconf=True, zeroconf_seconds=2.0, zeroconf_module=None,
-                 local_ip=None, keep=5, host_timeout=15.0, scan_timeout=900.0, cancel_grace=5.0):
+                 local_ip=None, keep=5, host_timeout=15.0, scan_timeout=240.0, cancel_grace=5.0,
+                 far_workers=16, far_connect_timeout=1.5, far_http_timeout=3.0, far_rtt_ms=FAR_RTT_MS,
+                 far_start=4, far_step=2, far_tick=0.5, retry=True, retry_workers=4,
+                 retry_connect_timeout=2.0, retry_seconds=60.0, probe_timeout=1.0, probe_seconds=3.0,
+                 pause_seconds=15.0, connector=None):
         self.fleet_records = fleet_records or (lambda: [])
         self.ports = {**DEFAULT_PORTS, **(ports or {})}
         http = self.ports["http"]
@@ -444,6 +534,20 @@ class DiscoveryManager:
         self.workers = max(1, min(int(workers), MAX_WORKERS))
         self.connect_timeout = connect_timeout
         self.http_timeout = http_timeout
+        # far (routed / slow) networks: small pool that ramps, long connect timeout, a canary watching the route
+        self.far_workers = max(1, min(int(far_workers), MAX_WORKERS))
+        self.far_connect_timeout, self.far_http_timeout = far_connect_timeout, far_http_timeout
+        self.far_rtt_ms = float(far_rtt_ms)
+        self.far_start, self.far_step, self.far_tick = far_start, far_step, float(far_tick)
+        # the second look at quiet hosts, at low concurrency and with a long timeout
+        self.retry = bool(retry)
+        self.retry_workers = max(1, int(retry_workers))
+        self.retry_connect_timeout = retry_connect_timeout
+        self.retry_seconds = float(retry_seconds)
+        # the quick round-trip check that decides near or far
+        self.probe_timeout, self.probe_seconds = probe_timeout, float(probe_seconds)
+        self.pause_seconds = float(pause_seconds)   # longest a far scan waits for its canary to answer again
+        self._connector = connector            # tests: a function (ip, port, timeout) -> socket; None = real connects
         self.cooldown = cooldown
         self.use_ssdp, self.ssdp_seconds = ssdp, ssdp_seconds
         self.ssdp_ports, self.ssdp_bind, self.ssdp_join = tuple(ssdp_ports), ssdp_bind, ssdp_join
@@ -451,9 +555,9 @@ class DiscoveryManager:
         self._local_ip_fn = local_ip or self._default_local_ip
         self.keep = keep
         self.host_timeout = float(host_timeout)    # wall-clock limit for ONE host, all probes together
-        self.scan_timeout = float(scan_timeout)    # wall-clock limit for a whole scan
+        self.scan_timeout = float(scan_timeout)    # hard wall-clock limit for a whole scan
         self.cancel_grace = float(cancel_grace)    # after cancel, how long to wait for stragglers
-        self._tl = threading.local()               # per-worker: this host's deadline and the scan's cancel flag
+        self._tl = threading.local()               # per-worker: this host's deadline, profile and the scan's cancel flag
         self._lock = threading.RLock()
         self._scans = {}
         self._running = None
@@ -528,10 +632,36 @@ class DiscoveryManager:
                 raise NotFound("No such scan (it may be old - start a new one).")
             found = [self._public(copy.deepcopy(f)) for f in self._sorted(scan.found)]
             end = scan.finished or time.time()
+            far = [g for g in scan.groups if g["kind"] == "far"]
             return {"scan_id": scan.id, "state": scan.state, "done": scan.done, "total": scan.total,
                     "finished": scan.state != "running", "networks": list(scan.networks),
                     "found": found, "error": scan.error, "note": scan.note, "extras": dict(scan.extras),
-                    "elapsed_s": round(end - scan.started, 1)}
+                    "elapsed_s": round(end - scan.started, 1),
+                    "phase": scan.phase if scan.state == "running" else "finished",
+                    "remote": bool(far), "remote_networks": [n for g in far for n in g["networks"]],
+                    "profiles": [dict(x) for x in scan.profiles], "eta_s": self._eta(scan),
+                    "slowed": scan.backoffs > 0,
+                    "recheck": {"total": scan.retry_total, "done": scan.retry_done}}
+
+    def _eta(self, scan):
+        """Seconds still to go (a plain estimate, None when not known yet or finished). Real progress
+        replaces the per-address guess as soon as a few addresses are done."""
+        if scan.state != "running" or not scan.groups:
+            return None
+        now, left, seen = time.monotonic(), 0.0, False
+        for g in scan.groups:
+            if g is scan.cur and g["started"] is not None:
+                seen = True
+                done = max(0, min(g["total"], scan.done - g["base"]))
+                per = (now - g["started"]) / done if done >= max(8, g["total"] // 20) else g["est"]
+                left += (g["total"] - done) * per
+            elif seen or g["started"] is None:
+                left += g["total"] * g["est"]
+        if scan.phase == "rechecking":
+            left = max(0, scan.retry_total - scan.retry_done) * 3.0 / max(1, self.retry_workers)
+        if scan.limit_at is not None:
+            left = min(left, max(0.0, scan.limit_at - now))
+        return int(round(left))
 
     def cancel(self, scan_id) -> dict:
         with self._lock:
@@ -619,35 +749,178 @@ class DiscoveryManager:
         finally:
             s.close()
 
+    # ---- near or far -------------------------------------------------------
+
+    def _connect(self, ip, port, timeout):
+        """One TCP connect (tests swap in a simulated network through `connector`)."""
+        fn = self._connector
+        return fn(ip, port, timeout) if fn else socket.create_connection((ip, port), timeout=timeout)
+
+    def _ct(self) -> float:
+        p = getattr(self._tl, "profile", None)
+        return p.connect_timeout if p else self.connect_timeout
+
+    def _ht(self) -> float:
+        p = getattr(self._tl, "profile", None)
+        return p.http_timeout if p else self.http_timeout
+
+    def _attached(self, net) -> bool:
+        """True when the Hub itself sits on `net` (so it is one hop away): loopback, or the /24 of its own address."""
+        if net.network_address.is_loopback:
+            return True
+        try:
+            own = ipaddress.IPv4Address(self._local_ip_fn())
+            return net.overlaps(ipaddress.ip_network(f"{own}/24", strict=False))
+        except Exception:
+            return False
+
+    @staticmethod
+    def _url_port(url, default=80):
+        try:
+            u = urllib.parse.urlparse(url if "://" in (url or "") else f"http://{url or ''}")
+            return u.port or (443 if u.scheme == "https" else default)
+        except ValueError:
+            return default
+
+    def _known_endpoints(self, net) -> list:
+        """[(ip, port)] of printers the Hub already has inside `net` - they are known to answer, so they make
+        the best canaries and the best round-trip samples."""
+        out = []
+        for rec in self._records():
+            vals = rec.get("values") if isinstance(rec.get("values"), dict) else {}
+            port = self.ports["bambu_mqtt"] if rec.get("type") == "bambu" \
+                else self._url_port(vals.get("url") or rec.get("address") or "")
+            for h in self._record_hosts(rec):
+                try:
+                    ip = ipaddress.IPv4Address(h)
+                except ValueError:
+                    continue
+                if ip in net and (str(ip), port) not in out:
+                    out.append((str(ip), port))
+        return out
+
+    def _timed_probe(self, ip, port):
+        """(ip, port, seconds) when the host answered at all (open OR refused), else None."""
+        t0 = time.monotonic()
+        try:
+            self._connect(ip, port, self.probe_timeout).close()
+        except ConnectionRefusedError:
+            pass
+        except OSError:
+            return None
+        return ip, port, time.monotonic() - t0
+
+    def _sample(self, net, known, seconds) -> list:
+        """Round trips to the first hosts that answer: known printers first, then the gateway-ish addresses
+        (.1 .2 and the top of the range) on the printer ports. Stops after three answers or `seconds`."""
+        hosts = list(net) if net.prefixlen >= 31 else list(net.hosts())
+        picks = [hosts[i] for i in (0, 1, -1, -2, len(hosts) // 2) if -len(hosts) <= i < len(hosts)] if hosts else []
+        ports = list(dict.fromkeys([self.http_ports[0], self.ports["moonraker"], self.ports["bambu_mqtt"]]))
+        targets = list(known[:3])
+        for h in dict.fromkeys(str(x) for x in picks):
+            targets += [(h, pt) for pt in ports if (h, pt) not in targets]
+        targets = targets[:24]
+        found, pend = [], set()
+        ex = concurrent.futures.ThreadPoolExecutor(max_workers=6, thread_name_prefix="disc-probe")
+        try:
+            futs = [ex.submit(self._timed_probe, ip, pt) for ip, pt in targets]
+            vouched = set(futs[:min(3, len(known))])        # the known printers must all be heard before stopping
+            pend = set(futs)
+            end = time.monotonic() + seconds
+            while pend and time.monotonic() < end and (len(found) < 3 or vouched & pend):
+                done, pend = concurrent.futures.wait(pend, timeout=0.1,
+                                                     return_when=concurrent.futures.FIRST_COMPLETED)
+                found += [r for r in (f.result() for f in done) if r]
+        finally:
+            ex.shutdown(wait=False, cancel_futures=True)
+        return found
+
+    def _classify(self, scan, net, end) -> dict:
+        """near or far, how we know, and the canaries (hosts that answer) for a far network."""
+        overlay = net.subnet_of(OVERLAY)
+        if self._attached(net) and not overlay:
+            return {"kind": "near", "rtt_ms": None, "why": "directly attached", "canaries": []}
+        left = end - time.monotonic()
+        known_eps = self._known_endpoints(net)
+        samples = self._sample(net, known_eps, min(self.probe_seconds, left)) if left > 0.3 else []
+        want = set(known_eps)                  # known printers first: they are certain to be there
+        canaries = [(ip, pt) for ip, pt, _ in sorted(samples, key=lambda x: (x[:2] not in want, x[2]))][:3]
+        if samples:                            # the first connect over a cold path is often slow: time the best again
+            best = min(samples, key=lambda x: x[2])
+            again = self._timed_probe(best[0], best[1])
+            rtt = round(min(best[2], again[2] if again else best[2]) * 1000, 1)
+        else:
+            rtt = None
+        if overlay:
+            kind, why = "far", "VPN overlay address range"
+        elif not samples:
+            kind, why = "far", "no host answered the quick round-trip check"
+        elif rtt > self.far_rtt_ms:
+            kind, why = "far", f"round trip {rtt:g} ms"
+        else:
+            kind, why = "near", f"round trip {rtt:g} ms"
+        return {"kind": kind, "rtt_ms": rtt, "why": why, "canaries": canaries if kind == "far" else []}
+
+    def _est_host(self, prof) -> float:
+        """Seconds of scan time one address costs on a mostly empty network (a quiet address is two to three
+        timeouts, shared across the pool) - used for the time estimate before real progress is known."""
+        return 0.8 * 3 * prof.connect_timeout / prof.workers
+
+    def _plan(self, scan, nets, limit):
+        """Decide near / far for every network and group the addresses: near groups first (fast), far last."""
+        end = time.monotonic() + max(6.0, 2 * self.probe_seconds)
+        info = []
+        by_kind = {"near": [], "far": []}
+        for net in nets:
+            if scan.cancel.is_set():
+                break
+            c = self._classify(scan, net, min(end, limit))
+            info.append({"network": str(net), "kind": c["kind"], "rtt_ms": c["rtt_ms"], "why": c["why"]})
+            by_kind[c["kind"]].append((net, c))
+        scan.profiles = info
+        for kind in ("near", "far"):
+            items = by_kind[kind]
+            if not items:
+                continue
+            hosts = hosts_of([n for n, _ in items])
+            prof = self._far_profile() if kind == "far" else self._near_profile()
+            scan.groups.append({"kind": kind, "profile": prof, "hosts": hosts, "total": len(hosts),
+                                "networks": [str(n) for n, _ in items], "base": 0, "started": None,
+                                "canaries": [cn for _, c in items for cn in c["canaries"]],
+                                "est": self._est_host(prof)})
+
+    def _near_profile(self):
+        return _Profile("near", self.workers, self.connect_timeout, self.http_timeout)
+
+    def _far_profile(self):
+        return _Profile("far", self.far_workers, self.far_connect_timeout, self.far_http_timeout, gentle=True)
+
+    def _retry_profile(self):
+        return _Profile("retry", self.retry_workers, max(self.retry_connect_timeout, self.far_connect_timeout),
+                        max(self.far_http_timeout, self.http_timeout))
+
     # ---- the scan thread ---------------------------------------------------
 
     def _run(self, scan, nets):
         extras = {}
-        ex = None
         try:
             if self.use_ssdp:
                 extras["ssdp"] = self._start_extra(self._ssdp_listen, scan)
             if self.use_zeroconf:
                 extras["zeroconf"] = self._start_extra(self._zeroconf_browse, scan)
-            ex = concurrent.futures.ThreadPoolExecutor(max_workers=self.workers, thread_name_prefix="disc")
-            pending = {ex.submit(self._host_task, scan, ip) for ip in scan.hosts}
             limit = time.monotonic() + self.scan_timeout
-            abandon_at = None
-            while pending:
-                done, pending = concurrent.futures.wait(pending, timeout=0.2,
-                                                        return_when=concurrent.futures.FIRST_COMPLETED)
-                now = time.monotonic()
-                if scan.cancel.is_set() and abandon_at is None:
-                    abandon_at = now + self.cancel_grace
-                if now > limit and abandon_at is None:
-                    scan.note = ("Stopped at the time limit; "
-                                 f"{len(pending)} address(es) were not finished.")
-                    scan.cancel.set()
-                    abandon_at = now + self.cancel_grace
-                if abandon_at is not None and now > abandon_at:
-                    if not scan.note and pending:
-                        scan.note = f"Stopped; {len(pending)} address(es) did not answer in time and were skipped."
-                    break                      # stragglers die on their own wall-clock limits; do not wait
+            scan.limit_at = limit
+            scan.phase = "checking"
+            self._plan(scan, nets, limit)
+            scan.phase = "scanning"
+            ok = True
+            for g in scan.groups:
+                if not self._scan_group(scan, g, limit):
+                    ok = False
+                    break
+            if ok and not scan.cancel.is_set():
+                self._recheck(scan, limit)
+            scan.phase = "finishing"
             for key, (th, box) in extras.items():
                 th.join(timeout=self.ssdp_seconds + self.zeroconf_seconds + 2)
             self._merge_extras(scan, nets, {k: box for k, (th, box) in extras.items()})
@@ -658,14 +931,141 @@ class DiscoveryManager:
             with self._lock:
                 scan.state, scan.error = "error", f"The scan failed unexpectedly: {type(e).__name__}: {e}"
         finally:
-            if ex is not None:
-                ex.shutdown(wait=False, cancel_futures=True)
             with self._lock:
                 if scan.finished is None:
                     scan.finished = time.time()
                 if self._running == scan.id:       # a wedged scan may already have been released
                     self._last_end = time.monotonic()
                     self._running = None
+
+    def _scan_group(self, scan, g, limit) -> bool:
+        """Scan one group of addresses with its profile. False = the scan was stopped (cancel / time limit)."""
+        prof = g["profile"]
+        gate = _Gate(prof.workers, self.far_start, self.far_step) if prof.gentle else None
+        g["base"], g["started"] = scan.done, time.monotonic()
+        scan.cur = g
+        ex = concurrent.futures.ThreadPoolExecutor(max_workers=prof.workers, thread_name_prefix=f"disc-{prof.kind}")
+        try:
+            scan.ctx = (prof, gate, False)
+            pending = {ex.submit(self._host_task, scan, ip) for ip in g["hosts"]}
+            return self._drain(scan, pending, limit, gate=gate, canaries=list(g["canaries"]))
+        finally:
+            ex.shutdown(wait=False, cancel_futures=True)
+
+    def _drain(self, scan, pending, limit, gate=None, canaries=(), soft_end=None) -> bool:
+        """Wait for `pending` host tasks. Applies the cancel / time-limit rules, and for a far group keeps
+        the canary watch running. `soft_end` = stop waiting quietly then (the second look is time-boxed).
+        Returns False when the scan was stopped."""
+        abandon_at = None
+        st = {"good": time.monotonic(), "canaries": list(canaries), "limit": limit}
+        next_tick = time.monotonic() + self.far_tick
+        while pending:
+            done, pending = concurrent.futures.wait(pending, timeout=0.2,
+                                                    return_when=concurrent.futures.FIRST_COMPLETED)
+            now = time.monotonic()
+            if soft_end is not None and now > soft_end and not scan.cancel.is_set():
+                for f in pending:
+                    f.cancel()
+                scan.retry_skipped = scan.retry_total - scan.retry_done
+                return True
+            if scan.cancel.is_set() and abandon_at is None:
+                abandon_at = now + self.cancel_grace
+            if now > limit and abandon_at is None:
+                scan.note = ("Stopped at the time limit; "
+                             f"{len(pending)} address(es) were not finished.")
+                scan.cancel.set()
+                abandon_at = now + self.cancel_grace
+            if abandon_at is not None and now > abandon_at:
+                if not scan.note and pending:
+                    scan.note = f"Stopped; {len(pending)} address(es) did not answer in time and were skipped."
+                return False                   # stragglers die on their own wall-clock limits; do not wait
+            if gate is not None and now >= next_tick and not scan.cancel.is_set():
+                self._watch(scan, gate, st)
+                next_tick = time.monotonic() + self.far_tick
+        return abandon_at is None
+
+    def _canary_alive(self, canaries) -> bool:
+        for ip, port in canaries[:2]:
+            if self._timed_probe(ip, port):
+                return True
+        return False
+
+    def _watch(self, scan, gate, st):
+        """One tick of the route watch for a far group: widen the pool a step while the canary answers;
+        when it stops answering the route is overloaded - hold new hosts back, halve the pool, wait for the
+        canary to come back, and mark every quiet host probed meanwhile for a second look."""
+        if not st["canaries"] or self._canary_alive(st["canaries"]):
+            st["good"] = time.monotonic()
+            gate.grow()
+            return
+        with self._lock:
+            scan.backoffs += 1
+        gate.pause(True)
+        gate.shrink()
+        end = time.monotonic() + self.pause_seconds
+        alive = False
+        while time.monotonic() < min(end, st["limit"]) and not scan.cancel.is_set():
+            time.sleep(0.4)
+            if self._canary_alive(st["canaries"]):
+                alive = True
+                break
+        gate.pause(False)
+        with self._lock:
+            for ip, t in scan.quiet.items():
+                if t >= st["good"]:
+                    scan.tainted.add(ip)
+        if not alive:
+            st["canaries"] = []                # it never came back: the host itself is probably off, stop trusting it
+        st["good"] = time.monotonic()
+
+    def _recheck(self, scan, limit):
+        """The second look: hosts that gave no reply at all get one more pass at low concurrency and a long timeout.
+        Always for printers the Hub already knows and for hosts probed while the route was dropping packets; for
+        every quiet host of a far network that found nothing and had no canary to vouch for it. Time-boxed."""
+        if not self.retry:
+            return
+        with self._lock:
+            quiet = dict(scan.quiet)
+            found = {f["address"] for f in scan.found}
+        known = {h for (h, _fam) in scan.known["hosts"]}
+        todo = [ip for ip in quiet if ip not in found]
+        first = [ip for ip in todo if ip in known or ip in scan.tainted]
+        rest = [ip for ip in todo if ip not in set(first)]
+        bulk = []
+        for g in scan.groups:
+            if g["kind"] != "far" or g["canaries"]:
+                continue
+            members = set(g["hosts"])
+            if not any(f["address"] in members for f in scan.found):
+                bulk += [ip for ip in rest if ip in members]
+        if bulk:
+            anchors = []
+            for h in [*found, *known]:
+                try:
+                    anchors.append(int(ipaddress.IPv4Address(h)))
+                except ValueError:
+                    pass
+            bulk.sort(key=lambda ip: (min((abs(int(ipaddress.IPv4Address(ip)) - a) for a in anchors), default=0),
+                                      int(ipaddress.IPv4Address(ip))))
+        cand = first + bulk
+        if not cand or scan.cancel.is_set():
+            return
+        scan.phase = "rechecking"
+        scan.retry_total, scan.retry_done = len(cand), 0
+        prof = self._retry_profile()
+        soft_end = min(limit, time.monotonic() + self.retry_seconds)
+        ex = concurrent.futures.ThreadPoolExecutor(max_workers=prof.workers, thread_name_prefix="disc-retry")
+        try:
+            scan.ctx = (prof, None, True)
+            pending = {ex.submit(self._host_task, scan, ip) for ip in cand}
+            self._drain(scan, pending, limit, soft_end=soft_end)
+        finally:
+            ex.shutdown(wait=False, cancel_futures=True)
+        with self._lock:
+            scan.retry_closed = True
+            if scan.retry_skipped and not scan.note:
+                scan.note = (f"Looked again at {scan.retry_done} of {scan.retry_total} quiet addresses "
+                             "before the time box for that ended.")
 
     @staticmethod
     def _start_extra(fn, scan):
@@ -675,21 +1075,43 @@ class DiscoveryManager:
         return th, box
 
     def _host_task(self, scan, ip):
-        items = []
-        if not scan.cancel.is_set():
-            self._tl.cancel = scan.cancel
-            try:
-                items = self._scan_host(ip)
-            except Exception:
-                items = []
-            finally:
-                self._tl.cancel = None
+        prof, gate, retry = scan.ctx            # set by _scan_group / _recheck before the tasks are queued
+        items, verdict, entered = [], None, True
+        if gate is not None:
+            entered = gate.enter(scan.cancel)
+        try:
+            if entered and not scan.cancel.is_set():
+                self._tl.cancel, self._tl.profile, self._tl.verdict = scan.cancel, prof, None
+                try:
+                    items = self._scan_host(ip)
+                except Exception:
+                    items = []
+                finally:
+                    verdict = self._tl.verdict
+                    self._tl.cancel = self._tl.profile = self._tl.verdict = None
+        finally:
+            if gate is not None and entered:
+                gate.leave()
         with self._lock:
             if scan.cancel.is_set() and scan.state != "running":
                 return                              # a straggler finishing after the scan was closed
+            if retry and scan.retry_closed:
+                return
             for it in items:
                 self._add_found(scan, it)
-            scan.done += 1
+            if verdict is not None:
+                if verdict.get("replied"):
+                    scan.responders += 1
+                if items or (verdict.get("replied") and not verdict.get("unsure")):
+                    scan.quiet.pop(ip, None)           # found, or every key port gave a clear yes / no
+                elif not retry:
+                    scan.quiet[ip] = time.monotonic()  # silent, or only partly answered: a second look may be worth it
+                    if verdict.get("shaky"):
+                        scan.tainted.add(ip)           # open but unreadable: always worth another try
+            if retry:
+                scan.retry_done += 1
+            else:
+                scan.done += 1
 
     def _add_found(self, scan, item):          # caller holds the lock
         item["source"] = item.get("source", "tcp")
@@ -747,12 +1169,12 @@ class DiscoveryManager:
 
     def _tcp_probe(self, ip, port) -> str:
         """'open' | 'closed' (host answered with a reset) | 'silent' (timeout / no route)."""
-        t = self._budget(self.connect_timeout)
+        t = self._budget(self._ct())
         if t <= 0:
             return "silent"
         try:
-            with socket.create_connection((ip, port), timeout=t):
-                return "open"
+            self._connect(ip, port, t).close()
+            return "open"
         except ConnectionRefusedError:
             return "closed"
         except OSError:
@@ -768,19 +1190,24 @@ class DiscoveryManager:
 
     def _scan_host_inner(self, ip) -> list:
         p = self.ports
-        order = [p["bambu_mqtt"], p["moonraker"], *self.http_ports, p["bambu_ftps"], p["bambu_camera"]]
-        order = list(dict.fromkeys(order))
-        state, silent = {}, 0
+        # The three key ports first: 80 (Mainsail, Fluidd, OctoPi, PrusaLink), 7125 (Moonraker), 8883 (Bambu).
+        # A host is called empty only when ALL THREE stayed silent and nothing else answered: one or two
+        # timeouts can be a firewall that drops some ports (a Pi that only opens 80) or one lost SYN.
+        key = list(dict.fromkeys([*self.http_ports[:1], p["moonraker"], p["bambu_mqtt"]]))
+        order = list(dict.fromkeys([*key, *self.http_ports, p["bambu_ftps"], p["bambu_camera"]]))
+        state = {}
         for port in order:
             if self._budget(1) <= 0:
                 break                          # out of time: judge by what has been seen
-            r = self._tcp_probe(ip, port)
-            state[port] = r
-            if r == "silent":
-                silent += 1
-                if silent >= 2 and not any(v != "silent" for v in state.values()):
-                    break                      # two timeouts and no reply at all: nobody is home
+            state[port] = self._tcp_probe(ip, port)
+            if (state[port] == "silent" and all(state.get(k) == "silent" for k in key)
+                    and all(v == "silent" for v in state.values())):
+                break                          # all key ports timed out and no reply at all: nobody is home
+        # replied: something answered. unsure: a key port stayed silent - a lost SYN or a firewall, can't tell which
+        self._tl.verdict = {"replied": any(v != "silent" for v in state.values()),
+                            "unsure": any(state.get(k) == "silent" for k in key)}
         is_open = lambda port: state.get(port) == "open"   # noqa: E731
+        self._tl.io_failed = False
         found = []
         if is_open(p["bambu_mqtt"]) and self._budget(1) > 0:
             b = self._fingerprint_bambu(ip, p["bambu_mqtt"], is_open(p["bambu_ftps"]), is_open(p["bambu_camera"]))
@@ -797,6 +1224,10 @@ class DiscoveryManager:
             if old is None or self._prefer(it, old):
                 http_found[it["family"]] = it
         found.extend(http_found.values())
+        if not found and self._tl.io_failed and any(
+                is_open(pt) for pt in (p["bambu_mqtt"], p["moonraker"], *self.http_ports)):
+            # a port was open but the follow-up request got no answer: very likely a dropped connect
+            self._tl.verdict["unsure"] = self._tl.verdict["shaky"] = True
         return found
 
     def _prefer(self, new, old) -> bool:
@@ -811,6 +1242,12 @@ class DiscoveryManager:
     # -- Bambu
 
     def _tls_cert(self, ip, port):
+        der = self._tls_cert_raw(ip, port)
+        if der is None:
+            self._tl.io_failed = True              # nothing came back: a dropped connect looks like this
+        return der
+
+    def _tls_cert_raw(self, ip, port):
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
@@ -818,17 +1255,17 @@ class DiscoveryManager:
             ctx.set_ciphers("DEFAULT:@SECLEVEL=0")
         except ssl.SSLError:
             pass
-        total = self._budget(self.connect_timeout + self.http_timeout)
+        total = self._budget(self._ct() + self._ht())
         if total <= 0:
             return None
         t0 = time.monotonic()
         raw = tls = None
         try:
-            raw = socket.create_connection((ip, port), timeout=min(self.connect_timeout, total))
+            raw = self._connect(ip, port, min(self._ct(), total))
             left = total - (time.monotonic() - t0)
             if left <= 0:
                 return None
-            raw.settimeout(min(self.http_timeout, left))
+            raw.settimeout(min(self._ht(), left))
             tls = ctx.wrap_socket(raw, server_hostname=None, do_handshake_on_connect=False)
             with _Watchdog(tls, left) as wd:          # the handshake can drip one byte a second forever
                 tls.do_handshake()
@@ -870,11 +1307,20 @@ class DiscoveryManager:
     # -- HTTP families
 
     def _http_get(self, ip, port, path):
-        total = self._budget(self.http_timeout)
+        r = self._http_get_raw(ip, port, path)
+        if r is None:
+            self._tl.io_failed = True
+        return r
+
+    def _http_get_raw(self, ip, port, path):
+        total = self._budget(self._ht())
         if total <= 0:
             return None
         t0 = time.monotonic()
         conn = http.client.HTTPConnection(ip, port, timeout=total)
+        if self._connector:
+            conn._create_connection = lambda addr, timeout=None, source_address=None: \
+                self._connector(addr[0], addr[1], timeout)
         try:
             conn.connect()
             left = total - (time.monotonic() - t0)

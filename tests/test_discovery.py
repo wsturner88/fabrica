@@ -456,12 +456,21 @@ class HttpFingerprints(unittest.TestCase):
 
 
 class HostLogic(unittest.TestCase):
-    def test_silent_host_is_abandoned_after_two_timeouts(self):
+    def test_silent_host_is_abandoned_only_after_all_three_key_ports_timed_out(self):
         calls = []
         m = quick()
         m._tcp_probe = lambda ip, port: calls.append(port) or "silent"
         self.assertEqual(m._scan_host("10.9.9.9"), [])
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(set(calls), {80, 7125, 8883})       # port 80 is one of them: a Pi that only opens 80 is not empty
+
+    def test_two_silent_key_ports_do_not_end_the_host(self):
+        calls = []
+        m = quick()
+        m._tcp_probe = lambda ip, port: calls.append(port) or ("open" if port == 80 else "silent")
+        m._fingerprint_http = lambda ip, port: None
+        m._scan_host("10.9.9.9")
+        self.assertGreaterEqual(len(calls), 5)               # carried on past the silent ports
 
     def test_a_host_that_answers_gets_every_port_tried(self):
         calls = []
@@ -586,6 +595,306 @@ class FleetAwareness(unittest.TestCase):
         wait_done(m, r["scan_id"])
         with self.assertRaises(DiscoveryError):
             quick(local_ip=lambda: None).start(None)       # nothing to suggest -> a clear error
+
+
+# ----------------------------------------------------------------- a pretend routed network
+
+class SimNet:
+    """Stands in for socket.create_connection (DiscoveryManager(connector=...)): a network with a round-trip
+    time, hosts that answer or stay silent, and a burst limit - connects beyond `limit` in flight at once are
+    silently dropped, like a congested NAT or subnet route. Real answers come from loopback fakes."""
+
+    def __init__(self, latency=0.0, limit=None):
+        self.latency, self.limit = latency, limit
+        self.alive = set()            # hosts that refuse closed ports (they answer, so they are there)
+        self.ports = {}               # (ip, port) -> loopback port that really serves it
+        self.dead_ports = set()       # (ip, port) a firewall drops: never an answer
+        self.drop_first = {}          # (ip, port) -> connects to drop before it starts answering
+        self.extra = {}               # (ip, port) -> extra seconds of latency
+        self.lock = threading.Lock()
+        self.inflight = self.peak = self.dropped = 0
+        self.far_inflight = self.far_peak = 0     # connects made by the far scan's own pool (not the round-trip check)
+
+    def host(self, ip, **ports):
+        self.alive.add(ip)
+
+    def serve(self, ip, port, target):
+        self.alive.add(ip)
+        self.ports[(ip, port)] = target
+
+    def __call__(self, ip, port, timeout):
+        key = (ip, port)
+        with self.lock:
+            self.inflight += 1
+            self.peak = max(self.peak, self.inflight)
+            far = threading.current_thread().name.startswith("disc-far")
+            if far:
+                self.far_inflight += 1
+                self.far_peak = max(self.far_peak, self.far_inflight)
+            over = self.limit is not None and self.inflight > self.limit
+            silent = over or key in self.dead_ports or ip not in self.alive
+            if over:
+                self.dropped += 1
+            elif not silent and self.drop_first.get(key, 0) > 0:
+                self.drop_first[key] -= 1
+                silent = True
+        try:
+            lat = self.latency + self.extra.get(key, 0.0)
+            if silent or lat > timeout:
+                time.sleep(timeout)
+                raise socket.timeout("simulated: no answer")
+            if lat:
+                time.sleep(lat)
+            target = self.ports.get(key)
+            if target is None:
+                raise ConnectionRefusedError("simulated: closed")
+            return socket.create_connection(("127.0.0.1", target), timeout=timeout)
+        finally:
+            with self.lock:
+                self.inflight -= 1
+                if far:
+                    self.far_inflight -= 1
+
+
+def sim_mgr(net, **kw):
+    """A manager on a SimNet. Timeouts are scaled down ~5x from the real defaults so the tests stay quick."""
+    base = dict(cooldown=0, ssdp=False, zeroconf=False, connector=net, local_ip=lambda: "172.17.0.2",
+                workers=64, connect_timeout=0.05, http_timeout=0.8, host_timeout=6.0, scan_timeout=60.0,
+                far_workers=12, far_connect_timeout=0.3, far_http_timeout=0.8, far_start=3, far_step=2,
+                far_tick=0.05, probe_timeout=0.2, probe_seconds=1.0, pause_seconds=2.0, retry_workers=4,
+                retry_connect_timeout=0.4, retry_seconds=20.0, cancel_grace=0.5)
+    base.update(kw)
+    return DiscoveryManager(**base)
+
+
+def watch(mgr, sid, timeout=40.0):
+    """Poll a scan to its end; -> (final status, every distinct status line seen on the way)."""
+    seen, end = [], time.time() + timeout
+    while time.time() < end:
+        st = mgr.status(sid)
+        seen.append(st)
+        if st["finished"]:
+            return st, seen
+        time.sleep(0.02)
+    raise AssertionError("scan did not finish")
+
+
+class RoutedNetworks(unittest.TestCase):
+    """Far (routed / slow) networks: a small ramping pool, a long connect timeout, a canary, a second look."""
+
+    def serve(self, routes):
+        srv = make_http(routes)
+        self.addCleanup(srv.shutdown)
+        self.addCleanup(srv.server_close)
+        return srv.server_address[1]
+
+    def routed(self, **kw):
+        """A /28 with a 20 ms round trip, a burst limit of 5, a gateway and three printers."""
+        net = SimNet(latency=0.02, **kw)
+        net.host("10.77.1.1")
+        for h in ("10.77.1.2", "10.77.1.3"):
+            net.host(h)
+        net.serve("10.77.1.5", 7125, self.serve(moonraker_routes("klipper-a")))
+        net.serve("10.77.1.9", 80, self.serve(PRUSA_OPEN))
+        net.serve("10.77.1.12", 7125, self.serve(moonraker_routes("klipper-b")))
+        return net
+
+    WANT = ["10.77.1.12", "10.77.1.5", "10.77.1.9"]
+
+    @staticmethod
+    def addrs(st):
+        return sorted(f["address"] for f in st["found"])
+
+    def test_the_simulated_burst_limit_really_breaks_the_old_fast_settings(self):
+        net = self.routed(limit=5)
+        st = scan(sim_mgr(net, far_rtt_ms=1e9, retry=False), ["10.77.1.0/28"])      # never "far": 64 workers, 0.05 s
+        self.assertEqual(st["profiles"][0]["kind"], "near")
+        self.assertGreater(net.dropped, 10)
+        self.assertLess(len(st["found"]), 3, "the burst limit should have cost real printers")
+
+    def test_far_network_finds_every_printer_under_a_burst_limit(self):
+        net = self.routed(limit=5)
+        m = sim_mgr(net)
+        st, seen = watch(m, m.start(["10.77.1.0/28"])["scan_id"])
+        self.assertEqual(self.addrs(st), self.WANT)
+        self.assertEqual(st["state"], "done")
+        self.assertEqual((st["remote"], st["profiles"][0]["kind"]), (True, "far"))
+        self.assertEqual(st["remote_networks"], ["10.77.1.0/28"])
+        self.assertGreaterEqual(st["profiles"][0]["rtt_ms"], 15)
+        self.assertTrue(st["slowed"], "the pool was never found to be too big - the limit did not bite")
+        phases = {x["phase"] for x in seen}
+        self.assertLessEqual({"scanning"}, phases)
+        self.assertTrue(any(x["eta_s"] is not None for x in seen), "no time estimate while scanning")
+        done = [x["done"] for x in seen]
+        self.assertEqual(done, sorted(done))                  # progress only moves forward
+        self.assertEqual(st["done"], st["total"])
+
+    def test_healthy_far_network_costs_no_second_look(self):
+        net = self.routed()                                    # same network, no burst limit
+        st = scan(sim_mgr(net), ["10.77.1.0/28"])
+        self.assertEqual(self.addrs(st), self.WANT)
+        self.assertEqual((st["slowed"], st["recheck"]), (False, {"total": 0, "done": 0}))
+
+    def test_far_pool_starts_small_and_stays_within_its_cap(self):
+        net = self.routed()
+        m = sim_mgr(net, far_workers=8, far_start=2, far_step=2)
+        st, _ = watch(m, m.start(["10.77.1.0/28"])["scan_id"])
+        self.assertEqual(self.addrs(st), self.WANT)
+        self.assertLessEqual(net.far_peak, 8)
+        self.assertGreaterEqual(net.far_peak, 4)
+
+    def test_local_network_stays_fast_and_wide(self):
+        net = SimNet(latency=0.0)
+        net.host("10.77.2.1")
+        net.serve("10.77.2.7", 7125, self.serve(moonraker_routes("klipper-a")))
+        net.serve("10.77.2.99", 80, self.serve(PRUSA_OPEN))
+        m = sim_mgr(net)
+        t0 = time.time()
+        st = scan(m, ["10.77.2.0/24"])
+        took = time.time() - t0
+        self.assertEqual(self.addrs(st), ["10.77.2.7", "10.77.2.99"])
+        self.assertEqual((st["profiles"][0]["kind"], st["remote"]), ("near", False))
+        self.assertEqual((st["slowed"], st["recheck"]["total"]), (False, 0))
+        self.assertLess(took, 6.0, "a local /24 must stay quick")
+        self.assertGreater(net.peak, 20, "a local network is scanned with the wide pool")
+
+    def test_what_makes_a_network_far(self):
+        def kind(latency, net_cidr="10.77.3.0/24", **kw):
+            net = SimNet(latency=latency)
+            net.host("10.77.3.1")
+            m = sim_mgr(net, **kw)
+            return m._classify(None, discovery.ipaddress.ip_network(net_cidr), time.monotonic() + 3)
+        self.assertEqual(kind(0.0)["kind"], "near")
+        far = kind(0.03)
+        self.assertEqual(far["kind"], "far")
+        self.assertTrue(far["canaries"], "a far network keeps the hosts that answered as canaries")
+        self.assertEqual(kind(0.03, far_rtt_ms=100)["kind"], "near")          # the limit is a setting
+        # nobody answered the quick check: unknown, so treated as far
+        c = sim_mgr(SimNet())._classify(None, discovery.ipaddress.ip_network("10.77.3.0/24"), time.monotonic() + 3)
+        self.assertEqual((c["kind"], c["canaries"]), ("far", []))
+        # the Hub's own network is near without asking; a VPN overlay range is far whatever its speed
+        m = sim_mgr(SimNet(), local_ip=lambda: "10.77.3.50")
+        self.assertEqual(m._classify(None, discovery.ipaddress.ip_network("10.77.3.0/24"), time.monotonic())["kind"], "near")
+        m = sim_mgr(SimNet())
+        self.assertEqual(m._classify(None, discovery.ipaddress.ip_network("100.100.5.0/24"), time.monotonic() + 2)["kind"], "far")
+
+    def test_known_printers_are_the_canaries(self):
+        net = self.routed()
+        recs = [{"name": "A", "type": "moonraker", "address": "http://10.77.1.5:7125",
+                 "values": {"url": "http://10.77.1.5:7125"}},
+                {"name": "B", "type": "bambu", "address": "10.77.1.13", "values": {"ip": "10.77.1.13"}}]
+        m = sim_mgr(net, fleet_records=lambda: recs)
+        self.assertEqual(m._known_endpoints(discovery.ipaddress.ip_network("10.77.1.0/28")),
+                         [("10.77.1.5", 7125), ("10.77.1.13", 8883)])
+        c = m._classify(None, discovery.ipaddress.ip_network("10.77.1.0/28"), time.monotonic() + 3)
+        self.assertEqual(c["canaries"][0], ("10.77.1.5", 7125))
+
+    def test_a_known_printer_that_came_back_silent_is_looked_at_again(self):
+        net = self.routed()
+        net.drop_first.update({("10.77.1.5", 80): 1, ("10.77.1.5", 8883): 1,
+                               ("10.77.1.5", 7125): 2})        # the first connects are lost (the round-trip check eats one)
+        recs = [{"name": "A", "type": "moonraker", "address": "http://10.77.1.5:7125",
+                 "values": {"url": "http://10.77.1.5:7125"}}]
+        st = scan(sim_mgr(net, fleet_records=lambda: recs), ["10.77.1.0/28"])
+        self.assertEqual(self.addrs(st), self.WANT)
+        self.assertEqual(st["recheck"], {"total": 1, "done": 1})
+        mine = [f for f in st["found"] if f["address"] == "10.77.1.5"][0]
+        self.assertTrue(mine["already_added"])
+        # without the second look the same printer is missed - that is what the retry buys
+        net2 = self.routed()
+        net2.drop_first.update({("10.77.1.5", 80): 1, ("10.77.1.5", 8883): 1, ("10.77.1.5", 7125): 2})
+        st = scan(sim_mgr(net2, fleet_records=lambda: recs, retry=False), ["10.77.1.0/28"])
+        self.assertNotIn("10.77.1.5", self.addrs(st))
+
+    def test_hosts_probed_while_the_route_was_dropping_are_looked_at_again(self):
+        net = self.routed(limit=5)
+        m = sim_mgr(net)
+        st = scan(m, ["10.77.1.0/28"])
+        self.assertEqual(self.addrs(st), self.WANT)
+        self.assertTrue(st["slowed"])
+        self.assertGreaterEqual(st["recheck"]["total"], 1)     # the tainted hosts were rechecked
+        self.assertEqual(st["recheck"]["done"], st["recheck"]["total"])
+
+    def test_a_far_network_that_answered_nothing_gets_a_full_second_look(self):
+        net = SimNet(latency=0.02)                             # no gateway answers: no canary, nothing vouches for the silence
+        net.serve("10.77.4.3", 7125, self.serve(moonraker_routes("klipper-a")))
+        for pt in (80, 7125, 8883):
+            net.drop_first[("10.77.4.3", pt)] = 1
+        st = scan(sim_mgr(net, probe_seconds=0.6), ["10.77.4.0/29"])
+        self.assertEqual(self.addrs(st), ["10.77.4.3"])
+        self.assertGreaterEqual(st["recheck"]["total"], 1)
+        self.assertEqual(sim_mgr(net, retry=False).retry, False)
+
+    def test_a_slow_host_is_not_called_empty(self):
+        def make(retry):
+            net = SimNet(latency=0.02)
+            net.serve("10.77.5.4", 7125, self.serve(moonraker_routes("klipper-a")))
+            for pt in (80, 7125, 8883):
+                net.extra[("10.77.5.4", pt)] = 0.3             # answers, but slower than the connect timeout
+            return sim_mgr(net, far_connect_timeout=0.15, retry_connect_timeout=0.8, probe_seconds=0.6, retry=retry)
+        self.assertEqual(self.addrs(scan(make(False), ["10.77.5.0/29"])), [])
+        st = scan(make(True), ["10.77.5.0/29"])
+        self.assertEqual(self.addrs(st), ["10.77.5.4"])
+
+    def test_a_host_that_only_opens_port_80_is_found_in_the_first_pass(self):
+        net = SimNet(latency=0.0)
+        net.serve("10.77.6.4", 80, self.serve(PRUSA_OPEN))
+        net.dead_ports |= {("10.77.6.4", 8883), ("10.77.6.4", 7125)}     # a firewall that drops everything else
+        st = scan(sim_mgr(net, retry=False), ["10.77.6.0/29"])
+        self.assertEqual([(f["family"], f["address"]) for f in st["found"]], [("prusalink", "10.77.6.4")])
+
+    def test_the_scan_has_a_hard_time_limit_and_says_so(self):
+        net = SimNet(latency=0.02)                             # 254 silent addresses would take ~10 s here
+        m = sim_mgr(net, scan_timeout=1.5, far_workers=4, far_start=4, probe_seconds=0.4)
+        t0 = time.time()
+        st = scan(m, ["10.77.7.0/24"])
+        self.assertLess(time.time() - t0, 5.0)
+        self.assertEqual(st["state"], "done")
+        self.assertTrue(st["note"].startswith("Stopped at the time limit"), st["note"])
+
+    def test_the_second_look_is_time_boxed(self):
+        net = SimNet(latency=0.02)
+        m = sim_mgr(net, retry_seconds=1.0, retry_workers=2, probe_seconds=0.4, far_workers=16,
+                    far_connect_timeout=0.15, retry_connect_timeout=0.4)
+        t0 = time.time()
+        st = scan(m, ["10.77.8.0/25"])                          # 126 silent hosts, all of them retried in a full second look
+        self.assertEqual(st["state"], "done")
+        self.assertLess(st["recheck"]["done"], st["recheck"]["total"])
+        self.assertIn("Looked again at", st["note"])
+        self.assertLess(time.time() - t0, 20.0)
+
+
+class GateTests(unittest.TestCase):
+    def test_slow_start_halve_and_remember_the_ceiling(self):
+        g = discovery._Gate(cap=16, start=4, step=2)
+        self.assertEqual(g.window, 4)
+        g.grow()
+        g.grow()
+        self.assertEqual(g.window, 8)
+        g.shrink()                                             # overloaded at 8: back to 4, never beyond 6 again
+        self.assertEqual((g.window, g.cap), (4, 6))
+        for _ in range(10):
+            g.grow()
+        self.assertEqual(g.window, 6)
+        for _ in range(10):
+            g.shrink()
+        self.assertGreaterEqual(g.window, 2)                   # never below the floor
+
+    def test_the_gate_holds_hosts_back_while_paused(self):
+        g = discovery._Gate(cap=4, start=4)
+        cancel = threading.Event()
+        g.pause(True)
+        out = []
+        th = threading.Thread(target=lambda: out.append(g.enter(cancel)))
+        th.start()
+        time.sleep(0.25)
+        self.assertEqual(out, [])
+        g.pause(False)
+        th.join(2)
+        self.assertEqual(out, [True])
+        g.leave()
+        cancel.set()
+        self.assertFalse(g.enter(cancel))
 
 
 class Lifecycle(unittest.TestCase):
