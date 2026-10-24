@@ -231,7 +231,7 @@ class PrusaLinkPrinter:
         self.snapshot_url = snapshot_url or ""
         self._auth_mode = None           # None | "digest" | "apikey": what the password turned out to be
         self._digest = DigestAuth(self.username, self.password) if self.password else None
-        self._dl_style = None            # "raw" | "plain" once we know which download URL works
+        self._dl_style = None            # "raw" | "plain" | "storage" once we know which download URL works
         self._last = None                # last parsed status dict (or None when failing)
         self._last_ts = 0.0
         self._last_err = None
@@ -742,9 +742,14 @@ class PrusaLinkPrinter:
 
     def _download_candidates(self, filename):
         base = self._file_path(filename)
-        order = [base + "/raw", base]
+        # Core One / MK4 firmware: the API path only ever answers with file info; the file itself is at the
+        # listing's refs.download, "/<storage>/<path>" (captured 10/17). Tried last until it is known to work.
+        storage = f"/{urllib.parse.quote(self.storage, safe='')}/" + urllib.parse.quote(filename.lstrip("/"), safe="/")
+        order = [base + "/raw", base, storage]
         if self._dl_style == "plain":
-            order.reverse()
+            order = [base, base + "/raw", storage]
+        elif self._dl_style == "storage":
+            order = [storage, base + "/raw", base]
         return order
 
     def open_file(self, filename: str, timeout: float = 30, headers=None):
@@ -773,7 +778,8 @@ class PrusaLinkPrinter:
                 r.close()
                 last = "endpoint returned file info, not the file"
                 continue
-            self._dl_style = "raw" if path.endswith("/raw") else "plain"
+            self._dl_style = ("raw" if path.endswith("/raw") else
+                              "plain" if path.startswith("/api/") else "storage")
             return r
         raise PrinterError(f"PrusaLink refused the file download ({last}).")
 

@@ -37,10 +37,12 @@ except ImportError:  # very old mcp releases: fall back to base64 text for snaps
     McpImage = None
 
 from bambu import (BambuPrinter, OctoPrintPrinter, PrinterError, PrinterUnreachable, ConnectNeedsConfirm,
-                   extract_gcode_png, extract_plate_png, parse_3mf_meta)
+                   extract_gcode_png, extract_plate_png, parse_3mf_meta, META_VERSION)
+import bambu
 import fleet_store
 import modelcheck
 import gcodemeta
+import platecontents  # ==== plate contents ====
 import controls
 import settings_store
 import notify
@@ -273,7 +275,7 @@ def _job_resolver(printer, job):
     meta = _cached_meta_for(prn.name, job)
     if not meta:
         return {}
-    res = joblog.resolved_from_cached_meta(meta, parts=meta.get("parts"))
+    res = joblog.resolved_from_cached_meta(meta, parts=meta.get("parts"), plate=meta.get("plate_n"))
     if res:
         res["kind"] = getattr(prn, "kind", None) or "bambu"
         # the metadata cache keeps the slicer's filament list; keep the AMS ids so the mapping can be applied
@@ -505,6 +507,12 @@ def _event_tick():
         JOBLOG.observe(fleet)        # closes a log row whose end event never came (same tick, no extra traffic)
     except Exception as e:
         print(f"[joblog] observe failed: {type(e).__name__}: {e}", flush=True)
+    # ==== analytics ====
+    try:
+        UPTIME.observe_fleet(fleet)  # appends one line only when a printer's reachability changed (and stayed changed)
+    except Exception as e:
+        print(f"[uptime] observe failed: {type(e).__name__}: {e}", flush=True)
+    # ==== end analytics ====
 
 
 def _event_loop(stop=None, interval=None):
@@ -669,10 +677,14 @@ def _meta_for(prn: BambuPrinter, name: str, size: int, download_if_missing: bool
         data = prn.sd_download(name)
         meta = parse_3mf_meta(data)
         meta["thumb"] = _save_thumb(key, extract_plate_png(data))
-        try:                       # how many objects are on plate 1: the job log prices per part
-            meta["parts"] = joblog.parts_for_plate(joblog.slice_info_from_3mf(data))
+        try:                       # how many objects are on THIS file's plate: the job log prices per part
+            info = joblog.slice_info_from_3mf(data)
+            meta["parts"] = joblog.parts_for_plate(info, meta.get("plate_n"))
+            # ==== plate contents ==== (the same slice_info, already in memory: which objects, per plate)
+            meta["plate"] = platecontents.from_slice_info(info) if info.get("plates") else platecontents.unknown()
         except Exception:
             meta["parts"] = None
+            meta.setdefault("plate", platecontents.unknown())      # ==== plate contents ==== (so a backfill does not retry it for ever)
         with _cache_lock:
             cache = _cache_load()
             cache[key] = meta
@@ -708,6 +720,7 @@ def _octo_gcode_facts(prn, name: str, size: int, head) -> dict:
     materials [] = looked and found none: cached, not asked again).
     `.bgcode` keeps them at the start (the head we already hold), plain G-code at the end (one small ranged read,
     only for a driver that can do it - OctoPrint). Raises PrinterError on a transport problem (nothing cached)."""
+    tail = None
     if str(name).lower().endswith(".bgcode"):
         facts = gcodemeta.from_bgcode_head(head) if head else {}
     elif hasattr(prn, "download_tail"):
@@ -716,6 +729,8 @@ def _octo_gcode_facts(prn, name: str, size: int, head) -> dict:
     else:
         facts = {}
     facts.setdefault("materials", [])
+    if head:       # ==== plate contents ==== read from the head (and tail) already in hand: no extra request
+        facts["plate"] = platecontents.from_slice(name, head, tail, size)
     return facts
 
 
@@ -731,7 +746,8 @@ def _octo_meta_for(prn: OctoPrintPrinter, name: str, size: int):
             cache = _cache_load()
             have = cache.get(key, {})
             have_head = "thumb" in have and "slicer_model" in have
-            if have_head and "materials" in have:
+            want_plate = _plate_backfill_wanted() and "plate" not in have     # ==== plate contents ====
+            if have_head and "materials" in have and not want_plate:
                 return cache[key]
         entry_new, data = {}, None
         if not have_head:
@@ -740,8 +756,12 @@ def _octo_meta_for(prn: OctoPrintPrinter, name: str, size: int):
             # None = looked and found nothing, so it is not downloaded again
             entry_new = {"thumb": _save_thumb(key, extract_gcode_png(data)),
                          "slicer_model": modelcheck.gcode_head_model(data) or None}
+        elif want_plate:                                           # ==== plate contents ==== (opt-in backfill of an older entry)
+            data = prn.download_head(name)
         if "materials" not in have:
             entry_new.update(_octo_gcode_facts(prn, name, size, data))
+        elif want_plate:
+            entry_new["plate"] = _octo_gcode_facts(prn, name, size, data).get("plate") or platecontents.unknown()
         with _cache_lock:
             cache = _cache_load()
             cache[key] = {**(cache.get(key) or {}), **entry_new}
@@ -923,6 +943,16 @@ def _describe_meta(meta: dict) -> dict:
 _prewarm_running: set = set()
 _prewarm_guard = threading.Lock()
 
+def _meta_stale(entry) -> bool:
+    """A cached .gcode.3mf entry written before the picture / plate number followed the file's real plate (it holds
+    plate 1's picture for a plate-4 file). Re-read once through the normal backfill (idle printers only)."""
+    if not isinstance(entry, dict) or entry.get("error") or (entry.get("meta_v") or 0) >= META_VERSION:
+        return False
+    # a plain plate-1 file already holds the right picture: re-reading it would only tie up the printer's one FTPS
+    # session (a P1S full of files = minutes of downloads, while the human may be sending a job from the slicer)
+    return entry.get("plates") != ["Metadata/plate_1.gcode"]
+
+
 def _prewarm_bambu(prn: BambuPrinter):
     if not _printer_is_idle(prn):
         return  # don't pull a big file off a printer that's mid-job (or whose state we cannot see)
@@ -938,7 +968,8 @@ def _prewarm_bambu(prn: BambuPrinter):
         entry = cache.get(f"{prn.name}|{f['name']}|{f['size']}")
         if entry is None:
             todo.append((f, False))
-        elif "thumb" not in entry:
+        elif ("thumb" not in entry or (_plate_backfill_wanted() and "plate" not in entry)     # ==== plate contents ====
+              or _meta_stale(entry)):
             todo.append((f, True))
     if not todo:
         return
@@ -980,7 +1011,8 @@ def _prewarm_octo(prn: OctoPrintPrinter):
     # unlike Bambu there's no "backfill an old entry" case — the cache entry
     # for an OctoPrint file only ever holds "thumb", so missing the key
     # entirely and missing "thumb" on it are the same condition
-    todo = [f for f in files if not {"thumb", "materials"} <= set(cache.get(f"{prn.name}|{f['name']}|{f['size']}", {}))]
+    todo = [f for f in files if not {"thumb", "materials"} <= set(cache.get(f"{prn.name}|{f['name']}|{f['size']}", {}))
+            or (_plate_backfill_wanted() and "plate" not in cache.get(f"{prn.name}|{f['name']}|{f['size']}", {}))]   # ==== plate contents ====
     if not todo:
         return
     print(f"[prewarm] {prn.name}: warming {len(todo)} file(s)", flush=True)
@@ -1117,6 +1149,8 @@ def list_printers() -> str:
             line += f' — "{s["job"]}" {s["percent"]}% (~{s["remaining_min"]} min left)'
         if not s["connected"]:
             line += "  [MQTT DISCONNECTED]"
+        if s.get("exclude_object") is False:        # ==== plate contents ==== a Klipper printer that cannot cancel one object
+            line += f'  [WARNING: {s.get("exclude_object_note") or "Exclude objects not set up in printer.cfg"}]'
         gl = group_of.get(s["printer"]) or next((v for k, v in group_of.items() if k.lower() == str(s["printer"]).lower()), [])
         if gl:
             line += f'  [groups: {", ".join(gl)}]'
@@ -1126,7 +1160,9 @@ def list_printers() -> str:
 
 @_tool
 def printer_status(printer: str) -> str:
-    """Full live status for one printer: state, temps, job, progress, errors."""
+    """Full live status for one printer: state, temps, job, progress, errors. A Klipper printer also reports `exclude_object`
+    (true / false / null = not checked yet): false means [exclude_object] is missing from its printer.cfg, so one object of a
+    plate cannot be cancelled (`exclude_object_note` says so in words)."""
     prn = _pick(printer)
     prn.refresh(wait=2.5)
     return json.dumps(prn.snapshot(), indent=2)
@@ -1172,6 +1208,7 @@ def list_sd_files(printer: str, refresh_metadata: bool = False) -> str:
             for k in ("weight_g", "layer_mm", "nozzle_mm"):         # read from the file itself when it was idle enough to look
                 if not f.get(k) and e.get(k):
                     f[k] = e[k]
+            f["plate"] = _plate_of(e)                                # ==== plate contents ====
             if f.get("thumb"):
                 f["thumb_lazy"] = False
             f.pop("thumb_ref", None)
@@ -1182,7 +1219,7 @@ def list_sd_files(printer: str, refresh_metadata: bool = False) -> str:
         meta = _meta_for(prn, f["name"], f["size"], refresh_metadata)
         entry = {"name": f["name"], "size_mb": round(f["size"] / 1048576, 2),
                  "modified": f["modified"], "thumb": meta.get("thumb") if meta else None,
-                 **_describe_meta(meta)}
+                 **_describe_meta(meta), "plate": _plate_of(meta)}      # ==== plate contents ====
         rule = convention_for(f["name"])
         if rule and meta:
             wanted = {color_name(fl["color"]) for fl in meta.get("filaments", [])}
@@ -1576,6 +1613,7 @@ def suggest_mapping(printer: str, filename: str) -> str:
             "file": filename, "display_name": f.get("display_name") or filename,
             "printer": prn.name, "printer_kind": getattr(prn, "kind", ""),
             "print_time": f.get("print_time"), "weight_g": f.get("weight_g"),
+            "plate": _plate_of(entry),                                   # ==== plate contents ====
             "ams_mapping": [], "mapping_described": "the loaded filament (no AMS on this printer)",
             "notes": ["This printer prints with whatever filament is physically loaded — check it."],
             "blocked": None, **mc,
@@ -1624,6 +1662,7 @@ def suggest_mapping(printer: str, filename: str) -> str:
     return json.dumps({
         "file": filename, "printer": prn.name, "printer_kind": getattr(prn, "kind", ""),
         "print_time": meta.get("print_time"), "weight_g": meta.get("weight_g"),
+        "plate": _plate_of(meta),                                        # ==== plate contents ====
         "ams_mapping": mapping, "mapping_described": mapping_described,
         "filaments": _filament_rows(filaments, mapping),
         "remembered": remembered is not None, "remembered_at": remembered,
@@ -1692,6 +1731,20 @@ def _start_print(printer, filename, ams_mapping, confirm, model_override, bed_cl
         lock.release()
 
 
+def _plate_param_for(prn, filename, size):
+    """The gcode path INSIDE the .gcode.3mf to tell a Bambu to print ('Metadata/plate_4.gcode' for a plate-4 export),
+    from the cached details of that exact file (cache only: nothing is downloaded). None = not a Bambu, or the Hub
+    holds no details for the file - the caller then keeps the driver's plate-1 default."""
+    if _is_octo(prn):
+        return None
+    try:
+        with _cache_lock:
+            meta = _cache_load().get(f"{prn.name}|{filename}|{size or 0}")
+        return bambu.plate_gcode_from_meta(meta)
+    except Exception:
+        return None
+
+
 def _start_locked(prn, filename, ams_mapping, nonce, allow_remap, model_override=False) -> str:
     key = prn.name.lower()
     ticket, why = START_TICKETS.peek(nonce, prn, filename)
@@ -1733,7 +1786,11 @@ def _start_locked(prn, filename, ams_mapping, nonce, allow_remap, model_override
     if not START_TICKETS.consume(nonce):    # single use: a parallel request got there first
         return "REFUSED: confirm string not accepted — it was already used. " + _NOT_CONFIRMED
     try:
-        prn.start_print(filename, ams_mapping)
+        plate_path = _plate_param_for(prn, filename, entry.get("size"))
+        if plate_path:
+            prn.start_print(filename, ams_mapping, plate=plate_path)
+        else:                                 # no metadata for this file at all: the old behaviour (plate 1), last resort
+            prn.start_print(filename, ams_mapping)
     except Exception as e:
         return f"REFUSED: {e}"
     _START_PENDING[key] = time.monotonic()
@@ -2290,7 +2347,7 @@ def _library_seed_meta(prn, entry: dict):
         except OSError:
             png = None
     seeded = {k: meta.get(k) for k in ("printer_model_id", "printer_model", "print_seconds", "print_time", "weight_g",
-                                       "filaments", "plates", "parts")}
+                                       "filaments", "plates", "plate_n", "meta_v", "parts", "plate")}
     seeded["thumb"] = _save_thumb(key, png)
     with _cache_lock:
         cache = _cache_load()
@@ -2756,6 +2813,172 @@ async def _api_library_scan(request: Request):
 
 # ==== end library ====
 
+# ==== plate contents ====
+# What is on a plate - how many of which object - from the slicer's cancel-object labels (platecontents.py explains the
+# formats). The answer is worked out where the Hub already holds the bytes and kept beside the other facts:
+#   * Bambu .gcode.3mf   in _meta_for (the file is downloaded there anyway), key "plate" of the metadata-cache entry
+#   * OctoPrint / PrusaLink / Klipper G-code   in _octo_gcode_facts (the 1 MB head and 64 KB tail are read there anyway)
+#   * library files      on upload (library.extract_meta); older ones are read once from the Hub's own disk
+# NOTHING in this block asks a printer for anything: it reads the cache. A file the Hub has not read yet is "unknown".
+# A cache entry made before this version has no "plate" key and stays "unknown" until the file is read again; set
+# FABRICA_PLATE_BACKFILL=1 to let the background pass (_prewarm) read those files once more (see _plate_backfill_wanted).
+
+def _plate_of(entry) -> dict:
+    """The plate-contents result stored in a metadata-cache entry or a library meta dict ("unknown" when there is none)."""
+    try:
+        r = entry.get("plate") if isinstance(entry, dict) else None
+        return platecontents.clean_result(r) if isinstance(r, dict) else platecontents.unknown()
+    except Exception:
+        return platecontents.unknown()
+
+
+def _plate_cached(prn, filename, size) -> dict:
+    with _cache_lock:
+        entry = _cache_load().get(f"{prn.name}|{filename}|{size or 0}")
+    return _plate_of(entry)
+
+
+def _plate_library(entry) -> dict:
+    """A library file's result: stored on upload; a file added before this version is read now from the Hub's own disk
+    (definitive) and the answer is kept."""
+    meta = entry.get("meta") if isinstance(entry.get("meta"), dict) else {}
+    if isinstance(meta.get("plate"), dict):
+        return _plate_of(meta)
+    if meta.get("error"):
+        return platecontents.unknown()
+    try:
+        r = platecontents.from_path(LIB.file_path(entry["name"]), entry.get("kind"))
+        LIB.update_meta(entry["name"], plate=r)
+        return r
+    except Exception:
+        return platecontents.unknown()
+
+
+def _plate_backfill_library():
+    """Background, once at start: read the library files stored before this version. Local disk only, no printer; one file at a
+    time with a short pause; the index is saved every 20 files."""
+    try:
+        todo = [e for e in LIB.entries() if not isinstance(e.get("meta"), dict) or ("plate" not in e["meta"] and not e["meta"].get("error"))]
+        n = 0
+        for e in todo:
+            try:
+                LIB.update_meta(e["name"], save=False, plate=platecontents.from_path(LIB.file_path(e["name"]), e.get("kind")))
+                n += 1
+            except Exception:
+                pass
+            if n and n % 20 == 0:
+                LIB.save_index()
+            time.sleep(0.05)
+        if n:
+            LIB.save_index()
+            print(f"[plate] read the object labels of {n} library file(s)", flush=True)
+    except Exception as e:
+        print(f"[plate] library pass stopped: {e}", flush=True)
+
+
+def _picture_backfill_library():
+    """Background, once at start: library .gcode.3mf files whose details were read before the picture followed the
+    file's real plate get their picture (and plate number / part count) read again - from the Hub's own disk, no
+    printer, one file at a time. Done files carry meta_v, so this finds nothing the next time."""
+    try:
+        todo = [e for e in LIB.entries() if e.get("kind") == "3mf" and isinstance(e.get("meta"), dict)
+                and not e["meta"].get("error") and (e["meta"].get("meta_v") or 0) < META_VERSION]
+        n = 0
+        for e in todo:
+            try:
+                with open(LIB.file_path(e["name"]), "rb") as fh:
+                    data = fh.read()
+                meta = parse_3mf_meta(data)
+                if meta.get("error"):
+                    continue
+                info = joblog.slice_info_from_3mf(data)
+                LIB.refresh_picture(e["name"], extract_plate_png(data), save=False, plates=meta.get("plates"),
+                                    plate_n=meta.get("plate_n"), meta_v=META_VERSION,
+                                    parts=joblog.parts_for_plate(info, meta.get("plate_n")))
+                n += 1
+            except Exception:
+                pass
+            if n and n % 20 == 0:
+                LIB.save_index()
+            time.sleep(0.05)
+        if n:
+            LIB.save_index()
+            print(f"[plate] re-read the plate picture of {n} library file(s)", flush=True)
+    except Exception as e:
+        print(f"[plate] picture pass stopped: {e}", flush=True)
+
+
+def _plate_backfill_wanted() -> bool:
+    return os.environ.get("FABRICA_PLATE_BACKFILL", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _plate_parts(plate, parts, psrc):
+    """A labelled plate's object count is a better answer than "assumed 1" / "unknown"; a counted slice_info stays as it is."""
+    if plate.get("labels") == "present" and isinstance(plate.get("total"), int) and plate["total"] > 0 and psrc in ("assumed", "unknown"):
+        return plate["total"], "labels"
+    return parts, psrc
+
+
+def _plate_agent_view(plate) -> dict:
+    """The result plus one sentence an agent can read aloud and must obey: what it may and may not say about quantity."""
+    r = dict(plate)
+    lab = plate.get("labels")
+    if lab == "present" and plate.get("summary"):
+        r["meaning"] = (f"The slicer labelled the objects: this plate holds {plate['summary']}. Put the quantity in the name "
+                        "(for example 4x) if the human's naming rule asks for one.")
+    elif lab == "present":
+        r["meaning"] = "The file has object labels but the quantity could not be read in full. Do not guess a quantity."
+    elif lab == "missing":
+        r["meaning"] = platecontents.MISSING_TEXT + " Do not guess a quantity; tell the human the file needs re-slicing with labels."
+    else:
+        r["meaning"] = ("The Hub could not tell whether this file has object labels (not read yet, only part of it was read, or "
+                        "the format hides them). Do not guess a quantity.")
+    return r
+
+
+def _plate_lookup(location, filename) -> dict:
+    """plate_contents for one file, from what the Hub already holds. No printer is contacted, nothing is downloaded."""
+    kind, prn = _rn_target(location)
+    if kind == "library":
+        e = LIB.get(filename)
+        plate, name, where = _plate_library(e), e["name"], "library"
+    else:
+        rows = list((_FILES_SEEN.get(prn.name.lower()) or {}).values()) if _is_octo(prn) else list(prn.sd_listing_cached())
+        row = _rn_find(rows, filename)
+        if row is None:
+            raise ValueError(f"'{filename}' is not on {prn.name}'s last saved file list. Call list_sd_files for {prn.name} first.")
+        plate, name, where = _plate_cached(prn, row["name"], row.get("size") or 0), row["name"], prn.name
+    return {"location": where, "name": name, **_plate_agent_view(plate)}
+
+
+@_tool
+def plate_contents(printer: str, filename: str) -> str:
+    """What is on one file's plate - how many of which object - read from the slicer's cancel-object labels. `printer` is a
+    printer name or "library". Returns labels = "present" (with `total`, `groups` [{name, count}] and a `summary` such as
+    "4× Hose Clip + 2× Hook"), "missing" (the file was sliced without "Label objects": the quantity cannot be known) or
+    "unknown" (the Hub has not read enough of the file to say), plus `source` (slice_info, m486, exclude_object, objects_info,
+    comments) and a `meaning` sentence. An object built from several parts counts as ONE. Use it to put the quantity in a file
+    name; never guess a quantity when labels are missing or unknown. Reads cached information only: no printer is contacted."""
+    try:
+        return json.dumps(_plate_lookup(printer, filename), indent=2)
+    except (ValueError, _library.LibraryError) as e:
+        return f"REFUSED: {e}"
+
+
+@mcp.custom_route("/api/files/plate", methods=["GET"])
+@_safe_route
+async def _api_file_plate(request: Request):
+    q = request.query_params
+    try:
+        d = await _run(_plate_lookup, q.get("location", ""), q.get("name", ""))
+    except _library.LibraryError as e:
+        return _library_error(e)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    return JSONResponse(d, headers={"Cache-Control": "no-store"})
+
+# ==== end plate contents ====
+
 
 # ==== rename ====
 # File renaming MECHANICS (see renamer.py and docs/renaming.md). The Hub knows no naming convention: an agent decides
@@ -2851,6 +3074,7 @@ def _file_facts(location, filename, may_read) -> dict:
         else:
             parts, psrc = 1, "assumed"
         extra = {k: d.get(k) for k in ("layer_height", "layers", "nozzle", "infill", "supports", "slicer")}
+        plate = _plate_library(e)                                              # ==== plate contents ====
         where = "library"
     else:
         rows, src = _rn_listing(prn, True)
@@ -2869,6 +3093,7 @@ def _file_facts(location, filename, may_read) -> dict:
             d["filaments"] = []
             parts, psrc = 1, "assumed"
             extra = {}
+            plate = _plate_of(entry)                                           # ==== plate contents ====
             from_ = "live file list + cache"
             base_note = "Gcode files do not say which filament they use; weight assumes PLA density."
         else:
@@ -2876,11 +3101,13 @@ def _file_facts(location, filename, may_read) -> dict:
             d = _library.describe_meta(meta, color_name)
             parts, psrc = (meta.get("parts"), "slice_info") if isinstance(meta, dict) and isinstance(meta.get("parts"), int) and meta.get("parts") > 0 else (None, "unknown")
             extra = {}
+            plate = _plate_of(meta)                                            # ==== plate contents ====
             from_ = "cache" if (busy or src == "cache") else "cache + live file list"
         if busy or src == "cache":
             base_note = ("facts from cache: " + prn.name + " is busy or its live list is not available, so nothing was read "
                          "from the printer itself. " + (base_note or "")).strip()
         where = prn.name
+    parts, psrc = _plate_parts(plate, parts, psrc)                             # ==== plate contents ====
     base = _renamer.basename(name)
     ext = _renamer.file_ext(base)
     others = []
@@ -2905,7 +3132,8 @@ def _file_facts(location, filename, may_read) -> dict:
         printed = None
     out = {"location": where, "name": name, "stem": base[:len(base) - len(ext)] if ext else base, "extension": ext,
            "folder": folder or None, "size_bytes": size, "size_mb": round(size / 1048576, 2),
-           "parts": parts, "parts_source": psrc, "sliced_for": d.get("sliced_for"),
+           "parts": parts, "parts_source": psrc, "plate_contents": _plate_agent_view(plate),   # ==== plate contents ====
+           "sliced_for": d.get("sliced_for"),
            "print_time": d.get("print_time"), "print_seconds": d.get("print_seconds"), "weight_g": d.get("weight_g"),
            "filaments": [{"material": f["type"], "colour": f["color_name"], "grams": f.get("used_g")} for f in d.get("filaments") or []],
            **{k: v for k, v in extra.items() if v is not None},
@@ -2919,7 +3147,9 @@ def file_facts(location: str, filename: str) -> str:
     """The facts you need to choose a good file name - the Hub has NO naming rules of its own; yours decide. `location` is
     a printer name or "library". Returns the current name, the extension to keep (`.gcode.3mf` counts as one), size, how
     many OBJECTS are on the plate (`parts`, with `parts_source`: slice_info = counted in the file, assumed = a gcode file
-    cannot say so 1 is assumed, unknown), the printer model it was sliced for, print time, grams, the filaments as
+    cannot say so 1 is assumed, labels = counted from the slicer's object labels, unknown), `plate_contents` (what is on the
+    plate: labels present / missing / unknown, the objects grouped by name, e.g. "4× Hose Clip + 2× Hook" - put a quantity in a
+    name only when labels are present, never guess otherwise), the printer model it was sliced for, print time, grams, the filaments as
     material + colour WORDS, where else the same file exists (other printers / the library), and how often it was
     printed (job history, under any of its names). Reads cached information; a printer that is busy is never contacted
     ("facts from cache" says so)."""
@@ -3315,7 +3545,10 @@ def rename_files() -> str:
         "Renaming print files with Fabrica. The Hub has NO naming rules - yours decide the names; the Hub only gives facts "
         "and a safe way to apply them.\n"
         "1. file_facts(location, filename) for each file (location = printer name or \"library\"): parts on the plate, "
-        "filament material + colour, sliced-for model, time, grams, where else it exists, how often it was printed.\n"
+        "filament material + colour, sliced-for model, time, grams, where else it exists, how often it was printed, and "
+        "plate_contents (how many of which object, from the slicer's object labels).\n"
+        "   If your rule wants a quantity in the name and plate_contents.labels is \"present\", use its summary (4x Hose Clip + 2x "
+        "Hook). If it is \"missing\" or \"unknown\" do NOT guess a quantity.\n"
         "2. Decide each new name with YOUR OWN naming rules. Keep the extension (.gcode.3mf stays .gcode.3mf); give only "
         "the file name, the folder stays.\n"
         "3. rename_preview([{location, old_name, new_name}, ...]) -> a before/after table, per-row problems and a "
@@ -3976,6 +4209,7 @@ def _file_detail(prn, filename: str, include_machine=None) -> dict:
         "can_rename": bool(_rn_can_move(prn)), "can_delete": True,
     })
     d["cost"] = _file_cost_estimate(prn, d, include_machine)
+    d["plate"] = _plate_cached(prn, filename, row.get("size"))                 # ==== plate contents ====
     try:
         d["last_printed"] = JOBLOG.last_printed([d["display_name"], filename])
     except Exception:
@@ -5216,6 +5450,28 @@ async def _api_costs_file(request: Request):
     return JSONResponse({**d, **({"filter": info} if info else {})})
 
 
+# ==== analytics ====
+# One summary of the job log across time (analytics.py): success rate, hours, filament, cost, failures, trend, uptime.
+# `read` scope like /api/stats; the printer-group filter is the History one (?group=A&group=B&printer=X).
+import analytics
+import uptime
+UPTIME = uptime.UptimeLog(DATA_DIR)      # <data dir>/uptime.jsonl: one line per reachability CHANGE, bounded; see uptime.py
+
+
+@mcp.custom_route("/api/analytics", methods=["GET"])
+@_safe_route
+async def _api_analytics(request: Request):
+    q = request.query_params
+    pf, info = _request_filter(request)
+    try:
+        out = await _run(analytics.summary, JOBLOG, UPTIME, q.get("period") or "30d", pf, None,
+                         [p.name for p in list(PRINTERS.values())])
+    except ValueError as e:
+        return _bad_request(e)
+    return JSONResponse({**out, **({"filter": info} if info else {})})
+# ==== end analytics ====
+
+
 def _money(rates, v) -> str:
     return "n/a" if v is None else f"{rates.currency}{v:.2f}" if abs(v) >= 1 else f"{rates.currency}{v:.3f}"
 
@@ -5544,5 +5800,7 @@ if __name__ == "__main__":
     import atexit
     start_event_loop()
     DETECTION.start()                     # idle until Settings > Detection is switched on
+    threading.Thread(target=lambda: (_plate_backfill_library(), _picture_backfill_library()), daemon=True).start()     # ==== plate contents ==== (library files stored before labels were read)
     atexit.register(DETECTION.stop)       # saves each printer's learned baseline
+    atexit.register(UPTIME.stop)          # ==== analytics ==== notes when the Hub stopped, so the gap is not counted as "online"
     mcp.run(transport="streamable-http")

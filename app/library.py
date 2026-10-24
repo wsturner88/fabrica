@@ -36,7 +36,8 @@ import unicodedata
 import zipfile
 
 import modelcheck
-from bambu import extract_gcode_png, extract_plate_png, open_zip_bounded, parse_3mf_meta
+import platecontents
+from bambu import META_VERSION, extract_gcode_png, extract_plate_png, open_zip_bounded, parse_3mf_meta, plate_number
 
 ALLOWED_EXT = (".gcode.3mf", ".3mf", ".bgcode", ".gcode")
 DEFAULT_MAX_MB = 500
@@ -230,12 +231,14 @@ def _extras_3mf(data: bytes) -> dict:
     bed_key = _BED_KEYS.get(str(settings.get("curr_bed_type") or "").strip().lower())
     beds = settings.get(bed_key) if bed_key else None
     out["_bed_temps"] = beds if isinstance(beds, list) else None
+    si_text = None
     for n in names:                                        # plate-level facts the slicer wrote itself
         if n.endswith("slice_info.config"):
             try:
                 t = _zcap(z, n).decode("utf8", "ignore")
             except Exception:
                 break
+            si_text = t
             m = re.search(r'key="support_used"\s+value="([^"]*)"', t)
             if m and "supports" not in out:
                 out["supports"] = m.group(1).strip().lower() == "true"
@@ -254,8 +257,8 @@ def _extras_3mf(data: bytes) -> dict:
             except Exception:
                 pass
             break
-    plate = next((n for n in names if re.match(r"Metadata/plate_1\.gcode$", n)), None)
-    if plate:
+    plate = f"Metadata/plate_{plate_number(names, si_text)}.gcode"      # the plate this file holds (plate-4 export: plate_4)
+    if plate in names:
         try:
             with z.open(plate) as fh:
                 head = fh.read(262144).decode("utf8", "ignore")
@@ -338,7 +341,9 @@ def extract_meta(path: str, kind: str):
             png = _safe(extract_plate_png, data)
             try:
                 import joblog
-                meta["parts"] = joblog.parts_for_plate(joblog.slice_info_from_3mf(data))
+                info = joblog.slice_info_from_3mf(data)
+                meta["parts"] = joblog.parts_for_plate(info, meta.get("plate_n"))
+                meta["plate"] = platecontents.from_slice_info(info) if info.get("plates") else platecontents.unknown()   # ==== plate contents ====
             except Exception:
                 meta["parts"] = None
             extras = {}
@@ -367,6 +372,7 @@ def extract_meta(path: str, kind: str):
             meta["print_seconds"] = facts["print_seconds"]
             meta["print_time"] = _fmt_time(facts["print_seconds"])
         meta.update({k: v for k, v in facts.items() if v is not None and k != "print_seconds"})
+        meta["plate"] = platecontents.from_path(path, kind)                        # ==== plate contents ====
         return meta, _safe(extract_gcode_png, head)
     except Exception as e:                                   # a damaged file is still a file
         return {"error": f"could not read the details ({type(e).__name__})"}, None
@@ -408,6 +414,7 @@ def describe_meta(meta, color_name=lambda h: "UNKNOWN") -> dict:
         "infill": meta.get("infill"), "supports": meta.get("supports"), "slicer": meta.get("slicer"),
         "sliced_for": modelcheck.check(sliced, "")["sliced_for"] if sliced else None,
         "filaments": fil, "parts": meta.get("parts"),
+        "plate": platecontents.clean_result(meta["plate"]) if isinstance(meta.get("plate"), dict) else None,   # ==== plate contents ====
         "details_error": meta.get("error"),
     }
 
@@ -621,6 +628,38 @@ class Library:
                 if os.path.isfile(os.path.join(self.files_dir, name)):
                     out.append({**e, "name": name})
             return sorted(out, key=lambda e: e["name"].casefold())
+
+    def update_meta(self, name, save=True, **fields) -> bool:
+        """Add or replace keys of one file's stored details (a re-read of the same file; nothing else changes).
+        ==== plate contents ==== False when the file is gone."""
+        with self._lock:
+            k, e = self._find(name)
+            if e is None:
+                return False
+            e["meta"] = {**(e.get("meta") if isinstance(e.get("meta"), dict) else {}), **fields}
+            if save:
+                self._save()
+            return True
+
+    def save_index(self):
+        with self._lock:
+            self._save()
+
+    def refresh_picture(self, name, png, save=True, **fields) -> bool:
+        """Replace one file's plate preview (and add/replace keys of its stored details) after a re-read of the same
+        file on the Hub's own disk. `png` None keeps the current picture. False when the file is gone."""
+        with self._lock:
+            k, e = self._find(name)
+            if e is None:
+                return False
+            if png:
+                thumb = e.get("thumb") or (hashlib.sha1((k + str(e.get("sha256") or "")).encode()).hexdigest() + ".png")
+                self._write_private(os.path.join(self.thumbs_dir, thumb), png)
+                e["thumb"] = thumb
+            e["meta"] = {**(e.get("meta") if isinstance(e.get("meta"), dict) else {}), **fields}
+            if save:
+                self._save()
+            return True
 
     def get(self, name) -> dict:
         clean = sanitize_name(name)

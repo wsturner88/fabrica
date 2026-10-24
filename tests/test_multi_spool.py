@@ -105,7 +105,7 @@ class FakeBambu:
     def sd_download(self, filename):
         return self.files[filename]
 
-    def start_print(self, filename, ams_mapping):
+    def start_print(self, filename, ams_mapping, plate="Metadata/plate_1.gcode"):
         if self.fail:
             raise RuntimeError("the printer did not answer")
         self.started.append((filename, list(ams_mapping)))

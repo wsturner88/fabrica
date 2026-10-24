@@ -9,6 +9,7 @@ Endpoints used (Moonraker web API; see "uncertain" notes in docs/drivers.md):
     GET    /printer/info                         Klipper version / state message
     GET    /printer/objects/query?print_stats&virtual_sdcard&display_status
                                   &extruder&heater_bed&webhooks    live status (one request)
+    GET    /printer/objects/list                 which Klipper objects are loaded (is [exclude_object] in printer.cfg?)
     GET    /server/files/list?root=gcodes        every G-code file (recursive, flat)
     GET    /server/files/metadata?filename=      slicer metadata (estimated_time, filament_total, ...)
     GET    /server/files/gcodes/<path>           download a file (Range supported)
@@ -102,6 +103,9 @@ class MoonrakerPrinter:
     WEBCAM_NONE_TTL = 60
     SNAPSHOT_TTL = 3
     META_LOOKUPS_PER_LISTING = 100
+    EXCLUDE_RETRY_S = 60               # ==== plate contents ==== a failed look is repeated after this long
+    EXCLUDE_RECHECK_S = 1800           # a "not set up" answer is looked at again this often (printer.cfg may have been fixed)
+    EXCLUDE_NOTE = "Exclude objects not set up in printer.cfg"
 
     CONFIG_FIELDS = [
         {"name": "name", "label": "Printer name", "type": "text", "required": True,
@@ -146,6 +150,8 @@ class MoonrakerPrinter:
         self._cam_refreshing = False
         self._camera = None
         self._caps_cache = None            # (timestamp, {lights, macros, extruder, bed})
+        self._excl = None                  # ==== plate contents ==== is [exclude_object] loaded? True / False / None = not looked yet
+        self._excl_ts = 0.0                # when it was last looked at (or tried)
 
     # ---- construction helpers ----------------------------------------------
 
@@ -348,6 +354,29 @@ class MoonrakerPrinter:
     def _r1(v):
         return round(v, 1) if isinstance(v, (int, float)) else None
 
+    # ==== plate contents ====
+    def _check_exclude_object(self):
+        """Is Klipper's [exclude_object] section loaded? One small read-only GET (`/printer/objects/list`) per connect: a printer
+        without it cannot cancel one object, and the G-code's EXCLUDE_OBJECT_* lines do nothing. Called from _poll while Klipper is
+        ready; the answer is kept, a failed look is repeated after EXCLUDE_RETRY_S, and "not set up" is looked at again every
+        EXCLUDE_RECHECK_S (a Klipper restart, seen as 'not ready', forgets it at once). Never raises."""
+        now = time.time()
+        if self._excl is True:
+            return
+        if self._excl is False and now - self._excl_ts < self.EXCLUDE_RECHECK_S:
+            return
+        if self._excl is None and now - self._excl_ts < self.EXCLUDE_RETRY_S:
+            return
+        self._excl_ts = now
+        try:
+            res = self._call("GET", "/printer/objects/list", timeout=4, what="list the Klipper objects")
+        except PrinterError:
+            return                                  # keep what we knew (None = unknown, shown as nothing)
+        objs = res.get("objects") if isinstance(res, dict) else None
+        if isinstance(objs, list):
+            self._excl = "exclude_object" in objs
+    # ==== end plate contents ====
+
     def _poll(self):
         try:
             res = self._call("GET", "/printer/objects/query?" + _OBJECTS, timeout=4, what="read status")
@@ -370,6 +399,7 @@ class MoonrakerPrinter:
             z_mm = round(pos[2], 2)
         if wh.get("state") not in (None, "ready"):
             return self._set_klippy_down(wh.get("state"), wh.get("state_message"))
+        self._check_exclude_object()                # ==== plate contents ==== (one small GET, then cached)
         raw = (ps.get("state") or "").lower()
         state = self.STATE_MAP.get(raw, "UNKNOWN")
         progress = vs.get("progress")
@@ -415,6 +445,7 @@ class MoonrakerPrinter:
         self._set_klippy_down(ks)
 
     def _set_klippy_down(self, klippy_state, message=None):
+        self._excl, self._excl_ts = None, 0.0       # ==== plate contents ==== Klipper is restarting: look again when it is back
         self._last = {
             "state": "DISCONNECTED", "raw": f"klippy:{klippy_state}", "job": "", "percent": None,
             "remaining_min": None, "layer": "", "nozzle_c": None, "nozzle_target_c": None,
@@ -447,7 +478,10 @@ class MoonrakerPrinter:
                 "bed_c": s["bed_c"], "bed_target_c": s["bed_target_c"],
                 "print_error": s["print_error"], "fault": bool(s.get("fault")),
                 "age_seconds": round(time.time() - self._last_ts),
-                "raw_state": s["raw"], "error": s.get("message")}
+                "raw_state": s["raw"], "error": s.get("message"),
+                # ==== plate contents ==== True / False / None (not looked at yet); the note is only there when it is False
+                "exclude_object": self._excl,
+                "exclude_object_note": self.EXCLUDE_NOTE if self._excl is False else None}
 
     def fresh_snapshot(self) -> dict:
         """snapshot() that skips the 3 s cache (safety decisions must not act on an old reading)."""

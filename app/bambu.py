@@ -393,22 +393,84 @@ def parse_3mf_meta(data: bytes) -> dict:
     out["filaments"] = filaments
     plates = [n for n in z.namelist() if re.match(r"Metadata/plate_\d+\.gcode$", n)]
     out["plates"] = plates
+    out["plate_n"] = plate_number(z.namelist(), t)          # the plate this file really holds (OrcaSlicer: one file per plate)
+    out["meta_v"] = META_VERSION
     return out
 
 
+# Bumped whenever what the Hub caches about a .gcode.3mf changes in a way old entries must be read again for
+# (v2: the picture / plate number follow the plate the file really holds, not a hardcoded plate 1).
+META_VERSION = 2
+
+_PLATE_GCODE_RE = re.compile(r"Metadata/plate_(\d+)\.gcode$")
+_PLATE_PNG_RE = re.compile(r"Metadata/plate_(\d+)(_small)?\.png$")
+
+
+def plate_number(names, slice_info_text=None) -> int:
+    """The plate a .gcode.3mf really holds. OrcaSlicer exports one file per plate of a multi-plate project: the
+    plate-4 file has Metadata/plate_4.gcode (and still the project's plate_1.png). The single plate_N.gcode wins;
+    several -> the one slice_info.config names (its <metadata key="index">), else the lowest; none -> the plate
+    slice_info names, else 1. `names` = the zip's namelist."""
+    gcodes = sorted({int(m.group(1)) for n in names for m in [_PLATE_GCODE_RE.match(n)] if m})
+    named = []
+    if isinstance(slice_info_text, (bytes, bytearray)):
+        slice_info_text = bytes(slice_info_text).decode("utf8", "ignore")
+    if isinstance(slice_info_text, str):
+        named = [int(x) for x in re.findall(r'key="index"\s+value="(\d+)"', slice_info_text)]
+    if len(gcodes) == 1:
+        return gcodes[0]
+    if gcodes:
+        return next((x for x in named if x in gcodes), gcodes[0])
+    return named[0] if named and named[0] > 0 else 1
+
+
+def plate_png_name(names, plate: int):
+    """Which preview image in the zip belongs to `plate`: its own full-size render, then its thumbnail, then (a
+    file whose own picture is missing) the project's plate 1, then any plate picture at all. None = no picture."""
+    have = set(names)
+    for cand in (f"Metadata/plate_{plate}.png", f"Metadata/plate_{plate}_small.png",
+                 "Metadata/plate_1.png", "Metadata/plate_1_small.png"):
+        if cand in have:
+            return cand
+    rest = sorted((int(m.group(1)), bool(m.group(2)), n) for n in have for m in [_PLATE_PNG_RE.match(n)] if m)
+    return rest[0][2] if rest else None
+
+
+def plate_gcode_from_meta(meta):
+    """'Metadata/plate_N.gcode' for a cached parse_3mf_meta entry, or None when the entry does not say.
+    Prefers the stored plate number; falls back to the stored `plates` list (lowest)."""
+    if not isinstance(meta, dict):
+        return None
+    plates = [n for n in (meta.get("plates") or []) if isinstance(n, str) and _PLATE_GCODE_RE.match(n)]
+    n = meta.get("plate_n")
+    if isinstance(n, int) and not isinstance(n, bool) and n > 0:
+        cand = f"Metadata/plate_{n}.gcode"
+        if not plates or cand in plates:
+            return cand
+    if plates:
+        return sorted(plates, key=lambda x: int(_PLATE_GCODE_RE.match(x).group(1)))[0]
+    return None
+
+
 def extract_plate_png(data: bytes):
-    """Pull plate 1's preview image out of a downloaded .gcode.3mf, if the
-    slicer embedded one. Prefers the full-size render; falls back to the
-    thumbnail. Returns None (not an error) when neither is present — some
-    older/odd exports omit both."""
+    """Pull the preview image of the plate this .gcode.3mf actually holds, if the slicer embedded one. Prefers
+    the full-size render; falls back to the thumbnail. Returns None (not an error) when no plate picture is
+    present — some older/odd exports omit them."""
     z = open_zip_bounded(data)
-    names = set(z.namelist())
-    for cand in ("Metadata/plate_1.png", "Metadata/plate_1_small.png"):
-        if cand in names:
-            try:
-                return _zread(z, cand)
-            except ValueError:
-                return None
+    names = z.namelist()
+    si = [n for n in names if n.endswith("slice_info.config")]
+    text = None
+    if si:
+        try:
+            text = _zread(z, si[0])
+        except ValueError:
+            text = None
+    cand = plate_png_name(names, plate_number(names, text))
+    if cand:
+        try:
+            return _zread(z, cand)
+        except ValueError:
+            return None
     return None
 
 
@@ -855,6 +917,8 @@ class BambuPrinter:
     # ---- actions ---------------------------------------------------------
 
     def start_print(self, filename: str, ams_mapping: list, plate="Metadata/plate_1.gcode"):
+        """`plate` = the path of the gcode INSIDE the .gcode.3mf. The default (plate 1) is only the last resort: the
+        Hub passes the plate it read from the file (server._plate_param_for), because a plate-4 export has no plate_1."""
         from_state = self.STATE_MAP.get(str(self.state.get("print", {}).get("gcode_state", "")).upper())
         self.request({"print": {
             "sequence_id": self._seq(),

@@ -78,14 +78,14 @@ class TestPhoneLayout(unittest.TestCase):
         self.assertIn('button[title="Reload"]', phone_block())
 
     def test_phone_header_has_at_most_three_buttons_plus_a_menu(self):
-        """Phones keep Printers + Library and a More menu; History / Backups / Settings / Sign out move into it."""
+        """Phones keep Printers + Library and a More menu; History / Analytics / Backups / Settings / Sign out move into it."""
         i = HTML.index('<section id="home"')
         row = HTML[i:HTML.index("</section>", i)]
         row = row[:row.index('<div id="sec-banner"')]
         buttons = re.findall(r"<button\b([^>]*)>(.*?)</button>", row, re.S)
         hidden = {re.sub(r"<[^>]+>|&[^;]+;", "", t).strip() for a, t in buttons if "phone-hide" in a}
         shown = {re.sub(r"<[^>]+>|&[^;]+;", "", t).strip() for a, t in buttons if "phone-hide" not in a}
-        self.assertEqual(hidden, {"History", "Backups", "Settings", "Sign out"})
+        self.assertEqual(hidden, {"History", "Analytics", "Backups", "Settings", "Sign out"})
         self.assertEqual(shown, {"Printers", "Library", "More", ""})        # "" = the reload arrow
         self.assertLessEqual(len(shown - {"More", ""}), 3)
         blk = phone_block()

@@ -465,7 +465,7 @@ class TablesMatchTheAppTests(Base):
                                 "printer_controls", "get_camera_snapshot", "backup_status", "list_printer_types",
                                 "get_settings", "recent_jobs", "job_stats", "cost_per_part", "detection_status",
                                 "list_groups", "library_list", "library_file", "file_facts",
-                                "fabrica_guide"})
+                                "fabrica_guide", "plate_contents"})
         for dangerous in ("start_print", "cancel_print", "pause_print", "resume_print", "preheat", "set_tray",
                           "delete_sd_file", "add_printer", "update_printer", "remove_printer", "update_settings",
                           "backup_printer_files", "send_test_notification", "list_api_keys", "discover_printers",

@@ -99,8 +99,9 @@ class FakeBambu:
         self.downloads += 1
         return self.files[filename]
 
-    def start_print(self, filename, ams_mapping):
+    def start_print(self, filename, ams_mapping, plate="Metadata/plate_1.gcode"):
         self.started.append((filename, list(ams_mapping)))
+        self.plates = getattr(self, "plates", []) + [plate]
 
 
 class FakeGcodePrinter:

@@ -160,6 +160,37 @@ class TestDriverPictures(unittest.TestCase):
             self.p.thumbnail_png("BRACKE~1.BGC")
 
 
+class TestDriverDownload(unittest.TestCase):
+    """Core One / MK4 firmware (live 10/18): /api/v1/files/usb/<f>/raw is 404 and /api/v1/files/usb/<f> is only
+    the file *info*; the bytes are at the listing's refs.download, /usb/<f>. Save to library failed with
+    "endpoint returned file info, not the file" until the driver tried that path."""
+    def setUp(self):
+        files = core_files()
+        files["BRACKE~1.BGC"]["data"] = b"GCDE" + bytes(range(256)) * 40
+        self.data = files["BRACKE~1.BGC"]["data"]
+        self.fake = FakePrusaLink(core=files)
+        self.p = PrusaLinkPrinter("Printer-A", self.fake.url, CREDS)
+        self.addCleanup(self.fake.close)
+
+    def test_whole_file_comes_from_the_storage_path(self):
+        self.assertEqual(self.p.download("BRACKE~1.BGC"), self.data)
+        self.assertIn("/usb/BRACKE~1.BGC", self.fake.calls("GET"))
+        self.assertEqual(self.p._dl_style, "storage")
+
+    def test_head_uses_a_range_on_the_storage_path(self):
+        self.assertEqual(self.p.download_head("BRACKE~1.BGC", 100), self.data[:100])
+
+    def test_known_style_goes_straight_to_the_storage_path(self):
+        self.p.download("BRACKE~1.BGC")
+        before = len(self.fake.calls("GET"))
+        self.p.download_head("BRACKE~1.BGC", 10)
+        self.assertEqual(self.fake.calls("GET")[before:], ["/usb/BRACKE~1.BGC"])
+
+    def test_missing_file_is_still_a_printererror(self):
+        with self.assertRaises(PrinterError):
+            self.p.download("NOPE~1.BGC")
+
+
 class TestDriverDelete(unittest.TestCase):
     def setUp(self):
         self.fake = FakePrusaLink(core=core_files())

@@ -30,6 +30,8 @@ class FakeMoonraker:
         self.ps = {"state": "standby", "filename": "", "print_duration": 0.0, "message": "",
                    "info": {"total_layer": None, "current_layer": None}}
         self.progress = 0.0
+        self.printer_objects = ["gcode_move", "toolhead", "extruder", "heater_bed", "print_stats", "virtual_sdcard", "exclude_object"]
+        self.objects_fail = False              # /printer/objects/list answers 500
         self.files = {"benchy.gcode": BIG, "voron/bracket v2.gcode": b"G1 X2\n" * 300, "readme.md": b"x"}
         self.meta = {"benchy.gcode": {"estimated_time": 3725.4, "filament_total": 4210.5},
                      "voron/bracket v2.gcode": {"estimated_time": 600, "filament_total": 80.0}}
@@ -88,6 +90,12 @@ class FakeMoonraker:
                         "extruder": {"temperature": 210.04, "target": 210.0},
                         "heater_bed": {"temperature": 59.96, "target": 60.0},
                         "webhooks": {"state": "ready", "state_message": "Printer is ready"}}}})
+                if path == "/printer/objects/list":
+                    if f.klippy != "ready":
+                        return self.err(503, "Klippy Disconnected")
+                    if f.objects_fail:
+                        return self.err(500, "internal error")
+                    return self.reply(200, {"result": {"objects": f.printer_objects}})
                 if path == "/server/files/list":
                     return self.reply(200, {"result": [
                         {"path": p, "modified": 1700000000.5, "size": len(d), "permissions": "rw"}
@@ -334,6 +342,84 @@ class TestSnapshot(Base):
         self.assertEqual(len(qs), 1)
         for obj in ("print_stats", "virtual_sdcard", "display_status", "extruder", "heater_bed", "webhooks"):
             self.assertIn(obj, qs[0])
+
+
+class TestExcludeObject(Base):
+    """Is [exclude_object] loaded in printer.cfg? One cached read-only GET /printer/objects/list per connect."""
+
+    def snap(self):
+        self.p.refresh()
+        return self.p.snapshot()
+
+    def lists(self):
+        return [(m, p) for m, p in self.fake.calls() if p == "/printer/objects/list"]
+
+    def test_loaded_is_asked_once_and_reported_without_a_warning(self):
+        for _ in range(4):
+            s = self.snap()
+        self.assertIs(s["exclude_object"], True)
+        self.assertIsNone(s["exclude_object_note"])
+        self.assertEqual(self.lists(), [("GET", "/printer/objects/list")])            # one question, GET only, cached
+
+    def test_not_set_up_is_flagged_in_words(self):
+        self.fake.printer_objects = ["gcode_move", "toolhead", "print_stats"]
+        s = self.snap()
+        self.assertIs(s["exclude_object"], False)
+        self.assertEqual(s["exclude_object_note"], "Exclude objects not set up in printer.cfg")
+        self.snap()
+        self.assertEqual(len(self.lists()), 1)                                         # not asked again at every poll
+
+    def test_a_failed_look_is_unknown_not_a_warning_and_is_retried_later(self):
+        self.fake.objects_fail = True
+        s = self.snap()
+        self.assertIsNone(s["exclude_object"])
+        self.assertIsNone(s["exclude_object_note"])
+        self.snap()
+        self.assertEqual(len(self.lists()), 1)                                         # not hammered
+        self.fake.objects_fail = False
+        self.p.EXCLUDE_RETRY_S = 0
+        self.assertIs(self.snap()["exclude_object"], True)
+
+    def test_a_garbled_answer_is_unknown(self):
+        self.fake.printer_objects = "nonsense"
+        self.assertIsNone(self.snap()["exclude_object"])
+
+    def test_a_not_set_up_printer_is_looked_at_again_later(self):
+        self.fake.printer_objects = ["toolhead"]
+        self.assertIs(self.snap()["exclude_object"], False)
+        self.fake.printer_objects = ["toolhead", "exclude_object"]                    # printer.cfg was fixed and Klipper restarted
+        self.assertIs(self.snap()["exclude_object"], False)                           # (within the recheck time: not asked yet)
+        self.p.EXCLUDE_RECHECK_S = 0
+        s = self.snap()
+        self.assertIs(s["exclude_object"], True)
+        self.assertIsNone(s["exclude_object_note"])
+
+    def test_a_klipper_restart_forgets_the_answer(self):
+        self.fake.printer_objects = ["toolhead"]
+        self.assertIs(self.snap()["exclude_object"], False)
+        self.fake.klippy = "shutdown"
+        self.snap()
+        self.fake.klippy = "ready"
+        self.fake.printer_objects = ["toolhead", "exclude_object"]
+        self.assertIs(self.snap()["exclude_object"], True)                             # asked again as soon as Klipper is back
+        self.assertEqual(len(self.lists()), 2)
+
+    def test_it_is_not_asked_while_klipper_is_not_ready(self):
+        self.fake.klippy = "error"
+        s = self.snap()
+        self.assertEqual(s["state"], "DISCONNECTED")
+        self.assertEqual(self.lists(), [])
+
+    def test_it_is_asked_during_a_print_too_because_it_is_a_read_only_list(self):
+        self.fake.ps["state"] = "printing"
+        self.fake.printer_objects = ["toolhead"]
+        self.assertIs(self.snap()["exclude_object"], False)
+        self.assertEqual([m for m, _p in self.lists()], ["GET"])
+
+    def test_the_existing_snapshot_keys_are_all_still_there(self):
+        s = self.snap()
+        for k in ("printer", "connected", "state", "job", "percent", "remaining_min", "layer", "nozzle_c", "bed_c", "raw_state", "error"):
+            self.assertIn(k, s)
 
 
 class TestFiles(Base):

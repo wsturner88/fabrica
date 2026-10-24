@@ -1,1 +1,2 @@
 - 2026-10-13: Agent kit added: `fabrica_guide` with topics start, printing, library, history, renaming, changes; kit version in `list_printers`; workflows `print_a_file`, `fleet_status`, `print_history_report`.
+- 2026-10-18: Plate contents: `plate_contents(printer, filename)` and `plate_contents` in `file_facts` / `suggest_mapping` say how many of which object are on a plate (from the slicer's object labels); names may carry the quantity when labels are present, never a guess when they are missing or unknown. Klipper printers report `exclude_object` in `printer_status`.
