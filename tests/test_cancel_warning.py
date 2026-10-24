@@ -236,7 +236,7 @@ const warnSnap = () => {
   const blk = document.getElementById('p-spag'), act = document.getElementById('sp-act'), pb = document.getElementById('sp-pause'), cb = document.getElementById('sp-cancel'), pr = document.getElementById('printer');
   return {k: blk.dataset.k, act: vis(act), pause: vis(pb), cancel: vis(cb), blk: r(blk), actR: vis(act) ? r(act) : null, pr: vis(pb) ? r(pb) : null, cr: vis(cb) ? r(cb) : null,
     cut: [pb, cb].filter(vis).filter(cut).map(e => e.id), words: [pb, cb].filter(vis).map(e => e.textContent.replace(/\s+/g, ' ').trim()),
-    vw: innerWidth, vh: innerHeight, docW: document.documentElement.scrollWidth, docH: document.documentElement.scrollHeight, spw: pr.classList.contains('spw'), blkVis: vis(blk),
+    vw: document.documentElement.clientWidth, vh: innerHeight, docW: document.documentElement.scrollWidth, docH: document.documentElement.scrollHeight, spw: pr.classList.contains('spw'), blkVis: vis(blk),
     cam: r(document.getElementById('cam')), scrollY: Math.round(scrollY), tbar: r(document.querySelector('#printer .tbar')), blkCut: cut(document.querySelector('#p-spag .t .l')) ,
     stick: vis(document.getElementById('p-stick')), stk: pr.classList.contains('stk'), tilesVis: vis(document.getElementById('p-tiles')),
     stripCancel: (() => { const c = [...document.querySelectorAll('#p-act button.danger')][0]; return c ? {w: getComputedStyle(c).borderTopWidth, text: c.textContent.replace(/\s+/g, ' ').trim()} : null; })()};
@@ -426,7 +426,7 @@ const scrollTo2 = async y => { window.scrollTo(0, y); window.dispatchEvent(new E
 const sm = () => ({stk: document.getElementById('printer').classList.contains('stk'), vis: vis(document.getElementById('p-stick')), r: vis(document.getElementById('p-stick')) ? r(document.getElementById('p-stick')) : null,
   words: [...document.querySelectorAll('#p-stick button')].filter(vis).map(b => b.textContent.replace(/\s+/g, ' ').trim()), name: document.getElementById('stk-name').textContent,
   small: [...document.querySelectorAll('#p-stick button')].filter(vis).map(b => Math.round(b.getBoundingClientRect().height)), scrollY: Math.round(scrollY), docH: document.documentElement.scrollHeight,
-  tbarH: r(document.querySelector('#printer .tbar')).h, fixed: getComputedStyle(document.getElementById('p-stick')).position, cut: [...document.querySelectorAll('#p-stick button')].filter(vis).filter(cut).length});
+  tbarH: r(document.querySelector('#printer .tbar')).h, fixed: getComputedStyle(document.getElementById('p-stick')).position, cw: document.documentElement.clientWidth, cut: [...document.querySelectorAll('#p-stick button')].filter(vis).filter(cut).length});
 await open('Printer-A'); R.top = sm();
 await scrollTo2(700); R.scrolled = sm();
 window.__calls.length = 0; document.getElementById('stk-pause').click(); await sleep(300); R.pause = {calls: posts(), modal: mo()};
@@ -459,7 +459,8 @@ class StickyBarTests(unittest.TestCase):
         self.assertGreater(R["scrolled"]["docH"], 844)
         s = R["scrolled"]
         self.assertTrue(s["stk"] and s["vis"])
-        self.assertEqual((s["fixed"], s["r"]["t"], s["r"]["l"], s["r"]["r"]), ("fixed", 0, 0, 390))
+        self.assertEqual((s["fixed"], s["r"]["t"], s["r"]["l"], s["r"]["r"]), ("fixed", 0, 0, s["cw"]))      # full page width (minus a CI scrollbar)
+        self.assertGreaterEqual(s["cw"], 370)
         self.assertEqual(s["words"], ["Pause", "Cancel print"])
         self.assertEqual(s["name"], "Printer-A")
         self.assertGreaterEqual(min(s["small"]), 44)
@@ -509,7 +510,7 @@ const fsnap = () => {
       word: qa(c, '.spg.alert, .spag.alert').map(e => [e.dataset.act, e.dataset.name, e.getAttribute('role')]), tmp: qa(c, '.meta.tmp').length, rows: q.length ? new Set(qa(c, '.spq button').map(b => r(b).t)).size : 0,
       inside: q.length ? qa(c, '.spq button').every(b => r(b).b <= r(c).b && r(b).t >= r(c).t && r(b).r <= r(c).r && r(b).l >= r(c).l) : null, cut: qa(c, '.spq button').filter(cut).length,
       minH: q.length ? Math.min(...qa(c, '.spq button').map(b => r(b).h)) : null, fileLine: qa(c, '.file').length, h: r(c).h, b: r(c).b, spq5: q.length ? qa(c, '.spq button').map(b => r(b).w) : []}; }),
-    vh: innerHeight, vw: innerWidth, calm: cards.filter(c => !c.querySelector('.spq')).map(c => c.dataset.name)};
+    vh: innerHeight, vw: document.documentElement.clientWidth, calm: cards.filter(c => !c.querySelector('.spq')).map(c => c.dataset.name)};
 };
 R.both = fsnap();
 // a tap on a card's Pause: that printer's pause request, one tap, and the printer screen is NOT opened
