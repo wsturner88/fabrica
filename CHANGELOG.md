@@ -8,6 +8,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- **A Spaghetti WARNING now has Pause and Cancel print right in it.** On the printer screen (phone, 10-inch / kiosk, desktop and the 5-inch board
+  with either theme) the WARNING block grows one row holding two big buttons, "Pause" and "Cancel print": the same Pause (one tap) and the same
+  Cancel (the one "Keep printing / CANCEL PRINT" confirm) as the toolbar. Pause shows only while the print is running, Cancel while a print exists;
+  nothing is shown for an idle printer or to a view-only sign-in, and nothing is ever paused or cancelled automatically. The alert message
+  (Telegram, ntfy, e-mail...) now ends with "Open in Fabrica: <link>" like the finished message; the link opens that printer, and on the phone the
+  WARNING block sits right under the toolbar. On the fleet page the warning banner and the word on a warned card open that printer; the card shows
+  a compact "Pause / Cancel" row in place of its Nozzle / Bed line (5-inch: in place of the file and layer lines). On the phone a slim Pause /
+  Cancel bar sticks to the top while a print runs and the toolbar row is scrolled out of sight. The 5-inch strip's Cancel gets a heavy frame.
 - **What is on a plate: "4× Hose Clip + 2× Hook" from the slicer's object labels, and a warning when there are none.** The Hub reads the
   cancel-object labels a slicer writes - Bambu Studio / OrcaSlicer `slice_info.config` (per plate), Klipper `EXCLUDE_OBJECT_DEFINE`, Marlin /
   Prusa `M486`, PrusaSlicer's `; objects_info` line and `; printing object` comments, and the same key in a Prusa `.bgcode` - and groups the

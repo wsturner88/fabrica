@@ -686,6 +686,11 @@ if(L5){ document.documentElement.classList.add('lay-5in'); if(L5T === 'bridge') 
     <span id="p-kind" class="l5only"></span><span id="p-clock" class="l5only"></span>
   </div>
   <div class="hubdown" role="alert" aria-live="assertive" hidden></div>
+  <div id="p-stick" class="pstick" data-ctl role="group" aria-label="Pause or cancel this print"><!-- phone only, while printing, once the toolbar row has scrolled out of sight: the same Pause / Resume / Cancel as the toolbar (see "stickSync") -->
+    <span class="stn" id="stk-name"></span>
+    <button type="button" id="stk-pause" onclick="act('pause')"><svg class="ic" aria-hidden="true"><use href="#i-pause"/></svg>Pause</button>
+    <button type="button" id="stk-resume" onclick="act('resume')"><svg class="ic" aria-hidden="true"><use href="#i-play"/></svg>Resume</button>
+    <button type="button" id="stk-cancel" class="danger" onclick="askCancel()"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg>Cancel print</button></div>
   <div id="p-stat"><!-- display:contents everywhere except the 5in board, where it is the stats column -->
    <div id="p-prim"><!-- display:contents everywhere except the 5in board, where it is the progress card -->
     <div id="p-big" role="status"></div>
@@ -702,7 +707,10 @@ if(L5){ document.documentElement.classList.add('lay-5in'); if(L5T === 'bridge') 
    <div id="p-tiles"><div class="t5" id="t-noz"></div><div class="t5" id="t-bed"></div></div>
    <div id="p-spag" data-k="ready"><svg class="ic" id="sp-ic" aria-hidden="true"><use href="#i-eye"/></svg>
      <div class="t"><div class="l">Spaghetti: <b id="sp-word">&mdash;</b></div><div class="s" id="sp-sub"></div></div>
-     <button id="sp-tog" data-ctl data-act="spagToggle" role="switch" aria-checked="false" aria-label="Spaghetti detection for this printer" disabled><i></i><span class="tw">OFF</span></button></div>
+     <button id="sp-tog" data-ctl data-act="spagToggle" role="switch" aria-checked="false" aria-label="Spaghetti detection for this printer" disabled><i></i><span class="tw">OFF</span></button>
+     <div id="sp-act" class="spact" data-ctl role="group" aria-label="Stop this print" hidden><!-- inside a Spaghetti WARNING only, while a print runs / is paused: the SAME Pause and Cancel actions as the toolbar (one tap / the one confirm) -->
+       <button type="button" id="sp-pause" data-ctl onclick="act('pause')"><svg class="ic" aria-hidden="true"><use href="#i-pause"/></svg>Pause</button>
+       <button type="button" id="sp-cancel" data-ctl class="danger" onclick="askCancel()"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg>Cancel print</button></div></div>
   </div>
   <!-- printer controls: one slim strip; only what this printer supports; heater/filament buttons are hidden while it prints -->
   <div id="p-controls" class="ctl" data-ctl hidden>
@@ -4594,6 +4602,86 @@ html[data-view="desktop"] .msgrid button { min-height:44px; }
 html[data-view="desktop"] .cfactions .toggle, html[data-view="desktop"] .cfactions > button { min-height:44px; }
 html[data-view="desktop"] .fvopt:hover { border-color:var(--accent); }
 </style>
+<style>
+/* ==== Spaghetti WARNING: "Pause" + "Cancel print" ====
+   . the printer screen's WARNING block (every layout) holds two big buttons on ONE row; the same Pause / Cancel as the toolbar (one tap / the one confirm)
+   . a warned fleet card: the Nozzle / Bed line (5-inch: the file + layer lines) gives way to a compact Pause / Cancel row; the banner and the word are tappable
+   . phone: a slim bar sticks to the top while a print runs and the toolbar row is scrolled out of sight; the WARNING block sits right under the toolbar
+   . 5-inch: the strip's Cancel gets a heavy frame
+   Meaning is carried by WORDS and SHAPE (a heavy frame, the cross icon, "Cancel print"), never by colour alone: the owner is colorblind. Nothing here is automatic. */
+.spact[hidden], .spact [hidden] { display:none !important; }
+.spalert[data-act] { cursor:pointer; }
+.spalert .spn { font:inherit; color:inherit; background:none; border:0; border-radius:0; min-height:0; padding:0 2px; display:inline; text-decoration:underline; text-decoration-thickness:3px; text-underline-offset:3px; }
+.pcard [data-act="openPrinter"][role="button"] { cursor:pointer; }
+.pstick { display:none; }
+/* ---- printer screen, every layout but the 5-inch: the WARNING block grows a second row for the two buttons ---- */
+html:not(.lay-5in) .spact { flex:1 1 100%; display:flex; gap:8px; min-width:0; }
+html:not(.lay-5in) .spact button { flex:5 1 0; min-width:0; min-height:48px; padding:4px 8px; border-radius:10px; font-size:15px; font-weight:800; line-height:1.1; white-space:normal;
+  display:flex; align-items:center; justify-content:center; gap:6px; background:var(--bg); color:var(--txt); border:2px solid var(--bg); }
+html:not(.lay-5in) .spact #sp-pause { flex:4 1 0; }
+html:not(.lay-5in) .spact #sp-cancel { background:var(--bad); color:#fff; border:3px solid var(--bg); box-shadow:inset 0 0 0 2px #fff; }     /* a heavy double frame + the cross + the words: not a colour */
+html:not(.lay-5in) #printer.spw #p-spag { flex-wrap:wrap; align-content:center; row-gap:6px; height:auto; min-height:56px; padding:6px 8px 8px 9px; }
+html:not(.lay-5in) #printer.spw #p-spag .t { min-height:44px; display:flex; flex-direction:column; justify-content:center; }
+html:not(.lay-5in) #printer.spw #p-spag .t .l, html:not(.lay-5in) #printer.spw #p-spag .t .s { white-space:normal; overflow:visible; }       /* in a WARNING the words wrap instead of ending in "..." */
+@media (min-width:761px) {      /* 10-inch / desktop: the band's Spaghetti row (56px) is as tall as the block needs while it is in a WARNING; the files list gives the room back */
+  html:not(.lay-5in):not([data-view="desktop"]) #printer.on.spw { grid-template-rows:auto 56px auto minmax(48px,auto) auto minmax(0,1fr); }
+}
+@media (min-width:761px) and (max-width:1000px) {          /* desktop view in a narrow window: one column - the WARNING block goes right under the toolbar */
+  html[data-view="desktop"] #printer.on.spw { grid-template-areas:"tbar" "spag" "cam" "prog" "tiles" "ctl" "trays" "files"; }
+}
+@media (max-width:760px), (orientation:landscape) and (max-height:500px) and (max-width:932px) {
+  html:not(.lay-5in) #printer.spw #p-spag { order:1; }          /* above the camera and the progress card: the first thing under the toolbar */
+  html:not(.lay-5in) #printer.stk .pstick { display:flex; }
+}
+/* ---- phone: the sticky copy of the toolbar's Pause / Resume / Cancel row ---- */
+html:not(.lay-5in) .pstick { position:fixed; left:0; right:0; top:0; z-index:8; align-items:center; gap:8px; background:var(--bg); border-bottom:3px solid var(--txt);
+  padding:calc(6px + var(--sat, 0px)) calc(10px + var(--sar, 0px)) 6px calc(10px + var(--sal, 0px)); }
+html:not(.lay-5in) .pstick .stn { flex:1 1 0; min-width:0; font-size:16px; font-weight:800; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+html:not(.lay-5in) .pstick button { flex:0 0 auto; display:inline-flex; align-items:center; justify-content:center; gap:6px; min-height:48px; padding:4px 14px; font-size:16px; font-weight:800; }
+html:not(.lay-5in) .pstick button.danger { border:3px solid var(--txt); }
+/* ---- fleet card (10-inch / desktop / phone): compact Pause / Cancel row in place of the Nozzle / Bed line ---- */
+html:not(.lay-5in) .pcard .spq { display:flex; gap:8px; height:36px; }
+html:not(.lay-5in) .pcard .spq button { flex:1 1 0; min-width:0; height:36px; min-height:0; padding:0 6px; border-radius:8px; font-size:14px; font-weight:800; line-height:1; white-space:nowrap;
+  display:flex; align-items:center; justify-content:center; gap:5px; background:var(--card2); color:var(--txt); border:2px solid var(--txt); }
+html:not(.lay-5in) .pcard .spq .spq-c { background:var(--bad); color:#fff; border:3px solid var(--txt); }
+html:not(.lay-5in) .pcard .spq svg { width:14px; height:14px; }
+html:not(.lay-5in) .pcard.sp-alert { gap:6px; }          /* the Pause / Cancel row is taller than the Nozzle / Bed line it replaces: tighter spacing on THIS card keeps every card inside the screen */
+@media (max-width:760px), (orientation:landscape) and (max-height:500px) and (max-width:932px) {
+  html:not(.lay-5in) .pcard .spq { height:48px; }
+  html:not(.lay-5in) .pcard .spq button { height:48px; font-size:16px; }
+}
+/* ---- 5-inch ---- */
+html.lay-5in #sp-alert:not([hidden]) { white-space:normal; overflow:visible; text-overflow:clip; }       /* every word of the banner stays; a long list of names wraps instead of ending in "..." */
+html.lay-5in .spalert .spn { display:inline-block; min-height:30px; line-height:28px; padding:0 4px; }
+html.lay-5in .spact { flex:1 1 100%; display:flex; gap:6px; min-width:0; }
+html.lay-5in .spact button { flex:5 1 0; min-width:0; height:52px; min-height:52px; padding:2px 6px; border-radius:12px; font-size:15px; font-weight:800; line-height:1.05; white-space:normal;
+  display:flex; align-items:center; justify-content:center; gap:5px; background:var(--card2); color:var(--txt); border:2px solid var(--line2); }
+html.lay-5in .spact #sp-pause { flex:4 1 0; }
+html.lay-5in .spact #sp-cancel { border:3px solid var(--txt); color:var(--c-danger); }
+html.lay-5in #printer.spw #p-tiles { display:none; }                     /* the Nozzle / Bed tiles give way while the WARNING lasts (they come back when it clears): the block needs the room */
+html.lay-5in #printer.spw #p-spag { height:auto; flex-wrap:wrap; align-content:center; row-gap:6px; padding:6px 10px 8px 12px; }
+html.lay-5in #printer.spw #p-spag .t { flex:1 1 0; min-height:44px; display:flex; flex-direction:column; justify-content:center; }
+html.lay-5in #printer.spw #p-spag .t .s { white-space:normal; line-height:1.15; }
+html.lay-5in #printer.spw #p-spag .t .l { white-space:normal; overflow:visible; line-height:1.15; }       /* the word WARNING is read whole, whatever the font */
+html.lay-5in #p-act button.danger { border:3px solid var(--txt); font-weight:800; }         /* the strip's Cancel: a heavy frame and the word, not just coloured text */
+html.lay-5in #fleet .pcard .stat .spq { display:flex; gap:6px; margin-top:4px; height:32px; }
+html.lay-5in #fleet .pcard .stat .spq button { flex:1 1 0; min-width:0; height:32px; min-height:0; padding:0 4px; border-radius:8px; font-size:13px; font-weight:800; line-height:1; white-space:nowrap;
+  display:flex; align-items:center; justify-content:center; gap:4px; background:var(--card2); color:var(--txt); border:2px solid var(--line2); }
+html.lay-5in #fleet .pcard .stat .spq .spq-c { border:3px solid var(--txt); color:var(--c-danger); }
+html.lay-5in #fleet .pcard .stat .spq svg { width:13px; height:13px; }
+html.lay-5in #fleet[data-n="1"] .pcard .stat .spq, html.lay-5in #fleet[data-n="2"] .pcard .stat .spq { height:44px; margin-top:10px; }
+html.lay-5in #fleet[data-n="1"] .pcard .stat .spq button, html.lay-5in #fleet[data-n="2"] .pcard .stat .spq button { height:44px; font-size:16px; }
+/* 5-inch, Bridge theme: the same controls in its pills (words in capitals, the Cancel a rose pill with a heavy frame) */
+html.lay-5in.th-bridge #printer.spw #p-spag { height:auto; padding:6px 10px 8px 14px; }
+html.lay-5in.th-bridge #printer.spw #p-spag .t .l b { font-size:16px; letter-spacing:0; }            /* "WARNING" whole, not "WARNIN" */
+html.lay-5in.th-bridge .spact button { border:0; border-radius:26px; background:var(--tan); color:#000; font-size:12px; letter-spacing:.02em; padding:2px 4px; gap:3px; text-transform:uppercase; }
+html.lay-5in.th-bridge .spact svg { width:14px; height:14px; }
+html.lay-5in.th-bridge .spact #sp-cancel { background:var(--rose); color:#000; border:4px solid var(--txt); }
+html.lay-5in.th-bridge #p-act button.danger { border:4px solid var(--txt); }
+html.lay-5in.th-bridge #fleet .pcard .stat .spq { height:28px; margin-top:2px; }
+html.lay-5in.th-bridge #fleet .pcard .stat .spq button { height:28px; border:0; border-radius:16px; background:var(--tan); color:#000; font-size:12px; letter-spacing:.05em; text-transform:uppercase; }
+html.lay-5in.th-bridge #fleet .pcard .stat .spq .spq-c { background:var(--rose); border:3px solid var(--txt); color:#000; }
+</style>
 <script>
 const SEC = { d:null, err:'', msg:null, loading:false, pwBusy:false, newKey:null, dev:null, admin:null };   // admin: null | 'unset' | 'locked' | 'ok' (the admin password, see secAdminHtml)
 const SEC_SCOPE = { read:['READ ONLY', 'can look at everything but change nothing'], control:['FULL CONTROL', 'can do everything, including start and cancel prints'] };
@@ -5793,7 +5881,7 @@ function finishAt(min){
 const HUB = { lastOk: Date.now(), enter: Date.now(), down: false, why: '' };
 const HUB_GRACE_MS = 15000, POLL_TIMEOUT_MS = 5000;
 const FL = { sig: null, busy: false, again: false, last: null };
-const PV = { busy: false, again: false, p: null, trSig: null };
+const PV = { busy: false, again: false, p: null, trSig: null, spFocus: false };
 const papi = (name, tail) => '/api/printer/' + pu(name) + (tail || '');
 const printerName = () => CUR;                  // the raw name even where a template shadows CUR with its escaped form
 const clampPct = v => Math.max(0, Math.min(100, Math.round(Number(v) || 0)));
@@ -5891,6 +5979,10 @@ function renderFleet(data){
       const eta = k === 'printing' ? (cp.rem ? 'Done ' + finishAt(cp.rem) : cp.sub) : cp.sub;
       const pctLine = prog ? esc(cp.pct) + '%' + (k === 'printing' ? (cp.rem ? ' \u00b7 ' + esc(cp.left) : '') + (cp.hasLy ? '<span class="tail"> \u00b7 ' + esc(cp.xtra) + '</span>' : '') : '') : esc(cp.xtra);       // a paused card's eta line already says "Paused"; nothing to cut off here
       const spag = spagCard(p, k === 'printing');
+      // a WARNING / FAILURE on a card: the word opens that printer's screen (a button, same as the card), and the Nozzle / Bed line gives way to a compact Pause / Cancel row
+      const spAttr = spag.k === 'alert' ? ' role="button" tabindex="0" data-act="openPrinter" data-name="' + esc(p.printer) + '" title="Open ' + esc(p.printer) + ' to check the camera"' : '';
+      const tmpLine = spag.k === 'alert' && (k === 'printing' || k === 'paused') ? spQuick(p.printer, p.state)
+        : `<div class="meta tmp">Nozzle ${tnum(p.nozzle_c)}${tdeg()} · Bed ${tnum(p.bed_c)}${tdeg()}</div>`;
       return `<div class="pcard k-${k}${spag.k === 'alert' ? ' sp-alert' : ''}" data-act="openPrinter" data-name="${esc(p.printer)}" data-cam="${p.camera ? 1 : 0}">
         <div class="prow"><span class="pname" title="${esc(p.printer)}">${esc(p.printer)}</span>
           ${chipH}</div>
@@ -5899,8 +5991,8 @@ function renderFleet(data){
         <div class="cslot" data-i="${i}"></div>
         <div class="eta${k === 'printing' && cp.rem ? '' : ' q'}">${esc(eta)}</div>
         <div class="meta pct${exwCls(cp.xtra)}">${pctLine}</div>
-        <div class="meta tmp">Nozzle ${tnum(p.nozzle_c)}${tdeg()} · Bed ${tnum(p.bed_c)}${tdeg()}</div>
-        <div class="meta spg ${esc(spag.k)}">${IC(SPAG_ICON[spag.k] || 'eye')}${spag.k === 'alert' ? '\u26a0 ' : ''}Spaghetti: <b>${esc(spag.word)}</b></div>
+        ${tmpLine}
+        <div class="meta spg ${esc(spag.k)}"${spAttr}>${IC(SPAG_ICON[spag.k] || 'eye')}${spag.k === 'alert' ? '\u26a0 ' : ''}Spaghetti: <b>${esc(spag.word)}</b></div>
       </div>`;
     }).join('');
   }
@@ -5965,9 +6057,28 @@ function spagBanner(shown){
   const parts = [];
   if(fail.length) parts.push('FAILURE: ' + fail.map(h => h.name).join(', '));
   if(warn.length) parts.push('WARNING: ' + warn.map(h => h.name).join(', '));
-  const text = parts.length ? '\u26a0 SPAGHETTI ' + parts.join(' \u00b7 ') + ' \u2014 check the camera' : '';
-  if(el.textContent !== text) el.textContent = text;
+  const text = parts.length ? '\u26a0 SPAGHETTI ' + parts.join(' \u00b7 ') + ' \u2014 check the camera \u00b7 tap to open' : '';
+  // tappable: the banner opens the (first) warned printer, exactly as tapping its card does; with several, each name is its own button
+  const first = (fail[0] || warn[0] || {}).name || '';
+  const sig = text + '|' + first + '|' + hits.length;
+  if(el.dataset.sig !== sig){
+    el.dataset.sig = sig;
+    if(!text){ el.textContent = ''; el.removeAttribute('data-act'); el.removeAttribute('data-name'); el.removeAttribute('role'); el.removeAttribute('tabindex'); }
+    else{
+      const nm = h => hits.length > 1 ? '<button type="button" class="spn" data-act="openPrinter" data-name="' + esc(h.name) + '">' + esc(h.name) + '</button>' : esc(h.name);
+      const grp = (label, arr) => arr.length ? label + ': ' + arr.map(nm).join(', ') : '';
+      el.innerHTML = '\u26a0 SPAGHETTI ' + [grp('FAILURE', fail), grp('WARNING', warn)].filter(Boolean).join(' \u00b7 ') + ' \u2014 check the camera \u00b7 tap to open';
+      el.setAttribute('data-act', 'openPrinter'); el.setAttribute('data-name', first); el.setAttribute('role', 'button'); el.setAttribute('tabindex', '0');
+    }
+  }
   el.hidden = !text;
+}
+// the compact Pause / Cancel row of a warned fleet card. Pause only while it is printing (the printer screen's rule); Cancel goes through the ONE confirm.
+function spQuick(name, state){
+  const n = esc(name);
+  return '<div class="spq" data-ctl role="group" aria-label="Pause or cancel the print on ' + n + '">'
+    + (state === 'RUNNING' ? '<button type="button" class="spq-p" data-act="cardPause" data-name="' + n + '">' + IC('pause') + 'Pause</button>' : '')
+    + '<button type="button" class="spq-c danger" data-act="cardCancel" data-name="' + n + '">' + IC('x') + 'Cancel</button></div>';
 }
 function l5Tp(ic, label, cur, tgt){
   const v = cur == null ? '<em>&mdash;</em>' : '<em>' + tnum(cur) + tdeg() + '</em>' + (Number(tgt) > 0 ? ' /' + tnum(tgt) : '');
@@ -6014,13 +6125,17 @@ function l5Card(p, i){
     : `<span class="chip ${esc(cls)}" title="${esc(word)}"><i></i>${esc(word)}</span>`;
   const {pct, big, bigCls, sub, file, xtra} = cardParts(p, k, conn);
   const spag = spagCard(p, k === 'printing');
+  // a WARNING / FAILURE: the card's file + layer lines give way to the compact Pause / Cancel row (same card height); the word opens the printer screen
+  const quick = spag.k === 'alert' && (k === 'printing' || k === 'paused');
+  const fileXtra = quick ? spQuick(p.printer, p.state) : `<div class="file">${esc(file)}</div><div class="xtra${exwCls(xtra)}">${esc(xtra)}</div>`;
+  const spAttr = spag.k === 'alert' ? ' role="button" tabindex="0" data-act="openPrinter" data-name="' + esc(p.printer) + '" title="Open ' + esc(p.printer) + ' to check the camera"' : '';
   return `<div class="pcard k-${k}${spag.k === 'alert' ? ' sp-alert' : ''}" data-act="openPrinter" data-name="${esc(p.printer)}" data-cam="${p.camera ? 1 : 0}">
     <div class="prow"><span class="pname" title="${esc(p.printer)}">${esc(p.printer)}</span>${chipH}</div>
     <div class="r2"><div class="cslot" data-i="${i}"></div>
-      <div class="stat"><div class="big${bigCls}">${esc(big)}</div><div class="sub">${esc(sub)}</div><div class="file">${esc(file)}</div><div class="xtra${exwCls(xtra)}">${esc(xtra)}</div></div></div>
+      <div class="stat"><div class="big${bigCls}">${esc(big)}</div><div class="sub">${esc(sub)}</div>${fileXtra}</div></div>
     <div class="bar"><i style="width:${(k === 'printing' || k === 'paused') ? pct : 0}%"></i></div>
     <div class="r3"><div class="temps">${l5Tp('nozzle', 'Nozzle', up ? p.nozzle_c : null, p.nozzle_target_c)}${l5Tp('bed', 'Bed', up ? p.bed_c : null, p.bed_target_c)}</div>
-      <div class="spag ${spag.k}">${IC(SPAG_ICON[spag.k] || 'eye')}${spag.k === 'alert' ? '\u26a0 ' : ''}Spaghetti: <b>${esc(spag.word)}</b></div></div>
+      <div class="spag ${spag.k}"${spAttr}>${IC(SPAG_ICON[spag.k] || 'eye')}${spag.k === 'alert' ? '\u26a0 ' : ''}Spaghetti: <b>${esc(spag.word)}</b></div></div>
   </div>`;
 }
 
@@ -6066,7 +6181,7 @@ window.addEventListener('resize', fitEta);
 try{ if(document.fonts && document.fonts.addEventListener) document.fonts.addEventListener('loadingdone', fitEta); }catch(e){}   // the bundled font arrived: measure again
 
 function openPrinter(name){
-  CUR = name; camReset(); ctlReset(); detLine(null);
+  CUR = name; camReset(); ctlReset(); detLine(null); PV.spFocus = true; $('printer').classList.remove('spw', 'stk');
   PV.trSig = null; $('p-trays').innerHTML = ''; $('printer').classList.remove('files-open'); pmoreClose();
   for(const i of ['p-big', 'p-eta', 'p-layer', 'p-temps']) $(i).textContent = '';       // never show the last printer's numbers under this name
   $('printer').dataset.row = 'none'; PV.cells = null; FS.curKey = undefined; FS.fresh = false; FS.key = ''; PV.kind = ''; $('p-panel').dataset.cam = '1';
@@ -6078,6 +6193,21 @@ function openPrinter(name){
   FS.at = 0; FS.busy = false; show('printer'); filesOnOpen();
 }
 
+// phone: the WARNING block sits right under the toolbar (CSS order), so a screen opened while the page was scrolled starts at the top and it is the first thing seen
+const PHONE_MQ = window.matchMedia ? window.matchMedia('(max-width:760px), (orientation:landscape) and (max-height:500px) and (max-width:932px)') : {matches:false};
+function spShow(){ try{ if(PHONE_MQ.matches && !L5){ window.scrollTo(0, 0); $('printer').scrollTop = 0; } }catch(e){} }
+// phone: while a print runs the Pause / Cancel row stays reachable. It is NOT a new row at the top: the toolbar's own row is used as long as it is on screen; only once it has
+// scrolled out of sight does a slim bar stick to the top (CSS shows it on the phone layout only). Nothing is added when the printer is not printing.
+function stickSync(){
+  const pr = $('printer'); if(!pr) return;
+  let on = false;
+  if(pr.classList.contains('on') && PHONE_MQ.matches && !L5 && BUSY_STATES.includes(FS.pstate)){
+    const c = $('p-cancel').getBoundingClientRect();
+    on = c.height > 0 && c.bottom < 4;
+  }
+  if(pr.classList.contains('stk') !== on) pr.classList.toggle('stk', on);
+}
+window.addEventListener('scroll', stickSync, {passive:true}); window.addEventListener('resize', stickSync);
 function pview(){
   if(PV.busy){ PV.again = true; return PV.p; }    // one poll at a time; a request made meanwhile (after an action) runs right after
   PV.busy = true;
@@ -6112,6 +6242,8 @@ async function pviewOnce(){
   $('p-resume').style.display = (s.state==='PAUSE') ? '' : 'none';
   $('p-connect').style.display = connectable(s, d.can_connect) ? '' : 'none';      // only when the printer ITSELF reports disconnected - never for a network blip / OFFLINE
   $('p-cancel').style.display = BUSY_STATES.includes(s.state) ? '' : 'none';      // every layout: Cancel only while there is a print to cancel (printing / preparing / paused)
+  $('stk-pause').style.display = (s.state==='RUNNING') ? '' : 'none'; $('stk-resume').style.display = (s.state==='PAUSE') ? '' : 'none';     // the phone's sticky copy of the row: same rules
+  $('stk-name').textContent = CUR; stickSync();
   ctlRender(d); detLine(d);
   l5Detail(d, s, word);                   // the progress card, tiles, Spaghetti switch and status panel: every layout
   CAM.has = !!d.camera; CAM_ORI[CUR] = d.camera_orientation; PT.img.style.transform = camFlip(d.camera_orientation); camSync();
@@ -6186,6 +6318,11 @@ function l5Detail(d, s, word){
   const watching = ['on', 'learn', 'ready', 'alert', 'down'].includes(info.k);
   $('sp-tog').setAttribute('aria-checked', watching ? 'true' : 'false'); $('sp-tog').querySelector('.tw').textContent = watching ? 'ON' : 'OFF';
   $('sp-tog').disabled = !hasDet || info.k === 'nocamera' || (x && x.state === 'off');
+  // inside a WARNING / FAILURE: Pause + Cancel print, so the person never hunts for them. The SAME rules as the toolbar: Cancel while a print exists
+  // (printing / preparing / paused), Pause only while it is printing. Never automatic: nothing here pauses or cancels by itself.
+  const spAct = info.k === 'alert' && BUSY_STATES.includes(st);
+  $('sp-act').hidden = !spAct; $('sp-pause').hidden = st !== 'RUNNING'; $('printer').classList.toggle('spw', spAct);
+  if(PV.spFocus){ PV.spFocus = false; if(spAct) spShow(); }        // the screen was just opened (a tap, or the alert's "Open in Fabrica" link) and it IS in a warning: the block is the first thing on screen
   $('cam-spag').textContent = (info.k === 'alert' ? '\u26a0 ' : '') + 'Spaghetti: ' + info.word + (x && x.learning && info.k !== 'alert' && info.k !== 'off' && info.k !== 'down' ? ' - ' + x.learning : '')
     + (x && x.alerts != null && ['on', 'learn', 'alert'].includes(info.k) ? ' \u00b7 ' + x.alerts + (x.alerts === 1 ? ' alert' : ' alerts') : '');
   $('cam-spag').className = 'bdg bl' + (info.k === 'alert' ? ' alert' : '');
@@ -7023,9 +7160,13 @@ async function doTray(tray, mat, color){
   pview();
 }
 
-function askCancel(){
-  const job = (CTL.d && CTL.d.snapshot && CTL.d.snapshot.job) || '';
-  $('mbody').innerHTML = `<h2>Cancel the print on ${esc(CUR)}?</h2>
+const CNL = {name:''};          // the printer the open Cancel dialog is about (the open one, or the fleet card it was tapped on)
+function askCancel(name){
+  const who = typeof name === 'string' && name ? name : CUR;
+  CNL.name = who;
+  const fp = who === CUR ? null : ((FL.last || []).find(p => p.printer === who) || null);
+  const job = (fp ? fp.job : CTL.d && CTL.d.snapshot && CTL.d.snapshot.job) || '';
+  $('mbody').innerHTML = `<h2>Cancel the print on ${esc(who)}?</h2>
     <div class="note">${job ? 'Job: <b>' + esc(job) + '</b>. ' : ''}This stops the job immediately. It cannot be resumed.</div>
     <div class="row"><button class="big grow" onclick="closeModal()">Keep printing</button>
     <button class="big danger grow" onclick="doCancel()">CANCEL PRINT</button></div>`;
@@ -7036,13 +7177,13 @@ async function doCancel(){
     <div class="note">(the cancel may still complete — check the printer card)</div>
     <button class="big" style="width:100%;margin-top:12px" onclick="closeModal()">Close</button>`;
   try{
-    await api(papi(CUR, '/action'), {method:'POST',
+    await api(papi(CNL.name || CUR, '/action'), {method:'POST',
       headers:{'Content-Type':'application/json'}, body: JSON.stringify({action:'cancel'})});
     closeModal();
   }catch(e){
     errorCard('Could not cancel', e.message);
   }
-  pview();
+  if($('home').classList.contains('on')) fleet(); else pview();
 }
 
 const DEL = { file: '', printer: '' };
@@ -7128,15 +7269,16 @@ async function doConnect(name, restart){
   refresh();
 }
 
-async function act(action){
+async function act(action, name){          // `name` = a printer other than the open one (the Pause on a fleet card); no name = the open printer
+  const redo = () => { if(name) fleet(); else pview(); };
   try{
-    const d = await api(papi(CUR, '/action'), {method:'POST',
+    const d = await api(papi(name || CUR, '/action'), {method:'POST',
       headers:{'Content-Type':'application/json'}, body: JSON.stringify({action})});
-    pview();
+    redo();
     return d;
   }catch(e){
     errorCard('Action failed', e.message);
-    pview();
+    redo();
   }
 }
 
@@ -7695,12 +7837,14 @@ function moreGo(where){
 document.addEventListener('keydown', e => { if(e.key === 'Escape' && $('moresheet').classList.contains('on')){ moreClose(); $('morebtn').focus(); } });
 document.addEventListener('keydown', e => {      // Enter / Space on a chip-button (NOT CONNECTED · tap to connect)
   const t = e.target;
-  if((e.key === 'Enter' || e.key === ' ') && t && t.matches && t.matches('.chip.conn[data-act], .frow .grow[data-act="fileMenu"], .ftile[data-act="fileMenu"]')){ e.preventDefault(); t.click(); }
+  if((e.key === 'Enter' || e.key === ' ') && t && t.matches && t.matches('.chip.conn[data-act], .frow .grow[data-act="fileMenu"], .ftile[data-act="fileMenu"], .spg[data-act], .spag[data-act], .spalert[data-act]')){ e.preventDefault(); t.click(); }
   if(e.key === 'Escape' && $('pmore').classList.contains('on')) pmoreClose();
   else if(e.key === 'Escape' && L5 && $('printer').classList.contains('files-open') && !$('modal').classList.contains('on')) filesClose();
 });
 const ACT = {
   openPrinter: b => openPrinter(b.dataset.name),
+  cardPause:  b => act('pause', b.dataset.name),               // a warned fleet card: the same Pause (one tap, no confirm) ...
+  cardCancel: b => askCancel(b.dataset.name),                  // ... and the same Cancel (the one confirm), for THAT printer
   ...PG_ACTIONS,                                  // printer groups + History filter (see the Printer groups block)
   ...AN_ACTIONS,                                  // ==== analytics ====
   ...DW_ACTIONS,                                  // spaghetti watch-area editor (Edit printer > More options)

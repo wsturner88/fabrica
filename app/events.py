@@ -835,14 +835,24 @@ class EventWatcher:
             p = self._p.get(printer)
             job = p.job if p else ""
         what = "possible print problem (WARNING)" if warning else "possible print FAILURE"
-        body = self._join(f"The failure detector is {pct} sure this print has gone wrong"
-                          + (f" ({job})" if job else "") + ".",
-                          "Check the camera." if warning else "Check the camera and stop the print if needed.")
-        return self._emit(Event("spaghetti_suspected", printer, f"{printer}: {what}", body,
+        lines = [f"The failure detector is {pct} sure this print has gone wrong" + (f" ({job})" if job else "") + ".",
+                 "Check the camera." if warning else "Check the camera and stop the print if needed."]
+        # the same "Open in Fabrica" link as the finished message: it opens THIS printer's screen, where the
+        # Spaghetti WARNING block with its Pause / Cancel print buttons is the first thing on screen
+        link = self._hub_link(printer)
+        title = f"{printer}: {what}"
+        body = self._join(*lines) + (f"\nOpen in Fabrica: {link}" if link else "")      # the link is its own last line, like the finished message
+        html = None
+        if link:
+            esc = _html.escape
+            html = "\n".join([esc(title, quote=False)] + [esc(x, quote=False) for x in lines]
+                             + [f'\U0001F517 <a href="{esc(link, quote=True)}">Open in Fabrica</a>'])
+        return self._emit(Event("spaghetti_suspected", printer, title, body,
                                 level="warning" if warning else None,
-                                data={"score": score, "job": job, "level": "warning" if warning else "failure"},
+                                data={"score": score, "job": job, "level": "warning" if warning else "failure",
+                                      "link": link or None},
                                 image=image, image_fn=None if image else self._img(printer),
-                                dedupe_key=f"{job}|{'warning' if warning else 'failure'}"))
+                                dedupe_key=f"{job}|{'warning' if warning else 'failure'}", html=html))
 
     def detector_down(self, error="", failures=None) -> Event:
         """The failure detector has stopped answering: prints are NOT being watched. (Hub-level event, no
