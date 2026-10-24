@@ -8,6 +8,42 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- **A Spaghetti WARNING now has Pause and Cancel print right in it.** On the printer screen (phone, 10-inch / kiosk, desktop and the 5-inch board
+  with either theme) the WARNING block grows one row holding two big buttons, "Pause" and "Cancel print": the same Pause (one tap) and the same
+  Cancel (the one "Keep printing / CANCEL PRINT" confirm) as the toolbar. Pause shows only while the print is running, Cancel while a print exists;
+  nothing is shown for an idle printer or to a view-only sign-in, and nothing is ever paused or cancelled automatically. The alert message
+  (Telegram, ntfy, e-mail...) now ends with "Open in Fabrica: <link>" like the finished message; the link opens that printer, and on the phone the
+  WARNING block sits right under the toolbar. On the fleet page the warning banner and the word on a warned card open that printer; the card shows
+  a compact "Pause / Cancel" row in place of its Nozzle / Bed line (5-inch: in place of the file and layer lines). On the phone a slim Pause /
+  Cancel bar sticks to the top while a print runs and the toolbar row is scrolled out of sight. The 5-inch strip's Cancel gets a heavy frame.
+- **What is on a plate: "4× Hose Clip + 2× Hook" from the slicer's object labels, and a warning when there are none.** The Hub reads the
+  cancel-object labels a slicer writes - Bambu Studio / OrcaSlicer `slice_info.config` (per plate), Klipper `EXCLUDE_OBJECT_DEFINE`, Marlin /
+  Prusa `M486`, PrusaSlicer's `; objects_info` line and `; printing object` comments, and the same key in a Prusa `.bgcode` - and groups the
+  objects by name (extensions, copy suffixes like ` id:0 copy 1` / `_id_0_copy_1` / ` (Instance 2)` and `_1`, `_2` copy numbers are dropped; an
+  object built from several parts counts as one). Each file is `present`, `missing` or `unknown`; **`missing` is said only when it is certain**
+  (the whole file, or the whole section where that slicer writes labels, was read and has none), and `unknown` shows nothing. The file list /
+  grid / detail sheet show `Plate: 4× Hose Clip + 2× Hook`; a file sliced without labels gets a framed `⚠️ No labels` (words, inline, no new
+  row) and the sheet says what to turn on; the start-print dialog shows one line or the warning and never blocks a print. Agents get
+  `plate_contents(printer, filename)` (read key, cache only), `GET /api/files/plate`, and `plate_contents` in `file_facts` /
+  `suggest_mapping` / the file lists; the agent guide says to put the quantity in a name only when labels are present and never to guess
+  when they are missing or unknown. Nothing new is fetched from a printer: it is worked out from the Bambu file the Hub downloads anyway,
+  the head / tail of file-host G-code it already reads, and the library's own files. Entries cached before this version stay `unknown`
+  until read again (`FABRICA_PLATE_BACKFILL=1` lets the background pass do that once). See docs/renaming.md.
+- **A Klipper printer without `[exclude_object]` says so.** One read-only `GET /printer/objects/list` per connect (kept; a Klipper restart
+  forgets it; "not set up" is looked at again every 30 minutes). `printer_status` / `list_printers` carry `exclude_object` and the words
+  "Exclude objects not set up in printer.cfg", and the idle printer's card and screen show the same line (no row is added; a narrow card
+  uses a shorter wording and the whole sentence as its tooltip). Only Klipper / Moonraker printers.
+- **An Analytics page: how the fleet is doing over time.** Next to History in the nav (More > Analytics on a phone and the 5-inch screen):
+  pick 7 days / 30 days / 90 days / 1 year / All time and, if you use printer groups, one group, in one toolbar row (CSV is under More).
+  Six tiles (prints, success rate, hours printing, filament used, filament cost, cost per good part), a prints-per-day / week / month bar chart
+  (finished = solid bars, failed or cancelled = hatched bars, numbers in words under it), a per-printer table (prints, success, hours,
+  utilization, failures, filament, % online), per-material figures, the failures by outcome, reason and file, and the most printed files with
+  the good parts they made (a file without a part count says "parts unknown"). The 5-inch screen shows the same behind five tabs, and nothing
+  on it scrolls but the panel. The figures are the History figures (same window, same cost rules), summed in SQL by the new
+  `GET /api/analytics?period=30d&group=Work` (read scope). **Uptime is new data:** the Hub now notes when a printer becomes unreachable and
+  reachable again (`uptime.jsonl` in the data folder: one line per change that lasts 45 s, a 256 KB cap, plus one small heartbeat file rewritten every
+  10 minutes so the Hub's own downtime is not counted), and the page says "collecting since <date>" until that history covers the period.
+  `tools/seed_demo_jobs.py` fills a throw-away folder with generic demo history for screenshots.
 - **A real desktop layout, and the dashboard now picks its layout for the screen.** In a big window with a mouse the dashboard uses the
   whole window instead of the 1024x600 wall-screen box: more cards per row on the fleet page, a large camera beside the progress and
   controls on the printer screen with the picture grid across the full width, History with Recent prints / By printer / By file side by
@@ -16,6 +52,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   Phone / 5-inch wall / Automatic); `?view=` in the address wins over detection. Wall screens (`?kiosk=1`, `?layout=5in`) are unchanged.
 
 ### Fixed
+- **A multi-plate project's per-plate exports (OrcaSlicer: one `.gcode.3mf` per plate) are treated as the plate they hold, not plate 1.** The
+  plate-4 file has `Metadata/plate_4.gcode` and `plate_4.png`; the Hub used to read `plate_1.png` (two different plates showed the same
+  picture), count layers and parts from plate 1, and - safety-critical - tell the printer to print `Metadata/plate_1.gcode`, which is not in
+  that file. Now: the picture, layers, part count and the plate sent to the printer all come from the file's real plate (taken from the cached
+  details of that exact file, never a second download; plate 1 stays the last resort only when the Hub holds no details at all). Cached entries
+  carry a `meta_v` marker; older ones are read again once by the normal idle-printer backfill (library files: re-read from the Hub's own disk at
+  start-up), so wrong pictures fix themselves - no cache wipe needed.
 
 - **The printer screen's toolbar stays on one row while printing, even in a wider font.** On the 10-inch layout a print under way now shows ONE
   "Sort: Recent ▾" button (it opens a chooser in words, with a tick on the active choice) instead of the four sort buttons, so Pause / Resume

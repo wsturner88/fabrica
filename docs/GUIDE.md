@@ -99,6 +99,8 @@ prints from anywhere on earth without exposing anything to the internet.
   **History** page shows success rate, material used, cost, and the *true* cost per part (failures
   charged to the good parts), with a CSV download. Tools: `recent_jobs`, `job_stats`, `cost_per_part`.
   Rates: Settings → Costs. How it works: [docs/joblog.md](joblog.md)
+  The **Analytics** page next to it sums the same log over 7 days to a year (success rate, hours, filament, cost, a prints-per-day chart,
+  per-printer utilization and % online, failures, the most printed files); see [Analytics](joblog.md#analytics-get-apianalytics-the-analytics-page).
 - 🔎 **Find printers on your network** — **Printers → Discover printers** scans the networks you list
   (works from Docker) and pre-fills the Add form; tool `discover_printers`.
   [docs/discovery.md](discovery.md)
@@ -204,6 +206,7 @@ Building from source instead: clone the repo and `docker compose up -d --build` 
 | `dashboard_auth.json` | the optional dashboard sign-in: on/off switch, the password hashes, trusted devices (a hash of each token, never the token) and signed-in sessions, file mode `0600` — see [Securing the dashboard](#securing-the-dashboard-optional) |
 | `metacache.json`, `thumbs/`, `backups/` | file-metadata cache, plate previews, printer file backups |
 | `jobs.sqlite` | the print log behind the History page (one row per print attempt; job names can carry order or customer info — treat it, and the CSV export, accordingly). Back it up with the rest of `/data` |
+| `uptime.jsonl`, `uptime_alive.json` | when each printer became reachable / unreachable (one line per change, capped at 256 KB) and a small heartbeat file; they feed the Analytics page's % online |
 | `detection/` | spaghetti detection: each printer's learned baseline and, in learn-only mode, `scores.jsonl` (rotated at 1 MB) |
 
 **Access control.** Agents and scripts need an API key (a new install requires one from the start; an

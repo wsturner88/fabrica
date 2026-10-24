@@ -17,7 +17,7 @@ MCP tools. Everything you need is in these guides; there is no other file to fet
 - Print: `suggest_mapping`, `start_print`, `pause_print`, `resume_print`, `cancel_print`. See topic `printing`.
 - Library (files kept on the Hub): `library_list`, `library_file`, `library_send`, `library_save_from_printer`. See `library`.
 - History and cost: `recent_jobs`, `job_stats`, `cost_per_part`. See `history`.
-- Renaming files on printers: `file_facts`, `rename_preview`, `rename_apply`. See `renaming`.
+- Renaming files on printers: `file_facts`, `plate_contents`, `rename_preview`, `rename_apply`. See `renaming`.
 - Printer controls: `set_light`, `preheat`, `cooldown`, `load_filament`, `unload_filament`, `set_tray`.
 - Files and backups: `delete_sd_file`, `backup_printer_files`, `backup_status`.
 - Fleet and settings: `list_printer_types`, `add_printer`, `update_printer`, `remove_printer`, `set_printer_groups`, `set_detection_area`, `get_settings`, `update_settings`.

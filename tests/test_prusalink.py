@@ -162,6 +162,17 @@ class FakePrusaLink:
                     return self.reply(200, {"camera_list": cams})
                 if path == "/api/v1/cameras/cam1/snap" and f.camera:
                     return self.reply(200, JPEG, "image/jpeg")
+                if f.core is not None and path.startswith("/usb/") and m == "GET":     # refs.download
+                    ent = f.core.get(path[len("/usb/"):])
+                    if not ent or ent.get("data") is None:
+                        return self.reply(404, {"message": "no such file"})
+                    data = ent["data"]
+                    rng = self.headers.get("Range")
+                    if rng and not f.ignore_range:
+                        mm = re.fullmatch(r"bytes=(\d+)-(\d+)", rng)
+                        a, b = int(mm.group(1)), int(mm.group(2))
+                        return self.reply(206, data[a:b + 1], "application/octet-stream")
+                    return self.reply(200, data, "application/octet-stream")
                 if f.core is not None and (path.startswith("/api/v1/files/usb") or path.startswith("/thumb/")):
                     return self.core_route(m, path)
                 if path.startswith("/api/v1/files/usb"):

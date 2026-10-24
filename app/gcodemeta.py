@@ -67,15 +67,18 @@ def _kv(text):
     return out
 
 
-def from_bgcode_head(data) -> dict:
-    """Facts from the metadata blocks at the start of a binary .bgcode (pass the first ~64 KB)."""
+def bgcode_kv(data):
+    """(key/value pairs of every metadata block, reached_gcode) from the start of a binary .bgcode (pass the first ~1 MB).
+    `reached_gcode` is True when the walk got to the first G-code block, i.e. every metadata block was read in full;
+    False when the data ended (or a block could not be decoded) first, so a key that is missing may simply be unread.
+    Never raises: unreadable input gives ({}, False)."""
     try:
         data = bytes(data or b"")
         if data[:4] != b"GCDE" or len(data) < 10:
-            return {}
+            return {}, False
         checksum_type = struct.unpack_from("<H", data, 8)[0]
         crc = 4 if checksum_type == 1 else 0
-        pos, kv = 10, {}
+        pos, kv, reached = 10, {}, False
         while pos + 8 <= len(data):
             btype, comp, usize = struct.unpack_from("<HHI", data, pos)
             pos += 8
@@ -97,8 +100,20 @@ def from_bgcode_head(data) -> dict:
                     body = b""                       # heatshrink: not decoded here
                 kv.update(_kv(body.decode("utf-8", "ignore")))
             elif btype == 1:
-                break                                # the G-code itself starts: the metadata is behind us
+                reached = True                       # the G-code itself starts: the metadata is behind us
+                break
             pos = end + crc
+        return kv, reached
+    except Exception:
+        return {}, False
+
+
+def from_bgcode_head(data) -> dict:
+    """Facts from the metadata blocks at the start of a binary .bgcode (pass the first ~64 KB)."""
+    try:
+        kv, _reached = bgcode_kv(data)
+        if not kv:
+            return {}
         out = {}
         mats = _materials(kv.get("filament_type"))
         if mats:

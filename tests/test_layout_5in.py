@@ -199,15 +199,15 @@ HUB.lastOk = Date.now() - 60000; HUB.enter = Date.now() - 60000; window.__down =
 R.hubdown = snap(); window.__down = false; await fleet(); await sleep(100);
 R.hubback = snap();
 
-// the More menu: the five pages are reachable from it
+// the More menu: the six pages are reachable from it
 document.getElementById('morebtn').click(); await sleep(50);
 R.more = {on: document.getElementById('moresheet').classList.contains('on'), expanded: document.getElementById('morebtn').getAttribute('aria-expanded'),
   buttons: [...document.querySelectorAll('#moresheet .morebox button')].filter(b => getComputedStyle(b).display !== 'none').map(b => ({t: b.textContent.trim(), h: r(b).h, inside: inside(r(b))}))};
 document.querySelector('#moresheet .morebk').click(); await sleep(50);
 R.moreClosed = !document.getElementById('moresheet').classList.contains('on');
 // each entry opens its page and closes the sheet
-window.__went = []; for(const n of ['openPrinters', 'openLibrary', 'openHistory', 'openBackups', 'openSettings']) window[n] = () => window.__went.push(n);
-for(const go of ['printers', 'library', 'history', 'backups', 'settings']){ document.getElementById('morebtn').click(); document.querySelector('#moresheet [data-go="' + go + '"]').click(); }
+window.__went = []; for(const n of ['openPrinters', 'openLibrary', 'openHistory', 'openAnalytics', 'openBackups', 'openSettings']) window[n] = () => window.__went.push(n);
+for(const go of ['printers', 'library', 'history', 'analytics', 'backups', 'settings']){ document.getElementById('morebtn').click(); document.querySelector('#moresheet [data-go="' + go + '"]').click(); }
 R.went = window.__went.slice(); R.wentClosed = !document.getElementById('moresheet').classList.contains('on');
 
 // the printer screen and the dialogs at 800x480
@@ -412,12 +412,12 @@ class FiveInBrowserTests(unittest.TestCase):
                 self.assertGreaterEqual(b["w"], 44, b)
         self.assertTrue(R["more"]["on"])
         self.assertEqual(R["more"]["expanded"], "true")
-        self.assertEqual([b["t"] for b in R["more"]["buttons"]], ["Printers", "Library", "History", "Reload", "Backups", "Settings", "Close"])
+        self.assertEqual([b["t"] for b in R["more"]["buttons"]], ["Printers", "Library", "History", "Analytics", "Reload", "Backups", "Settings", "Close"])
         for b in R["more"]["buttons"]:
             self.assertGreaterEqual(b["h"], 44)
             self.assertTrue(b["inside"], b)
         self.assertTrue(R["moreClosed"])
-        self.assertEqual(R["went"], ["openPrinters", "openLibrary", "openHistory", "openBackups", "openSettings"])
+        self.assertEqual(R["went"], ["openPrinters", "openLibrary", "openHistory", "openAnalytics", "openBackups", "openSettings"])
         self.assertTrue(R["wentClosed"])
 
     def test_group_chips_stay_one_compact_touchable_row(self):

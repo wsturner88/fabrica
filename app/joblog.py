@@ -62,6 +62,8 @@ def _build_plate(position: int, metas: list, objects: list, filaments: list) -> 
     return {"index": _int(md.get("index")) or position,
             "parts": len(live) or None,                      # no <object> entries -> unknown, not 0
             "objects": [o.get("name") for o in live if o.get("name")],
+            "object_entries": len(objects),                  # every <object>, skipped ones too (platecontents: labels present?)
+            "label_object_enabled": md.get("label_object_enabled"),
             "weight_g": weight, "prediction_s": _int(md.get("prediction")),
             "printer_model_id": md.get("printer_model_id"), "filaments": fils}
 
@@ -76,8 +78,8 @@ def _int(v):
 def parse_slice_info(text) -> dict:
     """Per-plate facts from a Bambu `Metadata/slice_info.config`:
 
-        {"plates": [{"index", "parts", "objects", "weight_g", "prediction_s",
-                     "printer_model_id", "filaments": [...]}], "error": None | "..."}
+        {"plates": [{"index", "parts", "objects", "object_entries", "label_object_enabled", "weight_g",
+                     "prediction_s", "printer_model_id", "filaments": [...]}], "error": None | "..."}
 
     `parts` is the number of `<object>` entries in the plate (objects marked skipped="true"
     are not printed and not counted). Never raises: malformed XML falls back to a tolerant

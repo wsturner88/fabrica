@@ -22,6 +22,8 @@ Starting a print always follows this order. Skipping a step makes `start_print` 
   refused. Only if the human has read that warning and says it is safe, pass `model_override=True` and add
   `|model_override` to the end of the confirm string. Never on your own.
 - Printers without an AMS print whatever filament is loaded: remind the human to check it.
+- `suggest_mapping` also returns `plate` (what is on the plate, or that the file has no object labels). Say it in the plan when it is
+  there ("4× Hose Clip + 2× Hook"); a file without labels is a warning, never a reason to refuse or to guess a count.
 - A read key cannot make the Hub download metadata; if `suggest_mapping` says metadata is unavailable, say so.
 
 ## Pause, resume, cancel

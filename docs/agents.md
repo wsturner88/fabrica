@@ -55,6 +55,7 @@ The scope of every tool is defined in `TOOL_SCOPES` in `app/security.py`.
 | Look | read | `list_printers`, `list_groups`, `printer_status`, `ams_state`, `list_sd_files`, `get_camera_snapshot`, `printer_controls`, `list_printer_types`, `get_settings` |
 | Plan | read | `suggest_mapping` |
 | File facts | read | `file_facts` (what you need to choose a file name; the Hub has no naming rules) |
+| Plate contents | read | `plate_contents` (how many of which object are on a plate, from the slicer's object labels; cached, no printer contacted) |
 | History and cost | read | `recent_jobs`, `job_stats`, `cost_per_part` |
 | Backups and detection (status) | read | `backup_status`, `detection_status` |
 | Print | control | `start_print`, `pause_print`, `resume_print`, `cancel_print`, `connect_printer` |

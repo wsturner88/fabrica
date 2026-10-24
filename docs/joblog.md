@@ -208,6 +208,31 @@ have prints in the filtered set are listed.
 MCP: `job_stats`, `recent_jobs` and `cost_per_part` accept `group` (one name, or several separated by commas) and `printers`
 (a list); `job_stats` / `recent_jobs` keep their single `printer` argument too. They add up (union).
 
+## Analytics (`GET /api/analytics`, the **Analytics** page)
+
+A summary of the same log across time, for the page next to History (success rate, hours, filament, cost, failures, a trend,
+uptime). `app/analytics.py` sums in SQL, so it stays cheap on a Raspberry Pi; it reads the table, never writes it.
+`GET /api/analytics?period=30d&group=Work` (`read` scope, like `/api/stats`; `period` = `7d` `30d` `90d` `1y` `all` or any
+period `/api/stats` accepts; `group` / `printer` filter exactly as in History, union, repeatable).
+
+* **Same rules as History.** The window is `COALESCE(ended_at, started_at) >= now - period`; running and unknown prints are counted
+  but left out of success rate, hours, grams and cost; grams, hours and filament cost are the `costs.py` rules (tested against
+  `JobLog.stats` figure for figure). Analytics shows **filament** cost only (the "+ Print time" switch is a History view).
+* **Per printer** adds *utilization* = printing hours / hours since the printer was first seen (inside the period), capped at 100 %.
+  **Per material** splits a multi-colour print by the filament list in its row (SQLite's JSON functions; without them every gram
+  goes to the print's main material). **Top files** add up `parts` of finished prints; a print with no part count is counted as a
+  print and marked *parts unknown*, never guessed (the *cost per good part* tile still counts it as 1 part, as History does).
+  **Failures** are counted by outcome, by the `error` text and by file; an unknown outcome (the end was never seen) is shown
+  apart and is not a failure. **Trend**: finished vs failed/cancelled per local day (up to ~45 days), week (Monday) or month,
+  using the Hub's time zone; the oldest bar may be a part-period (`partial_first`).
+* **Uptime** (`app/uptime.py`) - nothing else recorded when a printer was reachable, so it keeps a small log under the data folder:
+  `uptime.jsonl` gets **one line per change** (reachable / unreachable, "reachable" = the event watcher's definition), written only
+  after the change has lasted 45 s and dated from when it began, so a Wi-Fi blip or a printer connecting just after the Hub starts
+  writes nothing; a start line per Hub run; and `uptime_alive.json`, one tiny file **overwritten** at most every 10 minutes (and at
+  exit), so the time the Hub itself was off is not counted as "online". The log is capped at 256 KB: past that the oldest 40 % is
+  dropped and each printer's state at the cut is kept. The page shows *Online %* per printer and says *collecting since <date>*
+  until the log covers the period.
+
 ## How it is wired
 
 Everything below is in `app/server.py` unless it says otherwise.

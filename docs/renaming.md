@@ -12,6 +12,7 @@ human has seen the before -> after table and said yes.
    `slice_info` = counted in the file, `assumed` = a gcode file cannot say so one is assumed, `unknown`), the printer model
    it was sliced for, print time, grams, the filaments as material + colour **words**, where else the same file exists, and
    how often it was printed. It reads cached information; a busy printer is never contacted (the answer says "facts from cache").
+   The same answer carries `plate_contents`: how many of which object are on the plate (see "Plate contents" below).
 2. The agent picks names with **its own** rules.
 3. `rename_preview(renames)` (control key): `[{location, old_name, new_name}, ...]`, up to 100. Returns the before -> after table,
    per-row problems and a **single-use ticket** (`rn-...`, valid 10 minutes, bound to exactly that list). Nothing changes.
@@ -74,3 +75,40 @@ follows a redirect, and never starts a print. Downloads are capped at 500 MB.
 
 Code: `app/renamer.py` (name check, tickets), the `# ==== rename ====` block in `app/server.py` (every printer touch), the driver
 `upload` / `download` calls, `Library.rename`, `JobLog.record_rename`. Tests: `tests/test_rename.py`.
+
+## Plate contents: putting the quantity in a name
+
+A file name that says `4x Hose Clip + 2x Hook` helps only if it is true. The Hub reads the cancel-object labels a slicer writes (the
+"Label objects" / "Exclude objects" switch) and says how many of which object are on the plate.
+
+`plate_contents(printer, filename)` (read key; `printer` is a printer name or `"library"`), `GET /api/files/plate?location=&name=`, and the
+`plate_contents` field of `file_facts` / `GET /api/files/facts` (also `plate` in the file lists, the file detail and `suggest_mapping`):
+
+```json
+{"labels": "present", "source": "m486", "total": 6,
+ "groups": [{"name": "Hose Clip", "count": 4}, {"name": "Hook", "count": 2}],
+ "summary": "4× Hose Clip + 2× Hook"}
+```
+
+* `labels` is `present`, `missing` or `unknown`. **`missing` is said only when it is certain**: the whole file, or the whole section where
+  that slicer writes its labels, was read and there are none (or a Bambu `slice_info.config` lists no object). A head-only read that stops
+  before the end of the first layer, a slicer the Hub does not know (Cura) and a format that hides its G-code (Prusa `.bgcode`) are
+  `unknown`, and `unknown` shows nothing on screen.
+* `source`: `slice_info` (Bambu Studio / OrcaSlicer `.gcode.3mf`, per plate), `exclude_object` (Klipper `EXCLUDE_OBJECT_DEFINE`), `m486`
+  (Marlin / Prusa `M486`), `objects_info` (PrusaSlicer's `; objects_info` line, or the same key in a `.bgcode` metadata block), `comments`
+  (`; printing object ...`, Bambu's `; start printing object, unique label id`).
+* **One labelled object counts one.** An object assembled from several parts, or a multi-part model the slicer treats as one object, is 1;
+  two copies are 2 - it is "objects the printer can cancel separately".
+* Names are normalised so copies group: extension (`.stl`, `.3mf`, `.step`, `.obj`), slicer copy suffixes (` id:0 copy 1`,
+  `_id_0_copy_1`, ` (Instance 2)`, ` (3)`) and a trailing `_1` / `-2` only when the numbers run 1..n. Klipper names, which cannot hold
+  spaces, get them back from underscores.
+* Nothing is downloaded for it. The answer is worked out where the Hub already holds the bytes: the Bambu `.gcode.3mf` it fetches anyway,
+  the 1 MB head and 64 KB tail of file-host G-code it already reads, and the library's own files on the Hub's disk. A file the Hub has not
+  read yet - or read before this version (set `FABRICA_PLATE_BACKFILL=1` to let the background pass read those once more) - is `unknown`.
+* The file list, grid and detail sheet show `Plate: 4× Hose Clip + 2× Hook`, or - for `missing` only - a framed `⚠️ No labels` and
+  "No object labels - can't count parts or cancel one object. Turn on "Label objects" in the slicer." The start-print dialog shows one
+  line. Nothing ever blocks a print.
+
+A Klipper printer whose `printer.cfg` has no `[exclude_object]` section cannot cancel one object at all: `printer_status` and the printer
+card say so in words (`exclude_object: false`, "Exclude objects not set up in printer.cfg"). The Hub looks once per connect with one small
+read-only `GET /printer/objects/list`.

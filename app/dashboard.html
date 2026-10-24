@@ -156,6 +156,12 @@
   .ftile .fbadge { min-width:0; max-width:none; padding:1px 6px; border-width:2px; border-radius:6px; font-size:13px; margin-left:auto; }
   .ftile .fbadge.two { font-size:11px; padding:1px 6px; line-height:1.05; }
   #files .fgrid.has2 .ftmeta { min-height:30px; }          /* one tile has two materials (stacked): every tile keeps the same height */
+  /* ==== plate contents ==== words in a frame, never colour alone; inline, so no row is added anywhere */
+  .pbadge { display:inline; margin-right:6px; padding:0 6px; border:1px solid var(--txt); border-radius:6px; background:var(--bg); color:var(--txt); font-weight:800; font-size:.92em; line-height:0; white-space:nowrap; }       /* inline (not inline-block): the frame never makes the text line taller */
+  .ftile .fplate { position:absolute; right:5px; top:5px; z-index:1; max-width:calc(100% - 10px); padding:0 7px; font-size:12px; font-weight:800; line-height:1.5; color:var(--txt); background:var(--bg); border:2px solid var(--txt); border-radius:6px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .cfpick .cfplate { font-size:14px; line-height:1.3; margin:0; display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden; }       /* two lines at most: the sheet has the whole list */
+  #fleet .pcard .exw, .xtra.exw { color:var(--txt); font-weight:700; }
+  /* ==== end plate contents ==== */
   /* the 1024x600 page (wall screen or desktop window: the page is that size whatever the window) and the 800x480 sheet have no height to spare:
      the picture is 16:10 there, so two rows of tiles show under the control band. A phone scrolls the page, so its pictures are 4:3. */
   @media (min-width:761px) { .ftile .fpic { aspect-ratio:16/10; } }
@@ -617,6 +623,7 @@ if(L5){ document.documentElement.classList.add('lay-5in'); if(L5T === 'bridge') 
   <div class="row"><h1 id="hub-title"><span class="brand"><img src="/static/brand/mark.svg" alt=""><span class="wordmark">fabrica<i>_</i></span></span></h1><span class="grow"></span><span id="vo-chip" class="chip idle" hidden title="This sign-in can look but not change anything">VIEW-ONLY</span><span id="clock" style="color:var(--dim);font-size:18px"></span>
     <button data-ctl onclick="openPrinters()" style="min-height:44px;font-size:16px;padding:8px 14px">Printers</button>
     <button onclick="openHistory()" class="phone-hide" style="min-height:44px;font-size:16px;padding:8px 14px">History</button>
+    <button onclick="openAnalytics()" class="phone-hide" style="min-height:44px;font-size:16px;padding:8px 14px" title="Success rate, hours, filament, cost and uptime over time">Analytics</button><!-- ==== analytics ==== -->
     <button onclick="openLibrary()" style="min-height:44px;font-size:16px;padding:8px 14px" title="Every print file on the Hub and the printers">Library</button><!-- ==== library ==== -->
     <button id="morebtn" data-act="moreOpen" aria-haspopup="dialog" aria-expanded="false" style="min-height:44px;font-size:16px;padding:8px 14px">More &#9662;</button><!-- phone menu: see "phone layout" -->
     <button data-ctl onclick="openBackups()" class="phone-hide" style="min-height:44px;font-size:16px;padding:8px 14px">Backups</button>
@@ -637,6 +644,7 @@ if(L5){ document.documentElement.classList.add('lay-5in'); if(L5T === 'bridge') 
     <button data-ctl class="more5" data-act="moreGo" data-go="printers">Printers</button><!-- 5in layout only: its header carries just this menu -->
     <button class="more5" data-act="moreGo" data-go="library">Library</button>
     <button data-act="moreGo" data-go="history">History</button>
+    <button data-act="moreGo" data-go="analytics">Analytics</button><!-- ==== analytics ==== -->
     <button class="more5" data-act="reloadPage">Reload</button>
     <button data-ctl data-act="moreGo" data-go="backups">Backups</button>
     <button data-ctl data-act="moreGo" data-go="settings">Settings</button>
@@ -678,6 +686,11 @@ if(L5){ document.documentElement.classList.add('lay-5in'); if(L5T === 'bridge') 
     <span id="p-kind" class="l5only"></span><span id="p-clock" class="l5only"></span>
   </div>
   <div class="hubdown" role="alert" aria-live="assertive" hidden></div>
+  <div id="p-stick" class="pstick" data-ctl role="group" aria-label="Pause or cancel this print"><!-- phone only, while printing, once the toolbar row has scrolled out of sight: the same Pause / Resume / Cancel as the toolbar (see "stickSync") -->
+    <span class="stn" id="stk-name"></span>
+    <button type="button" id="stk-pause" onclick="act('pause')"><svg class="ic" aria-hidden="true"><use href="#i-pause"/></svg>Pause</button>
+    <button type="button" id="stk-resume" onclick="act('resume')"><svg class="ic" aria-hidden="true"><use href="#i-play"/></svg>Resume</button>
+    <button type="button" id="stk-cancel" class="danger" onclick="askCancel()"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg>Cancel print</button></div>
   <div id="p-stat"><!-- display:contents everywhere except the 5in board, where it is the stats column -->
    <div id="p-prim"><!-- display:contents everywhere except the 5in board, where it is the progress card -->
     <div id="p-big" role="status"></div>
@@ -694,7 +707,10 @@ if(L5){ document.documentElement.classList.add('lay-5in'); if(L5T === 'bridge') 
    <div id="p-tiles"><div class="t5" id="t-noz"></div><div class="t5" id="t-bed"></div></div>
    <div id="p-spag" data-k="ready"><svg class="ic" id="sp-ic" aria-hidden="true"><use href="#i-eye"/></svg>
      <div class="t"><div class="l">Spaghetti: <b id="sp-word">&mdash;</b></div><div class="s" id="sp-sub"></div></div>
-     <button id="sp-tog" data-ctl data-act="spagToggle" role="switch" aria-checked="false" aria-label="Spaghetti detection for this printer" disabled><i></i><span class="tw">OFF</span></button></div>
+     <button id="sp-tog" data-ctl data-act="spagToggle" role="switch" aria-checked="false" aria-label="Spaghetti detection for this printer" disabled><i></i><span class="tw">OFF</span></button>
+     <div id="sp-act" class="spact" data-ctl role="group" aria-label="Stop this print" hidden><!-- inside a Spaghetti WARNING only, while a print runs / is paused: the SAME Pause and Cancel actions as the toolbar (one tap / the one confirm) -->
+       <button type="button" id="sp-pause" data-ctl onclick="act('pause')"><svg class="ic" aria-hidden="true"><use href="#i-pause"/></svg>Pause</button>
+       <button type="button" id="sp-cancel" data-ctl class="danger" onclick="askCancel()"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg>Cancel print</button></div></div>
   </div>
   <!-- printer controls: one slim strip; only what this printer supports; heater/filament buttons are hidden while it prints -->
   <div id="p-controls" class="ctl" data-ctl hidden>
@@ -754,6 +770,17 @@ if(L5){ document.documentElement.classList.add('lay-5in'); if(L5T === 'bridge') 
   </div>
   <div id="hi-body" role="region" aria-label="Print history and costs"></div>
 </section>
+
+<!-- ==== analytics ==== -->
+<section id="analytics" class="screen">
+  <div class="row sthead" id="an-head">
+    <h1>Analytics</h1>
+    <span class="grow"></span>
+    <div id="an-ctl"></div>
+  </div>
+  <div id="an-body" role="region" aria-label="Analytics: success, hours, filament, cost, failures and uptime"></div>
+</section>
+<!-- ==== end analytics ==== -->
 
 <!-- ==== library ==== -->
 <section id="library" class="screen">
@@ -1160,7 +1187,7 @@ function lbWhere(r){
 }
 function lbBits(r){
   const fil = r.filaments.map(f => f.color_name + ' ' + f.type).join(' + ');
-  return [r.print_time, r.weight_g ? Math.round(r.weight_g) + ' g' : '', fil].filter(Boolean).join(' · ') || (r.details_error ? 'details unreadable' : 'no details yet');
+  return [plateMissing(r) ? '\u26a0\ufe0f No labels' : '', r.print_time, r.weight_g ? Math.round(r.weight_g) + ' g' : '', fil].filter(Boolean).join(' · ') || (r.details_error ? 'details unreadable' : 'no details yet');       // ==== plate contents ====
 }
 
 function lbRender(){
@@ -1214,7 +1241,7 @@ function lbDetail(){
     ${r.in_library ? `<div class="row" data-ctl style="margin-top:8px"><select id="lb-move" aria-label="Folder" class="stin" style="margin:0;min-height:44px;font-size:15px">${folderOpts}</select><button data-ctl data-act="lbMove" data-id="${esc(r.id)}">Move</button></div>` : ''}
     <dl class="lbdl">${row('Print time', r.print_time)}${row('Weight', r.weight_g ? Math.round(r.weight_g * 10) / 10 + ' g' : '')}${row('Layer height', r.layer_height != null ? r.layer_height + ' mm' : '')}
       ${row('Layers', r.layers)}${row('Nozzle', r.nozzle != null ? r.nozzle + ' mm' : '')}${row('Temperatures', temps)}${row('Infill', r.infill)}${row('Supports', sup)}
-      ${row('Slicer', r.slicer)}${row('Sliced for', r.sliced_for)}${row('Parts', r.parts)}${row('Size', lbSize(r.size))}${row('Folder', r.folder)}${row('Added', r.added ? r.added.replace('T', ' ').replace('Z', ' UTC') : '')}
+      ${row('Slicer', r.slicer)}${row('Sliced for', r.sliced_for)}${row('Parts', r.parts)}${row('Plate', plateSummary(r) || (plateMissing(r) ? '\u26a0\ufe0f ' + PLATE_MISSING : ''))}${row('Size', lbSize(r.size))}${row('Folder', r.folder)}${row('Added', r.added ? r.added.replace('T', ' ').replace('Z', ' UTC') : '')}
       ${row('Source', r.source)}${row('On printers', r.printers.join(', '))}</dl>
     ${r.details_error ? `<div class="note">Details: ${esc(r.details_error)}</div>` : ''}
     ${r.in_library ? '' : '<div class="note">Printer-only: save it to the library to keep it and see every detail.</div>'}
@@ -2417,6 +2444,349 @@ async function hiDetail(id){
   $('modal').classList.add('on');
 }
 </script>
+
+<!-- ==== analytics ==== -->
+<!-- ===== Analytics page: the job log summed over time (server side: analytics.py, uptime.py, GET /api/analytics). One toolbar row; tiles; Trend / Printers / Materials / Failures / Top files.
+     Meaning is always a word, a number or a pattern (solid bar = finished, hatched bar = failed), never a colour. 5-inch: tiles + tabs, nothing scrolls but the panel. ===== -->
+<style>
+  /* ==== analytics ==== */
+  #analytics { padding-bottom:10px; }
+  #an-head { flex-wrap:nowrap; gap:8px; }
+  #an-head h1 { white-space:nowrap; }
+  #an-ctl { display:flex; gap:8px; align-items:center; flex-wrap:nowrap; }
+  #an-ctl select { font-family:inherit; font-size:16px; min-height:44px; padding:6px 10px; border-radius:12px; border:1px solid var(--line);
+                   background:var(--card2); color:var(--txt); max-width:170px; }
+  #an-ctl .seg { margin-top:0; flex-wrap:nowrap; gap:4px; }
+  #an-ctl .seg button { min-width:0; flex:none; min-height:44px; font-size:15px; padding:6px 10px; }
+  #an-ctl > button { min-height:44px; font-size:15px; padding:6px 12px; white-space:nowrap; }
+  .an-per .sh { display:none; }
+  #an-body { flex:1; min-height:0; overflow-y:auto; overflow-x:hidden; margin-top:8px; padding:2px 4px 12px 2px;
+             overscroll-behavior:contain; -webkit-overflow-scrolling:touch; touch-action:pan-y; }
+  .an-tiles { display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:8px; }
+  .an-t { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:6px 10px; min-width:0; }
+  .an-t .l { font-size:13px; color:var(--dim); font-weight:700; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .an-t .v { font-size:26px; font-weight:800; line-height:1.1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .an-t .s { font-size:12px; color:var(--dim); line-height:1.25; overflow-wrap:anywhere; }
+  .an-t .sh, .an-t .ss { display:none; }
+  .an-sec { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:8px 12px 10px; min-width:0; margin-top:10px; }
+  .an-sec h2 { font-size:18px; margin:0 0 4px; display:flex; flex-wrap:wrap; align-items:baseline; gap:2px 12px; }
+  .an-sec h2 small { font-size:13px; color:var(--dim); font-weight:400; }
+  .an-grid { display:grid; grid-template-columns:minmax(0,1fr); gap:0 10px; }
+  @media (min-width:900px) { .an-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .an-two { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:0 18px; } }
+  .at .tr { display:grid; grid-template-columns:var(--c); gap:8px; padding:7px 0; border-top:1px solid var(--line); align-items:center; font-size:15px; }
+  .at .tr.h { color:var(--dim); font-size:12px; font-weight:700; border-top:0; padding:0 0 3px; }
+  .at .tr > div { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .at .tr > .n { text-align:right; }
+  .at small { color:var(--dim); font-size:12px; }
+  .an-mb { display:inline-block; vertical-align:middle; width:30px; height:7px; margin-left:6px; border:1px solid var(--dim); border-radius:2px; overflow:hidden; }
+  .an-mb i { display:block; height:100%; background:var(--txt); }
+  .an-chart svg { display:block; width:100%; height:auto; }
+  .an-chart .an-ok { fill:var(--accent); stroke:var(--txt); stroke-width:1; }
+  .an-chart .an-bad { fill:url(#an-hatch); stroke:var(--txt); stroke-width:1; }
+  .an-chart text { fill:var(--dim); font-size:11px; font-family:inherit; }
+  .an-chart text.an-v { fill:var(--txt); font-weight:700; }
+  .an-chart line { stroke:var(--line); stroke-width:1; }
+  .an-leg { display:flex; flex-wrap:wrap; gap:2px 16px; font-size:14px; margin-top:2px; align-items:center; }
+  .an-sw { display:inline-block; vertical-align:middle; width:18px; height:12px; margin-right:6px; border:1px solid var(--txt); }
+  .an-sw.ok { background:var(--accent); }
+  .an-sw.bad { background:repeating-linear-gradient(45deg, var(--txt) 0 2px, var(--card) 2px 5px); }
+  .an-note { font-size:13px; color:var(--dim); margin-top:6px; line-height:1.35; }
+  .an-empty { text-align:center; padding:26px 12px; font-size:18px; color:var(--dim); }
+  .an-outs { display:flex; flex-wrap:wrap; gap:4px 16px; font-size:15px; font-weight:700; margin:2px 0 6px; }
+  .an-tabs { display:none; }
+  @media (max-width:760px), (orientation:landscape) and (max-height:500px) and (max-width:932px) {
+    #an-head { flex-wrap:wrap; }
+    #an-ctl { display:contents; }
+    #an-head .grow { order:1; }
+    #an-ctl > .an-more, #an-ctl > .an-close { order:2; flex:none; min-width:0; padding:6px 10px; }
+    #an-ctl > select { order:3; flex:1 1 104px; min-width:104px; max-width:none; padding:6px 4px; font-size:16px; }
+    #an-ctl > .an-per { order:4; flex:0 0 auto; gap:3px; }
+    #an-ctl .seg button { flex:none; min-width:40px; padding:6px 2px; font-size:14px; }      /* five buttons + the group picker share ONE row on a 375 px phone */
+    .an-per .lg { display:none; } .an-per .sh { display:inline; }
+    #an-ctl .an-per button[aria-checked="true"]::before { content:"\2714\00a0"; }
+    #an-body { overflow:visible; }
+    .an-tiles { grid-template-columns:repeat(2,minmax(0,1fr)); }
+    .an-t .v { font-size:24px; }
+    .at .tr { grid-template-columns:1fr 1fr; }
+    .at .tr.h { display:none; }
+    .at .tr > div { white-space:normal; text-align:left !important; }
+    .at .tr > div[data-l]::before { content:attr(data-l) ": "; color:var(--dim); font-size:12px; }
+    .at .tr > .first { grid-column:1 / -1; font-weight:700; }
+    .at .tr > .first::before { content:none !important; }
+    .an-mb { display:none; }
+  }
+  /* ---- 5-inch (800x480, ?layout=5in): ONE toolbar row, one row of six small tiles, tabs (Trend | Printers | Materials | Failures | Top files), one scrolling panel ---- */
+  html.lay-5in #analytics.on { display:flex; flex-direction:column; height:100vh; height:100dvh; min-height:0; overflow:hidden; padding:6px 10px 8px; gap:6px; background:var(--bg); }
+  html.lay-5in #an-head { flex:none; height:52px; gap:6px; flex-wrap:nowrap; align-items:center; margin:0; padding:0; position:static; }
+  html.lay-5in #an-head h1 { font-size:20px; flex:0 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  html.lay-5in #an-head .grow { display:none; }
+  html.lay-5in #an-ctl { display:flex; flex:1 1 0; min-width:0; justify-content:flex-end; align-items:center; gap:6px; flex-wrap:nowrap; width:auto; }
+  html.lay-5in #an-ctl > * { order:0; }
+  html.lay-5in #an-ctl > .an-per { display:flex; flex:0 1 auto; width:auto; min-width:0; margin:0; gap:3px; }
+  html.lay-5in .an-per .lg { display:none; } html.lay-5in .an-per .sh { display:inline; }
+  html.lay-5in #an-ctl .an-per button { flex:0 1 auto; min-width:0; min-height:44px; height:44px; padding:0 8px; font-size:14px; white-space:nowrap; }
+  html.lay-5in #an-ctl .an-per button[aria-checked="true"] { background:var(--card2); border:2px solid var(--txt); font-weight:800; }
+  html.lay-5in #an-ctl .an-per button[aria-checked="true"]::before { content:"\2714\00a0"; }
+  html.lay-5in #an-ctl > select { flex:0 1 auto; min-width:64px; max-width:140px; height:44px; padding:0 4px; font-size:16px; }
+  html.lay-5in #an-ctl > .an-more { flex:0 0 auto; height:44px; padding:0 9px; font-size:14px; min-width:0; }
+  html.lay-5in #an-ctl > .an-close { flex:none; height:44px; padding:0 11px; font-size:14px; min-width:0; }       /* Close: always on screen */
+  html.lay-5in #an-body { flex:1 1 0; min-height:0; display:flex; flex-direction:column; gap:6px; overflow:hidden; margin:0; padding:0; }
+  html.lay-5in .an-tiles { flex:none; grid-template-columns:repeat(6,minmax(0,1fr)); gap:6px; }
+  html.lay-5in .an-t { padding:4px 8px; border-radius:10px; }
+  html.lay-5in .an-t .l { font-size:11px; letter-spacing:.04em; }
+  html.lay-5in .an-t .lg, html.lay-5in .an-t .ls { display:none; } html.lay-5in .an-t .sh, html.lay-5in .an-t .ss { display:inline; }
+  html.lay-5in .an-t .v { font-size:22px; }
+  html.lay-5in .an-t .s { font-size:11px; line-height:1.2; overflow-wrap:normal; }
+  html.lay-5in .an-tabs { flex:none; display:flex; gap:6px; }
+  html.lay-5in .an-tabs button { flex:1 1 0; min-width:0; height:44px; min-height:44px; padding:0 4px; font-size:14px; font-weight:600; border-radius:10px; background:var(--card); border:1px solid var(--line); color:var(--dim); white-space:nowrap; }
+  html.lay-5in .an-tabs button[aria-selected="true"] { background:var(--card2); border:2px solid var(--txt); color:var(--txt); font-weight:800; }
+  html.lay-5in .an-panel { flex:1 1 0; min-height:0; overflow-y:auto; overflow-x:hidden; overscroll-behavior:contain; touch-action:pan-y; -webkit-overflow-scrolling:touch; background:var(--card); border:1px solid var(--line); border-radius:10px; padding:4px 10px 6px; }
+  html.lay-5in .an-panel h2 { font-size:16px; margin:2px 0 2px; }
+  html.lay-5in .an-panel .at .tr { display:grid; grid-template-columns:var(--c); padding:0; min-height:38px; font-size:14px; gap:6px; }
+  html.lay-5in .an-panel .at .tr.h { display:grid; min-height:22px; font-size:11px; position:sticky; top:0; background:var(--card); z-index:1; }
+  html.lay-5in .an-panel .at .tr > div { white-space:nowrap; text-align:left; }
+  html.lay-5in .an-panel .at .tr > .n { text-align:right; }
+  html.lay-5in .an-panel .at .tr > div[data-l]::before { content:none; }
+  html.lay-5in .an-panel .at .tr > .first { grid-column:auto; font-weight:700; }
+  html.lay-5in .an-panel .an-two { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:0 12px; }
+  html.lay-5in .an-note { font-size:11px; margin-top:4px; }
+  html.lay-5in .an-leg { font-size:12px; }
+  html.lay-5in .an-empty { padding:16px 8px; font-size:16px; }
+  /* desktop window: tiles and tables use the width, but not a 2,000 px line of it */
+  html[data-view="desktop"] #an-body > * { max-width:1700px; }
+  html[data-view="desktop"] #an-ctl .seg button, html[data-view="desktop"] #an-ctl > button, html[data-view="desktop"] #an-ctl select { min-height:36px; }
+  html[data-view="desktop"] .at .tr { padding:9px 0; }
+</style>
+<script>
+// ==== analytics ====
+const AN = { period:'30d', group:null, groups:[], st:null, err:'', timer:null, sig:'', tab:'trend', key:'' };       // group: null = not chosen yet (starts as the group the fleet page shows), '' = all printers
+const AN_PERIODS = [['7d', '7 days', '7 d', '7d'], ['30d', '30 days', '30 d', '30d'], ['90d', '90 days', '90 d', '90d'], ['1y', '1 year', '1 y', 'year'], ['all', 'All time', 'All', 'all']];     // [key, long, short, the period name /api/jobs.csv knows]
+const AN_TABS = [['trend', 'Trend'], ['printers', 'Printers'], ['materials', 'Materials'], ['failures', 'Failures'], ['files', 'Top files']];
+const AN_OUTCOME = { failed:'✖ Failed', cancelled:'■ Cancelled', unknown:'? Unknown outcome' };
+
+function anLeave(){ clearTimeout(AN.timer); }
+const anQuery = () => '?period=' + AN.period + (AN.group ? '&group=' + pu(AN.group) : '');
+async function openAnalytics(){
+  AN.err = ''; AN.sig = ''; AN.st = null;
+  show('analytics');
+  $('an-body').innerHTML = '<div class="note">Loading the analytics&hellip;</div>';
+  anHead();
+  const g = await pmCall('GET', '/api/groups');
+  AN.groups = g.ok && Array.isArray(g.body) ? g.body.map(x => x.name) : [];
+  if(AN.group === null) AN.group = FLG.sel.length === 1 ? FLG.sel[0] : '';      // the one group the fleet page is showing, else everybody
+  const known = AN.groups.find(x => pgHas([x], AN.group));
+  AN.group = known || '';
+  anHead();
+  await anLoad();
+}
+// ONE toolbar row with the title: group (only when groups exist), period, More (CSV), Close. A narrow phone wraps it to two rows.
+function anHead(){
+  const grp = AN.groups.length ? `<select class="an-grp" aria-label="Which printers" onchange="anSetGroup(this.value)"><option value="">All printers</option>${
+    AN.groups.map(g => `<option value="${esc(g)}"${pgHas([g], AN.group) ? ' selected' : ''}>Group: ${esc(g)}</option>`).join('')}</select>` : '';
+  $('an-ctl').innerHTML = `${grp}<div class="seg an-per" role="radiogroup" aria-label="Period">${AN_PERIODS.map(([k, l, sh]) =>
+      `<button role="radio" aria-checked="${AN.period === k}" aria-label="${esc(l)}" data-p="${esc(k)}" onclick="anSetPeriod(this.dataset.p)"><span class="lg">${esc(l)}</span><span class="sh">${esc(sh)}</span></button>`).join('')}</div>
+    <button type="button" class="an-more" data-act="anMore" aria-haspopup="dialog" title="Download CSV">More &#8943;</button>
+    <button type="button" class="an-close" onclick="show('home')">Close</button>`;
+}
+function anSetPeriod(p){ AN.period = p; AN.sig = ''; anHead(); anLoad(); }
+function anSetGroup(g){ AN.group = g; AN.sig = ''; anHead(); anLoad(); }
+async function anLoad(){
+  clearTimeout(AN.timer);
+  const q = anQuery();
+  const r = await pmCall('GET', '/api/analytics' + q);
+  if(!$('analytics').classList.contains('on') || q !== anQuery()) return;      // left the page, or the choice changed meanwhile: that newer load draws it
+  if(!r.ok){
+    AN.err = r.body.error || 'The Hub did not answer.';
+    $('an-body').innerHTML = `<div class="warnbox">Could not read the analytics: ${pmEsc(AN.err)}</div><button class="big" onclick="anLoad()">Try again</button>`;
+    AN.sig = ''; AN.timer = setTimeout(anLoad, 20000); return;
+  }
+  AN.st = r.body; AN.err = '';
+  try{ anRender(); }catch(e){ console.error(e); AN.sig = ''; }      // a render bug must not stop the refresh loop
+  AN.timer = setTimeout(anLoad, 60000);
+}
+
+const anCur = () => (AN.st && AN.st.currency) || '$';
+const anMoney = (v, per) => v == null ? '—' : esc(anCur()) + Number(v).toFixed(per && Math.abs(v) < 1 ? 3 : (Math.abs(v) >= 1000 ? 0 : 2));
+const anPct = v => v == null ? '—' : Math.round(Number(v) * 100) + '%';
+const anNum = (v, d) => v == null ? '—' : Number(v).toFixed(d == null ? 0 : d);
+const anHours = h => h == null ? '—' : (Number(h) >= 100 ? Math.round(h) : Number(h).toFixed(1)) + ' h';
+const anBar = f => '<span class="an-mb" aria-hidden="true"><i style="width:' + Math.round(Math.max(0, Math.min(1, Number(f) || 0)) * 100) + '%"></i></span>';
+function anDay(iso, bucket){          // a bucket's date is already in the Hub's time zone: show it as written, never convert it
+  const p = String(iso).split('-').map(Number);
+  const d = new Date(p[0], (p[1] || 1) - 1, p[2] || 1);
+  return bucket === 'month' ? d.toLocaleDateString([], {month:'short', year:'2-digit'}) : d.toLocaleDateString([], {month:'short', day:'numeric'});
+}
+
+function anChart(tr, w, h){
+  const b = tr.buckets || [];
+  if(!b.length) return '';
+  const padL = 28, padR = 4, padT = 14, padB = 18, pw = Math.max(60, w - padL - padR), ph = h - padT - padB;
+  const tot = x => x.finished + x.failed, mx = Math.max(1, ...b.map(tot));
+  const slot = pw / b.length, gap = slot >= 9 ? 2 : 1, bw = Math.max(2, slot - gap), base = padT + ph;
+  let g = `<line x1="${padL}" y1="${base}" x2="${w - padR}" y2="${base}"/><line x1="${padL}" y1="${padT}" x2="${w - padR}" y2="${padT}"/>`
+    + `<text x="${padL - 4}" y="${base + 4}" text-anchor="end">0</text><text x="${padL - 4}" y="${padT + 4}" text-anchor="end">${mx}</text>`;
+  if(mx >= 4) g += `<line x1="${padL}" y1="${(padT + ph / 2).toFixed(1)}" x2="${w - padR}" y2="${(padT + ph / 2).toFixed(1)}" stroke-dasharray="3 4"/><text x="${padL - 4}" y="${(padT + ph / 2 + 4).toFixed(1)}" text-anchor="end">${Math.round(mx / 2)}</text>`;
+  b.forEach((x, i) => {
+    const bx = padL + i * slot + gap / 2, hf = x.finished / mx * ph, hb = x.failed / mx * ph;
+    g += '<g><title>' + esc(anDay(x.start, tr.bucket) + ': ' + x.finished + ' finished, ' + x.failed + ' failed or cancelled' + (x.other ? ', ' + x.other + ' running or unknown' : '')) + '</title>';
+    if(hf > 0) g += `<rect class="an-ok" x="${bx.toFixed(1)}" y="${(base - hf).toFixed(1)}" width="${bw.toFixed(1)}" height="${hf.toFixed(1)}"/>`;
+    if(hb > 0) g += `<rect class="an-bad" x="${bx.toFixed(1)}" y="${(base - hf - hb).toFixed(1)}" width="${bw.toFixed(1)}" height="${hb.toFixed(1)}"/>`;
+    if(slot >= 22 && tot(x) > 0) g += `<text class="an-v" x="${(bx + bw / 2).toFixed(1)}" y="${(base - (hf + hb) - 3).toFixed(1)}" text-anchor="middle">${tot(x)}</text>`;
+    g += '</g>';
+  });
+  const step = Math.max(1, Math.ceil(b.length / Math.max(1, Math.floor(pw / 64))));
+  b.forEach((x, i) => {
+    if(i % step) return;
+    const lab = anDay(x.start, tr.bucket), cx = padL + i * slot + slot / 2, half = lab.length * 3.4 + 2;      // (about 6.8 px a character at 11 px)
+    // centred under its bar, but an edge label hangs inward (start / end anchored at the edge) so it is never cut off
+    const edge = cx - half < 1 ? ['start', 1] : cx + half > w - 1 ? ['end', w - 1] : ['middle', cx];
+    g += `<text x="${edge[1].toFixed(1)}" y="${h - 4}" text-anchor="${edge[0]}">${esc(lab)}</text>`;
+  });
+  return `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" role="img" aria-label="${esc('Prints per ' + tr.bucket + ': solid bars finished, hatched bars failed or cancelled')}"><defs><pattern id="an-hatch" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="5" height="5" style="fill:var(--card)"/><line x1="0" y1="0" x2="0" y2="5" style="stroke:var(--txt);stroke-width:2"/></pattern></defs>${g}</svg>`;
+}
+
+function anTiles(st){
+  const t = st.totals, bad = t.failed + t.cancelled;
+  const mats = st.by_material.filter(m => m.grams > 0).slice(0, 3).map(m => (m.material === '?' ? 'not recorded' : m.material) + ' ' + hiGrams(m.grams));
+  const per = t.decided ? t.hours / t.decided : null;
+  const tile = (lg, sh, v, s, ss) => `<div class="an-t"><div class="l"><span class="lg">${lg}</span><span class="sh">${sh}</span></div><div class="v">${v}</div><div class="s"><span class="ls">${s}</span><span class="ss">${ss}</span></div></div>`;
+  return '<div class="an-tiles" role="group" aria-label="Totals">'
+    + tile('Prints', 'Prints', esc(t.prints), esc(t.finished) + ' finished &middot; ' + esc(bad) + ' failed' + (t.running ? ' &middot; ' + esc(t.running) + ' running' : ''), esc(t.finished) + ' finished &middot; ' + esc(bad) + ' failed')
+    + tile('Success rate', 'Success', anPct(t.success_rate), t.decided ? esc(t.finished) + ' of ' + esc(t.decided) + ' prints finished' : 'No finished or failed prints yet', t.decided ? esc(t.finished) + ' of ' + esc(t.decided) : 'No prints yet')
+    + tile('Hours printing', 'Hours', anHours(t.hours), per == null ? '&nbsp;' : 'about ' + per.toFixed(1) + ' h per print', per == null ? '&nbsp;' : esc(per.toFixed(1)) + ' h per print')
+    + tile('Filament used', 'Filament', hiGrams(t.grams), pmEsc(mats.join(' · ')) || 'Nothing used yet', pmEsc(mats.slice(0, 2).join(' · ')) || 'Nothing yet')
+    + tile('Filament cost', 'Cost', anMoney(t.filament_cost), anMoney(t.wasted_cost) + ' wasted on failures', anMoney(t.wasted_cost) + ' wasted')
+    + tile('Cost per good part', 'Cost / part', anMoney(t.cost_per_good_part, 1),
+           t.good_parts ? esc(t.good_parts) + ' good parts' + (t.parts_unknown_prints ? ' &middot; ' + esc(t.parts_unknown_prints) + ' prints counted as 1' : '') : 'No finished prints yet',
+           t.good_parts ? esc(t.good_parts) + ' good parts' : 'No parts yet')
+    + '</div>';
+}
+function anTrendHtml(st, w, h){
+  const tr = st.trend, t = st.totals, bucket = tr.bucket;
+  const peak = (tr.buckets || []).reduce((a, x) => x.finished + x.failed > (a ? a.finished + a.failed : 0) ? x : a, null);
+  const peakTxt = peak ? 'Busiest ' + bucket + ': ' + anDay(peak.start, bucket) + ' with ' + (peak.finished + peak.failed) + (peak.finished + peak.failed === 1 ? ' print' : ' prints') : '';
+  return `<h2>Prints per ${esc(bucket)} <small>${esc(peakTxt)}</small></h2><div class="an-chart">${anChart(tr, w, h)}</div>
+    <div class="an-leg"><span><span class="an-sw ok"></span>&#10004; Finished ${esc(t.finished)}</span><span><span class="an-sw bad"></span>&#10006; Failed or cancelled ${esc(t.failed + t.cancelled)}</span></div>
+    ${tr.partial_first ? `<div class="an-note">The first ${esc(bucket)} is only partly in this period.</div>` : ''}`;
+}
+function anUptimeNote(st){
+  const u = st.uptime || {};
+  if(!u.available) return 'Online % is collected from now on: the Hub notes when a printer becomes unreachable, and shows the share of time it could be reached here.';
+  if(u.partial) return 'Online % covers the time since ' + new Date(u.since * 1000).toLocaleDateString([], {month:'short', day:'numeric', year:'numeric', ...tzOpt()}) + ' (collecting since then); time the Hub itself was off is not counted.';
+  return 'Online % is the share of the period each printer could be reached; time the Hub itself was off is not counted.';
+}
+function anPrintersHtml(st){
+  const rows = st.by_printer.map(p => `<div class="tr"><div class="first" title="${esc(p.printer)}"><b>${esc(p.printer)}</b></div>
+      <div class="n" data-l="Prints">${esc(p.prints)}</div>
+      <div class="n" data-l="Success">${anPct(p.success_rate)}</div>
+      <div class="n" data-l="Hours">${anNum(p.hours, 1)}</div>
+      <div class="n" data-l="Utilization">${anPct(p.utilization)}${p.utilization == null ? '' : anBar(p.utilization)}</div>
+      <div class="n" data-l="Failed">${esc(p.failed)}</div>
+      <div class="n" data-l="Filament">${hiGrams(p.grams)}</div>
+      <div class="n" data-l="Online">${p.online_pct == null ? '—' : esc(p.online_pct.toFixed(1)) + '%' + anBar(p.online_pct / 100)}</div></div>`).join('');
+  return `<h2>Per printer <small>${esc(st.period === 'all' ? 'all time' : 'last ' + (AN_PERIODS.find(x => x[0] === st.period) || ['', st.period])[1])}</small></h2>
+    <div class="at" style="--c:minmax(0,1.5fr) 58px 72px 64px 104px 58px 78px 108px"><div class="tr h"><div>Printer</div><div class="n">Prints</div><div class="n">Success</div><div class="n">Hours</div><div class="n">Utilization</div><div class="n">Failed</div><div class="n">Filament</div><div class="n">Online</div></div>${rows}</div>
+    <div class="an-note">Utilization is printing hours divided by the hours since the printer was first seen (within this period). ${esc(anUptimeNote(st))}</div>`;
+}
+function anMaterialsHtml(st){
+  const rows = st.by_material.map(m => `<div class="tr"><div class="first" title="${esc(m.material)}"><b>${esc(m.material === '?' ? '(not recorded)' : m.material)}</b></div>
+      <div class="n" data-l="Prints">${esc(m.prints)}</div><div class="n" data-l="Success">${anPct(m.success_rate)}</div>
+      <div class="n" data-l="Used">${hiGrams(m.grams)}</div><div class="n" data-l="Cost">${anMoney(m.cost)}</div></div>`).join('');
+  return `<h2>By material</h2>` + (rows ? `<div class="at" style="--c:minmax(0,1.3fr) 56px 72px 76px 84px"><div class="tr h"><div>Material</div><div class="n">Prints</div><div class="n">Success</div><div class="n">Used</div><div class="n">Cost</div></div>${rows}</div>
+    <div class="an-note">A multi-colour print is split by the filament list its file carries. Cost is filament only, at your Costs prices.</div>` : '<div class="an-note">No material recorded in this period.</div>');
+}
+function anFilesHtml(st){
+  const partsOf = f => f.parts ? esc(f.parts) + (f.parts_unknown_prints ? ' <small>+ ' + esc(f.parts_unknown_prints) + ' unknown</small>' : '') : (f.finished ? 'parts unknown' : '—');
+  const rows = st.top_files.map(f => `<div class="tr"><div class="first" title="${esc(f.file)}"><b>${esc(f.file)}</b></div>
+      <div class="n" data-l="Prints">${esc(f.prints)}</div><div class="n" data-l="Success">${anPct(f.success_rate)}</div>
+      <div class="n" data-l="Good parts">${partsOf(f)}</div></div>`).join('');
+  return `<h2>Most printed files</h2>` + (rows ? `<div class="at" style="--c:minmax(0,1.6fr) 54px 68px 118px"><div class="tr h"><div>File</div><div class="n">Prints</div><div class="n">Success</div><div class="n">Good parts</div></div>${rows}</div>
+    <div class="an-note">Good parts come from the part count in each file; a file without one is counted as prints and marked parts unknown (the cost per good part counts such a print as 1 part).</div>` : '<div class="an-note">No files in this period.</div>');
+}
+function anFailuresHtml(st){
+  const f = st.failures, bad = f.failed_or_cancelled, mx = Math.max(1, ...f.by_reason.map(r => r.count));
+  const outs = f.by_outcome.filter(o => o.count > 0 || o.outcome !== 'unknown').map(o => `<span>${esc(AN_OUTCOME[o.outcome] || o.outcome)} ${esc(o.count)}</span>`).join('');
+  const reasons = f.by_reason.map(r => `<div class="tr"><div class="first" title="${esc(r.reason)}">${esc(r.reason)}${r.outcome === 'cancelled' ? ' <small>(cancelled)</small>' : ''}</div><div class="n" data-l="Count">${esc(r.count)}${anBar(r.count / mx)}</div></div>`).join('');
+  const files = f.top_files.map(x => `<div class="tr"><div class="first" title="${esc(x.file)}"><b>${esc(x.file)}</b></div><div class="n" data-l="Failed">${esc(x.failed)}</div><div class="n" data-l="Of prints">${esc(x.prints)}</div><div class="n" data-l="Fail rate">${anPct(x.prints ? x.failed / x.prints : null)}</div></div>`).join('');
+  if(!bad && !st.totals.unknown) return `<h2>Failures</h2><div class="an-note">No failed or cancelled prints in this period.</div>`;
+  return `<h2>Failures <small>${esc(bad)} failed or cancelled &middot; ${anMoney(f.wasted_cost)} of filament wasted</small></h2><div class="an-outs">${outs}</div>
+    <div class="an-two"><div><div class="at" style="--c:minmax(0,1fr) 92px"><div class="tr h"><div>Reason</div><div class="n">Prints</div></div>${reasons}</div>${f.reasons_other ? `<div class="an-note">+ ${esc(f.reasons_other)} more with other reasons</div>` : ''}</div>
+    <div>${files ? `<div class="at" style="--c:minmax(0,1.6fr) 54px 70px 64px"><div class="tr h"><div>Files that fail most</div><div class="n">Failed</div><div class="n">Of prints</div><div class="n">Rate</div></div>${files}</div>` : ''}</div></div>
+    ${st.totals.unknown ? `<div class="an-note">${esc(st.totals.unknown)} more ended with an unknown outcome (the Hub never saw them end); they are not counted in the success rate.</div>` : ''}`;
+}
+const AN_PANELS = { trend:'trend', printers:'printers', materials:'materials', failures:'failures', files:'files' };
+function anEmptyHtml(){
+  const everything = AN.period === 'all' && !AN.group;
+  return `<div class="an-empty">${everything ? 'No prints logged yet &mdash; Analytics fills in as prints finish.' : 'No prints for this choice and period &mdash; try a longer period or All printers.'}</div>`;
+}
+function anRender(){
+  const st = AN.st; if(!st) return;
+  const body = $('an-body'), w = Math.max(260, Math.floor(body.clientWidth) - 26);
+  let html;
+  if(st.empty) html = anEmptyHtml();
+  else if(L5){
+    const tab = AN_TABS.some(t => t[0] === AN.tab) ? AN.tab : 'trend';
+    const tabs = AN_TABS.map(([k, l]) => `<button type="button" role="tab" data-act="anTab" data-t="${k}" aria-selected="${tab === k}">${tab === k ? '✓ ' : ''}${l}</button>`).join('');
+    const panel = { trend: () => anTrendHtml(st, Math.max(260, w - 4), 186), printers: () => anPrintersHtml(st), materials: () => anMaterialsHtml(st),
+                    failures: () => anFailuresHtml(st), files: () => anFilesHtml(st) }[tab]();
+    html = anTiles(st) + `<div class="an-tabs" role="tablist" aria-label="What to show">${tabs}</div><div class="an-panel">${panel}</div>`;
+  } else {
+    html = anTiles(st) + `<div class="an-sec">${anTrendHtml(st, w, FVIEW.view === 'desktop' ? 190 : 160)}</div><div class="an-sec">${anPrintersHtml(st)}</div>`
+      + `<div class="an-grid"><div class="an-sec">${anMaterialsHtml(st)}</div><div class="an-sec">${anFilesHtml(st)}</div></div><div class="an-sec">${anFailuresHtml(st)}</div>`;
+  }
+  if(html === AN.sig) return;                 // nothing changed: leave the page (and the scroll position) alone
+  AN.sig = html;
+  const box = L5 ? body.querySelector('.an-panel') : null;
+  const keep = body.scrollTop, keepP = box ? box.scrollTop : 0;
+  body.innerHTML = html;
+  body.scrollTop = keep;
+  if(L5){ const nb = body.querySelector('.an-panel'); if(nb) nb.scrollTop = keepP; }
+}
+let anResizeT = null;
+window.addEventListener('resize', () => { clearTimeout(anResizeT); anResizeT = setTimeout(() => { if($('analytics').classList.contains('on') && AN.st){ AN.sig = ''; anRender(); } }, 150); });
+
+// ---- More: the prints CSV (History's, with costs) and these numbers as a CSV made right here
+const anCell = v => {
+  let s = v == null ? '' : String(v);
+  if(/^[\s\u200b-\u200f\ufeff\u2028\u2029\u202a-\u202e\u2060\u2066-\u2069]*[=+\-@\t\r\uff1d\uff0b\uff0d\uff20\u2212\u2013\u2014\ufe62\ufe63\ufe66]/.test(s)) s = "'" + s;      // a file name must not become a spreadsheet formula
+  return '"' + s.replace(/"/g, '""') + '"';
+};
+function anCsvText(st){
+  const rows = [['section', 'name', 'prints', 'finished', 'failed_or_cancelled', 'success_pct', 'hours', 'utilization_pct', 'filament_g', 'filament_cost', 'online_pct', 'good_parts', 'parts_unknown_prints']];
+  const pct = v => v == null ? '' : Math.round(v * 1000) / 10;
+  for(const p of st.by_printer) rows.push(['printer', p.printer, p.prints, p.finished, p.failed, pct(p.success_rate), p.hours, pct(p.utilization), p.grams, p.cost, p.online_pct == null ? '' : p.online_pct, '', '']);
+  for(const m of st.by_material) rows.push(['material', m.material, m.prints, m.finished, m.failed, pct(m.success_rate), '', '', m.grams, m.cost, '', '', '']);
+  for(const f of st.top_files) rows.push(['file', f.file, f.prints, f.finished, f.failed, pct(f.success_rate), '', '', '', '', '', f.parts, f.parts_unknown_prints]);
+  for(const r of st.failures.by_reason) rows.push(['failure_reason', r.reason, r.count, '', r.count, '', '', '', '', '', '', '', '']);
+  return rows.map((r, i) => r.map((c, j) => i && j === 1 ? anCell(c) : (typeof c === 'string' ? '"' + c + '"' : c)).join(',')).join('\n') + '\n';
+}
+function anSaveCsv(){
+  if(!AN.st) return;
+  try{
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([anCsvText(AN.st)], {type:'text/csv;charset=utf-8'}));
+    a.download = 'analytics-' + AN.period + '.csv';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  }catch(e){ console.error(e); }
+  closeModal();
+}
+function anMore(){
+  const per = (AN_PERIODS.find(x => x[0] === AN.period) || AN_PERIODS[1])[3];
+  $('mbody').innerHTML = `<h2>Analytics &mdash; more</h2>
+    <button type="button" class="big" style="width:100%;margin-bottom:8px" data-act="anCsv">Download these numbers <small style="margin-left:8px;color:var(--dim)">CSV: printers, materials, files, failure reasons</small></button>
+    <a data-ctl class="bkdl" style="display:flex;align-items:center;justify-content:center;min-height:52px" href="/api/jobs.csv?period=${esc(per)}${AN.group ? '&amp;group=' + esc(pu(AN.group)) : ''}" download="jobs.csv" onclick="closeModal()">Download every print <small style="margin-left:8px;color:var(--dim)">CSV, with costs</small></a>
+    <div class="row" style="margin-top:12px"><button class="big grow" onclick="closeModal()">Close</button></div>`;
+  $('modal').classList.add('on');
+}
+const AN_ACTIONS = {
+  anMore: () => anMore(),
+  anCsv:  () => anSaveCsv(),
+  anTab:  b => { AN.tab = b.dataset.t; AN.sig = ''; anRender(); },
+};
+// ==== end analytics ====
+</script>
+<!-- ==== end analytics ==== -->
 
 <!-- ===== Printer groups: labels on printers ("Production", "Workshop"). Edited on the Printers page, used as a filter on the
      History page. Server side: fleet_store.py (groups), /api/groups, PUT /api/printers/{name}/groups, joblog.py (by_group). ===== -->
@@ -4232,6 +4602,86 @@ html[data-view="desktop"] .msgrid button { min-height:44px; }
 html[data-view="desktop"] .cfactions .toggle, html[data-view="desktop"] .cfactions > button { min-height:44px; }
 html[data-view="desktop"] .fvopt:hover { border-color:var(--accent); }
 </style>
+<style>
+/* ==== Spaghetti WARNING: "Pause" + "Cancel print" ====
+   . the printer screen's WARNING block (every layout) holds two big buttons on ONE row; the same Pause / Cancel as the toolbar (one tap / the one confirm)
+   . a warned fleet card: the Nozzle / Bed line (5-inch: the file + layer lines) gives way to a compact Pause / Cancel row; the banner and the word are tappable
+   . phone: a slim bar sticks to the top while a print runs and the toolbar row is scrolled out of sight; the WARNING block sits right under the toolbar
+   . 5-inch: the strip's Cancel gets a heavy frame
+   Meaning is carried by WORDS and SHAPE (a heavy frame, the cross icon, "Cancel print"), never by colour alone: the owner is colorblind. Nothing here is automatic. */
+.spact[hidden], .spact [hidden] { display:none !important; }
+.spalert[data-act] { cursor:pointer; }
+.spalert .spn { font:inherit; color:inherit; background:none; border:0; border-radius:0; min-height:0; padding:0 2px; display:inline; text-decoration:underline; text-decoration-thickness:3px; text-underline-offset:3px; }
+.pcard [data-act="openPrinter"][role="button"] { cursor:pointer; }
+.pstick { display:none; }
+/* ---- printer screen, every layout but the 5-inch: the WARNING block grows a second row for the two buttons ---- */
+html:not(.lay-5in) .spact { flex:1 1 100%; display:flex; gap:8px; min-width:0; }
+html:not(.lay-5in) .spact button { flex:5 1 0; min-width:0; min-height:48px; padding:4px 8px; border-radius:10px; font-size:15px; font-weight:800; line-height:1.1; white-space:normal;
+  display:flex; align-items:center; justify-content:center; gap:6px; background:var(--bg); color:var(--txt); border:2px solid var(--bg); }
+html:not(.lay-5in) .spact #sp-pause { flex:4 1 0; }
+html:not(.lay-5in) .spact #sp-cancel { background:var(--bad); color:#fff; border:3px solid var(--bg); box-shadow:inset 0 0 0 2px #fff; }     /* a heavy double frame + the cross + the words: not a colour */
+html:not(.lay-5in) #printer.spw #p-spag { flex-wrap:wrap; align-content:center; row-gap:6px; height:auto; min-height:56px; padding:6px 8px 8px 9px; }
+html:not(.lay-5in) #printer.spw #p-spag .t { min-height:44px; display:flex; flex-direction:column; justify-content:center; }
+html:not(.lay-5in) #printer.spw #p-spag .t .l, html:not(.lay-5in) #printer.spw #p-spag .t .s { white-space:normal; overflow:visible; }       /* in a WARNING the words wrap instead of ending in "..." */
+@media (min-width:761px) {      /* 10-inch / desktop: the band's Spaghetti row (56px) is as tall as the block needs while it is in a WARNING; the files list gives the room back */
+  html:not(.lay-5in):not([data-view="desktop"]) #printer.on.spw { grid-template-rows:auto 56px auto minmax(48px,auto) auto minmax(0,1fr); }
+}
+@media (min-width:761px) and (max-width:1000px) {          /* desktop view in a narrow window: one column - the WARNING block goes right under the toolbar */
+  html[data-view="desktop"] #printer.on.spw { grid-template-areas:"tbar" "spag" "cam" "prog" "tiles" "ctl" "trays" "files"; }
+}
+@media (max-width:760px), (orientation:landscape) and (max-height:500px) and (max-width:932px) {
+  html:not(.lay-5in) #printer.spw #p-spag { order:1; }          /* above the camera and the progress card: the first thing under the toolbar */
+  html:not(.lay-5in) #printer.stk .pstick { display:flex; }
+}
+/* ---- phone: the sticky copy of the toolbar's Pause / Resume / Cancel row ---- */
+html:not(.lay-5in) .pstick { position:fixed; left:0; right:0; top:0; z-index:8; align-items:center; gap:8px; background:var(--bg); border-bottom:3px solid var(--txt);
+  padding:calc(6px + var(--sat, 0px)) calc(10px + var(--sar, 0px)) 6px calc(10px + var(--sal, 0px)); }
+html:not(.lay-5in) .pstick .stn { flex:1 1 0; min-width:0; font-size:16px; font-weight:800; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+html:not(.lay-5in) .pstick button { flex:0 0 auto; display:inline-flex; align-items:center; justify-content:center; gap:6px; min-height:48px; padding:4px 14px; font-size:16px; font-weight:800; }
+html:not(.lay-5in) .pstick button.danger { border:3px solid var(--txt); }
+/* ---- fleet card (10-inch / desktop / phone): compact Pause / Cancel row in place of the Nozzle / Bed line ---- */
+html:not(.lay-5in) .pcard .spq { display:flex; gap:8px; height:36px; }
+html:not(.lay-5in) .pcard .spq button { flex:1 1 0; min-width:0; height:36px; min-height:0; padding:0 6px; border-radius:8px; font-size:14px; font-weight:800; line-height:1; white-space:nowrap;
+  display:flex; align-items:center; justify-content:center; gap:5px; background:var(--card2); color:var(--txt); border:2px solid var(--txt); }
+html:not(.lay-5in) .pcard .spq .spq-c { background:var(--bad); color:#fff; border:3px solid var(--txt); }
+html:not(.lay-5in) .pcard .spq svg { width:14px; height:14px; }
+html:not(.lay-5in) .pcard.sp-alert { gap:6px; }          /* the Pause / Cancel row is taller than the Nozzle / Bed line it replaces: tighter spacing on THIS card keeps every card inside the screen */
+@media (max-width:760px), (orientation:landscape) and (max-height:500px) and (max-width:932px) {
+  html:not(.lay-5in) .pcard .spq { height:48px; }
+  html:not(.lay-5in) .pcard .spq button { height:48px; font-size:16px; }
+}
+/* ---- 5-inch ---- */
+html.lay-5in #sp-alert:not([hidden]) { white-space:normal; overflow:visible; text-overflow:clip; }       /* every word of the banner stays; a long list of names wraps instead of ending in "..." */
+html.lay-5in .spalert .spn { display:inline-block; min-height:30px; line-height:28px; padding:0 4px; }
+html.lay-5in .spact { flex:1 1 100%; display:flex; gap:6px; min-width:0; }
+html.lay-5in .spact button { flex:5 1 0; min-width:0; height:52px; min-height:52px; padding:2px 6px; border-radius:12px; font-size:15px; font-weight:800; line-height:1.05; white-space:normal;
+  display:flex; align-items:center; justify-content:center; gap:5px; background:var(--card2); color:var(--txt); border:2px solid var(--line2); }
+html.lay-5in .spact #sp-pause { flex:4 1 0; }
+html.lay-5in .spact #sp-cancel { border:3px solid var(--txt); color:var(--c-danger); }
+html.lay-5in #printer.spw #p-tiles { display:none; }                     /* the Nozzle / Bed tiles give way while the WARNING lasts (they come back when it clears): the block needs the room */
+html.lay-5in #printer.spw #p-spag { height:auto; flex-wrap:wrap; align-content:center; row-gap:6px; padding:6px 10px 8px 12px; }
+html.lay-5in #printer.spw #p-spag .t { flex:1 1 0; min-height:44px; display:flex; flex-direction:column; justify-content:center; }
+html.lay-5in #printer.spw #p-spag .t .s { white-space:normal; line-height:1.15; }
+html.lay-5in #printer.spw #p-spag .t .l { white-space:normal; overflow:visible; line-height:1.15; }       /* the word WARNING is read whole, whatever the font */
+html.lay-5in #p-act button.danger { border:3px solid var(--txt); font-weight:800; }         /* the strip's Cancel: a heavy frame and the word, not just coloured text */
+html.lay-5in #fleet .pcard .stat .spq { display:flex; gap:6px; margin-top:4px; height:32px; }
+html.lay-5in #fleet .pcard .stat .spq button { flex:1 1 0; min-width:0; height:32px; min-height:0; padding:0 4px; border-radius:8px; font-size:13px; font-weight:800; line-height:1; white-space:nowrap;
+  display:flex; align-items:center; justify-content:center; gap:4px; background:var(--card2); color:var(--txt); border:2px solid var(--line2); }
+html.lay-5in #fleet .pcard .stat .spq .spq-c { border:3px solid var(--txt); color:var(--c-danger); }
+html.lay-5in #fleet .pcard .stat .spq svg { width:13px; height:13px; }
+html.lay-5in #fleet[data-n="1"] .pcard .stat .spq, html.lay-5in #fleet[data-n="2"] .pcard .stat .spq { height:44px; margin-top:10px; }
+html.lay-5in #fleet[data-n="1"] .pcard .stat .spq button, html.lay-5in #fleet[data-n="2"] .pcard .stat .spq button { height:44px; font-size:16px; }
+/* 5-inch, Bridge theme: the same controls in its pills (words in capitals, the Cancel a rose pill with a heavy frame) */
+html.lay-5in.th-bridge #printer.spw #p-spag { height:auto; padding:6px 10px 8px 14px; }
+html.lay-5in.th-bridge #printer.spw #p-spag .t .l b { font-size:16px; letter-spacing:0; }            /* "WARNING" whole, not "WARNIN" */
+html.lay-5in.th-bridge .spact button { border:0; border-radius:26px; background:var(--tan); color:#000; font-size:12px; letter-spacing:.02em; padding:2px 4px; gap:3px; text-transform:uppercase; }
+html.lay-5in.th-bridge .spact svg { width:14px; height:14px; }
+html.lay-5in.th-bridge .spact #sp-cancel { background:var(--rose); color:#000; border:4px solid var(--txt); }
+html.lay-5in.th-bridge #p-act button.danger { border:4px solid var(--txt); }
+html.lay-5in.th-bridge #fleet .pcard .stat .spq { height:28px; margin-top:2px; }
+html.lay-5in.th-bridge #fleet .pcard .stat .spq button { height:28px; border:0; border-radius:16px; background:var(--tan); color:#000; font-size:12px; letter-spacing:.05em; text-transform:uppercase; }
+html.lay-5in.th-bridge #fleet .pcard .stat .spq .spq-c { background:var(--rose); border:3px solid var(--txt); color:#000; }
+</style>
 <script>
 const SEC = { d:null, err:'', msg:null, loading:false, pwBusy:false, newKey:null, dev:null, admin:null };   // admin: null | 'unset' | 'locked' | 'ok' (the admin password, see secAdminHtml)
 const SEC_SCOPE = { read:['READ ONLY', 'can look at everything but change nothing'], control:['FULL CONTROL', 'can do everything, including start and cancel prints'] };
@@ -5354,6 +5804,7 @@ function show(id){ document.querySelectorAll('.screen').forEach(s=>s.classList.r
   if(id === 'home' && PRQ.opened){ PRQ.opened = false; prStrip(); }      // back at the fleet: a reload shows the fleet, not the printer again
   if(id!=='printers') pmLeave();
   if(id!=='history') hiLeave();
+  if(id!=='analytics') anLeave();   // ==== analytics ====
   if(id!=='library') lbLeave();   // ==== library ====
   HUB.enter = Date.now();     // a page that was not polling must not look like a dead Hub the moment you come back to it
   if(id==='home'){ fleet(); POLL=setInterval(()=>{ if(!document.hidden) fleet(); },5000); }
@@ -5430,7 +5881,7 @@ function finishAt(min){
 const HUB = { lastOk: Date.now(), enter: Date.now(), down: false, why: '' };
 const HUB_GRACE_MS = 15000, POLL_TIMEOUT_MS = 5000;
 const FL = { sig: null, busy: false, again: false, last: null };
-const PV = { busy: false, again: false, p: null, trSig: null };
+const PV = { busy: false, again: false, p: null, trSig: null, spFocus: false };
 const papi = (name, tail) => '/api/printer/' + pu(name) + (tail || '');
 const printerName = () => CUR;                  // the raw name even where a template shadows CUR with its escaped form
 const clampPct = v => Math.max(0, Math.min(100, Math.round(Number(v) || 0)));
@@ -5528,6 +5979,10 @@ function renderFleet(data){
       const eta = k === 'printing' ? (cp.rem ? 'Done ' + finishAt(cp.rem) : cp.sub) : cp.sub;
       const pctLine = prog ? esc(cp.pct) + '%' + (k === 'printing' ? (cp.rem ? ' \u00b7 ' + esc(cp.left) : '') + (cp.hasLy ? '<span class="tail"> \u00b7 ' + esc(cp.xtra) + '</span>' : '') : '') : esc(cp.xtra);       // a paused card's eta line already says "Paused"; nothing to cut off here
       const spag = spagCard(p, k === 'printing');
+      // a WARNING / FAILURE on a card: the word opens that printer's screen (a button, same as the card), and the Nozzle / Bed line gives way to a compact Pause / Cancel row
+      const spAttr = spag.k === 'alert' ? ' role="button" tabindex="0" data-act="openPrinter" data-name="' + esc(p.printer) + '" title="Open ' + esc(p.printer) + ' to check the camera"' : '';
+      const tmpLine = spag.k === 'alert' && (k === 'printing' || k === 'paused') ? spQuick(p.printer, p.state)
+        : `<div class="meta tmp">Nozzle ${tnum(p.nozzle_c)}${tdeg()} · Bed ${tnum(p.bed_c)}${tdeg()}</div>`;
       return `<div class="pcard k-${k}${spag.k === 'alert' ? ' sp-alert' : ''}" data-act="openPrinter" data-name="${esc(p.printer)}" data-cam="${p.camera ? 1 : 0}">
         <div class="prow"><span class="pname" title="${esc(p.printer)}">${esc(p.printer)}</span>
           ${chipH}</div>
@@ -5535,9 +5990,9 @@ function renderFleet(data){
         <div class="bar"><i style="width:${prog ? cp.pct : 0}%"></i></div>
         <div class="cslot" data-i="${i}"></div>
         <div class="eta${k === 'printing' && cp.rem ? '' : ' q'}">${esc(eta)}</div>
-        <div class="meta pct">${pctLine}</div>
-        <div class="meta tmp">Nozzle ${tnum(p.nozzle_c)}${tdeg()} · Bed ${tnum(p.bed_c)}${tdeg()}</div>
-        <div class="meta spg ${esc(spag.k)}">${IC(SPAG_ICON[spag.k] || 'eye')}${spag.k === 'alert' ? '\u26a0 ' : ''}Spaghetti: <b>${esc(spag.word)}</b></div>
+        <div class="meta pct${exwCls(cp.xtra)}">${pctLine}</div>
+        ${tmpLine}
+        <div class="meta spg ${esc(spag.k)}"${spAttr}>${IC(SPAG_ICON[spag.k] || 'eye')}${spag.k === 'alert' ? '\u26a0 ' : ''}Spaghetti: <b>${esc(spag.word)}</b></div>
       </div>`;
     }).join('');
   }
@@ -5602,9 +6057,28 @@ function spagBanner(shown){
   const parts = [];
   if(fail.length) parts.push('FAILURE: ' + fail.map(h => h.name).join(', '));
   if(warn.length) parts.push('WARNING: ' + warn.map(h => h.name).join(', '));
-  const text = parts.length ? '\u26a0 SPAGHETTI ' + parts.join(' \u00b7 ') + ' \u2014 check the camera' : '';
-  if(el.textContent !== text) el.textContent = text;
+  const text = parts.length ? '\u26a0 SPAGHETTI ' + parts.join(' \u00b7 ') + ' \u2014 check the camera \u00b7 tap to open' : '';
+  // tappable: the banner opens the (first) warned printer, exactly as tapping its card does; with several, each name is its own button
+  const first = (fail[0] || warn[0] || {}).name || '';
+  const sig = text + '|' + first + '|' + hits.length;
+  if(el.dataset.sig !== sig){
+    el.dataset.sig = sig;
+    if(!text){ el.textContent = ''; el.removeAttribute('data-act'); el.removeAttribute('data-name'); el.removeAttribute('role'); el.removeAttribute('tabindex'); }
+    else{
+      const nm = h => hits.length > 1 ? '<button type="button" class="spn" data-act="openPrinter" data-name="' + esc(h.name) + '">' + esc(h.name) + '</button>' : esc(h.name);
+      const grp = (label, arr) => arr.length ? label + ': ' + arr.map(nm).join(', ') : '';
+      el.innerHTML = '\u26a0 SPAGHETTI ' + [grp('FAILURE', fail), grp('WARNING', warn)].filter(Boolean).join(' \u00b7 ') + ' \u2014 check the camera \u00b7 tap to open';
+      el.setAttribute('data-act', 'openPrinter'); el.setAttribute('data-name', first); el.setAttribute('role', 'button'); el.setAttribute('tabindex', '0');
+    }
+  }
   el.hidden = !text;
+}
+// the compact Pause / Cancel row of a warned fleet card. Pause only while it is printing (the printer screen's rule); Cancel goes through the ONE confirm.
+function spQuick(name, state){
+  const n = esc(name);
+  return '<div class="spq" data-ctl role="group" aria-label="Pause or cancel the print on ' + n + '">'
+    + (state === 'RUNNING' ? '<button type="button" class="spq-p" data-act="cardPause" data-name="' + n + '">' + IC('pause') + 'Pause</button>' : '')
+    + '<button type="button" class="spq-c danger" data-act="cardCancel" data-name="' + n + '">' + IC('x') + 'Cancel</button></div>';
 }
 function l5Tp(ic, label, cur, tgt){
   const v = cur == null ? '<em>&mdash;</em>' : '<em>' + tnum(cur) + tdeg() + '</em>' + (Number(tgt) > 0 ? ' /' + tnum(tgt) : '');
@@ -5637,6 +6111,7 @@ function cardParts(p, k, conn){
   } else {
     big = 'OFFLINE'; sub = 'No answer from the printer'; file = kind;
   }
+  if(k === 'idle' && exclWarn(p)) xtra = exclWarn(p);       // ==== plate contents ==== a Klipper printer that cannot cancel one object (no row is added)
   if(p.reconnecting) xtra = 'Reconnecting…';          // a short network blip: the last known state stays, with this one small word (no new row)
   return {rem, left, ly, hasLy, pct, kind, big, bigCls, sub, file, xtra};
 }
@@ -5650,13 +6125,17 @@ function l5Card(p, i){
     : `<span class="chip ${esc(cls)}" title="${esc(word)}"><i></i>${esc(word)}</span>`;
   const {pct, big, bigCls, sub, file, xtra} = cardParts(p, k, conn);
   const spag = spagCard(p, k === 'printing');
+  // a WARNING / FAILURE: the card's file + layer lines give way to the compact Pause / Cancel row (same card height); the word opens the printer screen
+  const quick = spag.k === 'alert' && (k === 'printing' || k === 'paused');
+  const fileXtra = quick ? spQuick(p.printer, p.state) : `<div class="file">${esc(file)}</div><div class="xtra${exwCls(xtra)}">${esc(xtra)}</div>`;
+  const spAttr = spag.k === 'alert' ? ' role="button" tabindex="0" data-act="openPrinter" data-name="' + esc(p.printer) + '" title="Open ' + esc(p.printer) + ' to check the camera"' : '';
   return `<div class="pcard k-${k}${spag.k === 'alert' ? ' sp-alert' : ''}" data-act="openPrinter" data-name="${esc(p.printer)}" data-cam="${p.camera ? 1 : 0}">
     <div class="prow"><span class="pname" title="${esc(p.printer)}">${esc(p.printer)}</span>${chipH}</div>
     <div class="r2"><div class="cslot" data-i="${i}"></div>
-      <div class="stat"><div class="big${bigCls}">${esc(big)}</div><div class="sub">${esc(sub)}</div><div class="file">${esc(file)}</div><div class="xtra">${esc(xtra)}</div></div></div>
+      <div class="stat"><div class="big${bigCls}">${esc(big)}</div><div class="sub">${esc(sub)}</div>${fileXtra}</div></div>
     <div class="bar"><i style="width:${(k === 'printing' || k === 'paused') ? pct : 0}%"></i></div>
     <div class="r3"><div class="temps">${l5Tp('nozzle', 'Nozzle', up ? p.nozzle_c : null, p.nozzle_target_c)}${l5Tp('bed', 'Bed', up ? p.bed_c : null, p.bed_target_c)}</div>
-      <div class="spag ${spag.k}">${IC(SPAG_ICON[spag.k] || 'eye')}${spag.k === 'alert' ? '\u26a0 ' : ''}Spaghetti: <b>${esc(spag.word)}</b></div></div>
+      <div class="spag ${spag.k}"${spAttr}>${IC(SPAG_ICON[spag.k] || 'eye')}${spag.k === 'alert' ? '\u26a0 ' : ''}Spaghetti: <b>${esc(spag.word)}</b></div></div>
   </div>`;
 }
 
@@ -5681,6 +6160,16 @@ function fitEta(){
     let size = parseFloat(getComputedStyle(el).fontSize);
     while(el.scrollWidth > el.clientWidth && size > 11){ size -= 1; el.style.fontSize = size + 'px'; }
   }
+  for(const el of document.querySelectorAll('#fleet .pcard .exw')){          // ==== plate contents ==== the printer.cfg warning is read whole, never cut off: shrink, then a shorter wording
+    if(!el.dataset.full) el.dataset.full = el.textContent;
+    el.title = el.dataset.full.replace(/^\S+\s/, '');
+    for(const words of [el.dataset.full].concat(EXCL_SHORT)){
+      el.textContent = words; el.style.fontSize = '';
+      let size = parseFloat(getComputedStyle(el).fontSize);
+      while(el.scrollWidth > el.clientWidth && size > 11){ size -= 1; el.style.fontSize = size + 'px'; }
+      if(el.scrollWidth <= el.clientWidth) break;
+    }
+  }
   for(const el of document.querySelectorAll('#fleet .pcard .eta')){
     el.style.fontSize = '';
     let size = parseFloat(getComputedStyle(el).fontSize);
@@ -5692,7 +6181,7 @@ window.addEventListener('resize', fitEta);
 try{ if(document.fonts && document.fonts.addEventListener) document.fonts.addEventListener('loadingdone', fitEta); }catch(e){}   // the bundled font arrived: measure again
 
 function openPrinter(name){
-  CUR = name; camReset(); ctlReset(); detLine(null);
+  CUR = name; camReset(); ctlReset(); detLine(null); PV.spFocus = true; $('printer').classList.remove('spw', 'stk');
   PV.trSig = null; $('p-trays').innerHTML = ''; $('printer').classList.remove('files-open'); pmoreClose();
   for(const i of ['p-big', 'p-eta', 'p-layer', 'p-temps']) $(i).textContent = '';       // never show the last printer's numbers under this name
   $('printer').dataset.row = 'none'; PV.cells = null; FS.curKey = undefined; FS.fresh = false; FS.key = ''; PV.kind = ''; $('p-panel').dataset.cam = '1';
@@ -5704,6 +6193,21 @@ function openPrinter(name){
   FS.at = 0; FS.busy = false; show('printer'); filesOnOpen();
 }
 
+// phone: the WARNING block sits right under the toolbar (CSS order), so a screen opened while the page was scrolled starts at the top and it is the first thing seen
+const PHONE_MQ = window.matchMedia ? window.matchMedia('(max-width:760px), (orientation:landscape) and (max-height:500px) and (max-width:932px)') : {matches:false};
+function spShow(){ try{ if(PHONE_MQ.matches && !L5){ window.scrollTo(0, 0); $('printer').scrollTop = 0; } }catch(e){} }
+// phone: while a print runs the Pause / Cancel row stays reachable. It is NOT a new row at the top: the toolbar's own row is used as long as it is on screen; only once it has
+// scrolled out of sight does a slim bar stick to the top (CSS shows it on the phone layout only). Nothing is added when the printer is not printing.
+function stickSync(){
+  const pr = $('printer'); if(!pr) return;
+  let on = false;
+  if(pr.classList.contains('on') && PHONE_MQ.matches && !L5 && BUSY_STATES.includes(FS.pstate)){
+    const c = $('p-cancel').getBoundingClientRect();
+    on = c.height > 0 && c.bottom < 4;
+  }
+  if(pr.classList.contains('stk') !== on) pr.classList.toggle('stk', on);
+}
+window.addEventListener('scroll', stickSync, {passive:true}); window.addEventListener('resize', stickSync);
 function pview(){
   if(PV.busy){ PV.again = true; return PV.p; }    // one poll at a time; a request made meanwhile (after an action) runs right after
   PV.busy = true;
@@ -5738,6 +6242,8 @@ async function pviewOnce(){
   $('p-resume').style.display = (s.state==='PAUSE') ? '' : 'none';
   $('p-connect').style.display = connectable(s, d.can_connect) ? '' : 'none';      // only when the printer ITSELF reports disconnected - never for a network blip / OFFLINE
   $('p-cancel').style.display = BUSY_STATES.includes(s.state) ? '' : 'none';      // every layout: Cancel only while there is a print to cancel (printing / preparing / paused)
+  $('stk-pause').style.display = (s.state==='RUNNING') ? '' : 'none'; $('stk-resume').style.display = (s.state==='PAUSE') ? '' : 'none';     // the phone's sticky copy of the row: same rules
+  $('stk-name').textContent = CUR; stickSync();
   ctlRender(d); detLine(d);
   l5Detail(d, s, word);                   // the progress card, tiles, Spaghetti switch and status panel: every layout
   CAM.has = !!d.camera; CAM_ORI[CUR] = d.camera_orientation; PT.img.style.transform = camFlip(d.camera_orientation); camSync();
@@ -5780,7 +6286,7 @@ function l5Detail(d, s, word){
   if(prog){
     eta = st === 'PAUSE' ? 'Paused' : (rem ? 'Done ' + finishAt(rem) : (st === 'PREPARE' ? 'Starting' : 'Printing'));
     meta = [rem ? left + ' left' : '', hasLy ? 'Layer ' + ly.replace('/', ' / ') : ''].filter(Boolean).join(' · ');
-  } else if(up){ eta = 'No job queued'; meta = 'Pick a file to start'; }
+  } else if(up){ eta = 'No job queued'; meta = exclWarn(s) || 'Pick a file to start'; }
   else { eta = s.error ? String(s.error) : 'No answer from the printer'; meta = (st === 'DISCONNECTED' && d.can_connect) ? 'Tap NOT CONNECTED to connect' : ''; }
   if(s.reconnecting) meta = 'Reconnecting…';           // blip: last known state kept, one small word
   $('p-eta').textContent = eta; $('p-layer').textContent = meta;
@@ -5812,6 +6318,11 @@ function l5Detail(d, s, word){
   const watching = ['on', 'learn', 'ready', 'alert', 'down'].includes(info.k);
   $('sp-tog').setAttribute('aria-checked', watching ? 'true' : 'false'); $('sp-tog').querySelector('.tw').textContent = watching ? 'ON' : 'OFF';
   $('sp-tog').disabled = !hasDet || info.k === 'nocamera' || (x && x.state === 'off');
+  // inside a WARNING / FAILURE: Pause + Cancel print, so the person never hunts for them. The SAME rules as the toolbar: Cancel while a print exists
+  // (printing / preparing / paused), Pause only while it is printing. Never automatic: nothing here pauses or cancels by itself.
+  const spAct = info.k === 'alert' && BUSY_STATES.includes(st);
+  $('sp-act').hidden = !spAct; $('sp-pause').hidden = st !== 'RUNNING'; $('printer').classList.toggle('spw', spAct);
+  if(PV.spFocus){ PV.spFocus = false; if(spAct) spShow(); }        // the screen was just opened (a tap, or the alert's "Open in Fabrica" link) and it IS in a warning: the block is the first thing on screen
   $('cam-spag').textContent = (info.k === 'alert' ? '\u26a0 ' : '') + 'Spaghetti: ' + info.word + (x && x.learning && info.k !== 'alert' && info.k !== 'off' && info.k !== 'down' ? ' - ' + x.learning : '')
     + (x && x.alerts != null && ['on', 'learn', 'alert'].includes(info.k) ? ' \u00b7 ' + x.alerts + (x.alerts === 1 ? ' alert' : ' alerts') : '');
   $('cam-spag').className = 'bdg bl' + (info.k === 'alert' ? ' alert' : '');
@@ -6095,6 +6606,36 @@ function fileIsCur(f){
   const sn = CTL.d && CTL.d.snapshot;
   return !!(sn && BUSY_STATES.includes(sn.state) && sn.job && f && (filesBase(sn.job) === filesBase(fileShow(f)) || filesBase(sn.job) === filesBase(f.name)));
 }
+// ==== plate contents ====
+// What is on the plate - how many of which object - from the slicer's cancel-object labels (the Hub reads them: platecontents.py).
+//   present  -> "Plate: 4\u00d7 Hose Clip + 2\u00d7 Hook" (detail sheet, confirm dialog)
+//   missing  -> a small framed WORD badge "\u26a0\ufe0f No labels" in the file list / grid, and the full sentence in the sheet
+//   unknown  -> nothing at all (never a guess, never a badge)
+// Nothing here blocks a print: it is information only.
+const PLATE_MISSING = 'No object labels \u2014 can\'t count parts or cancel one object. Turn on "Label objects" in the slicer.';
+const EXCL_NOTE = 'Exclude objects not set up in printer.cfg';
+const plateOf = f => (f && f.plate && typeof f.plate === 'object') ? f.plate : null;
+const plateMissing = f => { const p = plateOf(f); return !!p && p.labels === 'missing'; };
+const plateSummary = f => { const p = plateOf(f); return (p && p.labels === 'present' && p.summary) ? String(p.summary) : ''; };
+const plateBadge = f => plateMissing(f) ? '<span class="pbadge" role="img" aria-label="' + esc(PLATE_MISSING) + '" title="' + esc(PLATE_MISSING) + '">\u26a0\ufe0f No labels</span>' : '';
+const plateTile = f => plateMissing(f) ? '<span class="fplate" role="img" aria-label="' + esc(PLATE_MISSING) + '" title="' + esc(PLATE_MISSING) + '">\u26a0\ufe0f No labels</span>' : '';
+// one row of the detail sheet / library details: the quantity, or the missing-labels sentence, or no row
+function plateRow(f){
+  if(plateSummary(f)) return '<dt>Plate</dt><dd>' + esc(plateSummary(f)) + '</dd>';
+  if(plateMissing(f)) return '<dt>Plate</dt><dd>\u26a0\ufe0f ' + esc(PLATE_MISSING) + '</dd>';
+  return '';
+}
+// the start-print dialog: one compact line, or the warning (amber bar + words)
+function cfPlateHtml(d){
+  if(plateSummary(d)) return '<div class="cfnote cfplate" title="Plate: ' + esc(plateSummary(d)) + '">Plate: ' + esc(plateSummary(d)) + '</div>';
+  if(plateMissing(d)) return '<div class="cfnote cfwarn cfplate" role="note" title="' + esc(PLATE_MISSING) + '">\u26a0\ufe0f No object labels \u2014 can\'t count parts or cancel one object</div>';
+  return '';
+}
+// a Klipper printer without [exclude_object] in printer.cfg cannot cancel one object: said in words on its card and its screen
+const exclWarn = s => (s && s.exclude_object === false) ? '\u26a0\ufe0f ' + (s.exclude_object_note || EXCL_NOTE) : '';
+const exwCls = t => (typeof t === 'string' && t.indexOf('\u26a0') === 0) ? ' exw' : '';
+const EXCL_SHORT = ['\u26a0\ufe0f Exclude objects not set up', '\u26a0\ufe0f No exclude objects'];     // for a card slot too narrow for the whole sentence (the whole sentence is the tooltip and the printer screen)
+// ==== end plate contents ====
 function fileRowHtml(f, i){
   const name = String(f.name == null ? '' : f.name);
   const shown = fileShow(f);
@@ -6118,7 +6659,7 @@ function fileRowHtml(f, i){
   return `<div class="frow${cur ? ' cur' : ''}">
       ${L5 ? '<span class="ix">' + String(i + 1).padStart(2, '0') + '</span>' : ''}${thumb}
       <div class="grow" data-act="fileMenu" data-f="${esc(name)}" role="button" tabindex="0" title="${esc(shown)}"><div class="fname">${esc(filesBase(shown))}</div>
-        <div class="fmeta">${meta}</div></div>
+        <div class="fmeta">${cur ? '' : plateBadge(f)}${meta}</div></div>
       ${warn}
       ${badgeHtml(f)}
       ${cur ? '<span class="nowtag">Printing</span>' : `<button data-ctl class="primary" onclick="askPrint(this.dataset.f)" data-f="${esc(name)}">${L5 ? IC('play') : ''}Print</button>`}
@@ -6142,7 +6683,7 @@ function fileTileHtml(f){
   const cur = fileIsCur(f), hint = fileHint(f);
   const time = f.print_time ? '<span class="ftime">' + esc(f.print_time) + '</span>' : '';
   return `<div class="ftile${cur ? ' cur' : ''}" data-act="fileMenu" data-f="${esc(name)}" role="button" tabindex="0" title="${esc(shown)}">` +
-    `<div class="fpic">${pic}${cur ? '<span class="nowtag">Printing</span>' : ''}${hint ? '<span class="fhint">' + esc(hint) + '</span>' : ''}</div>` +
+    `<div class="fpic">${pic}${cur ? '<span class="nowtag">Printing</span>' : plateTile(f)}${hint ? '<span class="fhint">' + esc(hint) + '</span>' : ''}</div>` +
     `<div class="ftname">${esc(filesBase(shown))}</div><div class="ftmeta">${time}${badgeHtml(f)}</div></div>`;
 }
 
@@ -6184,6 +6725,7 @@ function fdHtml(row, d, err){
     const per = (d.filaments || []).filter(x => x && Number(x.used_g) > 0 && (d.filaments.length > 1)).map(x => x.type + ' ' + (Math.round(x.used_g * 10) / 10) + ' g' + (x.color_name ? ' (' + x.color_name + ')' : '')).join(' · ');
     rows += '<dt>Print time</dt><dd>' + (d.print_seconds ? esc(fdDur(d.print_seconds)) + ' <small style="display:inline">estimated by the slicer</small>' : 'unknown') + '</dd>';
     rows += '<dt>Filament</dt><dd>' + (g || matWords ? esc([g, matWords].filter(Boolean).join(' · ')) : 'unknown') + (per ? '<small>' + esc(per) + '</small>' : '') + '</dd>';
+    rows += plateRow(d);                                                                  // ==== plate contents ====
     if(d.layer_mm) rows += '<dt>Layer height</dt><dd>' + esc(d.layer_mm) + ' mm</dd>';
     if(d.nozzle_mm) rows += '<dt>Nozzle</dt><dd>' + esc(d.nozzle_mm) + ' mm</dd>';
     rows += '<dt>File size</dt><dd>' + (fdBytes(d.size) ? esc(fdBytes(d.size)) : 'unknown') + '</dd>';
@@ -6414,7 +6956,7 @@ async function askPrint(filename){
         <div class="cffile" role="button" tabindex="0" data-act="cfName" aria-expanded="false" title="${esc(String(d.display_name || d.file))}"><span class="cfname">${esc(fileShort)}</span>${jobBits ? '<span class="cfbits">' + jobBits + '</span>' : ''}</div>
         <div class="cfmodel">${modelHtml}</div>
         <div class="cfcamw">${camHtml}</div>
-        <div class="cfpick">${spoolHtml}${notesCf}</div>
+        <div class="cfpick">${cfPlateHtml(d)}${spoolHtml}${notesCf}</div>
       </div>
       <div class="cfactions">${plateHtml}
         <button class="big" onclick="closeModal()">Back</button>
@@ -6618,9 +7160,13 @@ async function doTray(tray, mat, color){
   pview();
 }
 
-function askCancel(){
-  const job = (CTL.d && CTL.d.snapshot && CTL.d.snapshot.job) || '';
-  $('mbody').innerHTML = `<h2>Cancel the print on ${esc(CUR)}?</h2>
+const CNL = {name:''};          // the printer the open Cancel dialog is about (the open one, or the fleet card it was tapped on)
+function askCancel(name){
+  const who = typeof name === 'string' && name ? name : CUR;
+  CNL.name = who;
+  const fp = who === CUR ? null : ((FL.last || []).find(p => p.printer === who) || null);
+  const job = (fp ? fp.job : CTL.d && CTL.d.snapshot && CTL.d.snapshot.job) || '';
+  $('mbody').innerHTML = `<h2>Cancel the print on ${esc(who)}?</h2>
     <div class="note">${job ? 'Job: <b>' + esc(job) + '</b>. ' : ''}This stops the job immediately. It cannot be resumed.</div>
     <div class="row"><button class="big grow" onclick="closeModal()">Keep printing</button>
     <button class="big danger grow" onclick="doCancel()">CANCEL PRINT</button></div>`;
@@ -6631,13 +7177,13 @@ async function doCancel(){
     <div class="note">(the cancel may still complete — check the printer card)</div>
     <button class="big" style="width:100%;margin-top:12px" onclick="closeModal()">Close</button>`;
   try{
-    await api(papi(CUR, '/action'), {method:'POST',
+    await api(papi(CNL.name || CUR, '/action'), {method:'POST',
       headers:{'Content-Type':'application/json'}, body: JSON.stringify({action:'cancel'})});
     closeModal();
   }catch(e){
     errorCard('Could not cancel', e.message);
   }
-  pview();
+  if($('home').classList.contains('on')) fleet(); else pview();
 }
 
 const DEL = { file: '', printer: '' };
@@ -6723,15 +7269,16 @@ async function doConnect(name, restart){
   refresh();
 }
 
-async function act(action){
+async function act(action, name){          // `name` = a printer other than the open one (the Pause on a fleet card); no name = the open printer
+  const redo = () => { if(name) fleet(); else pview(); };
   try{
-    const d = await api(papi(CUR, '/action'), {method:'POST',
+    const d = await api(papi(name || CUR, '/action'), {method:'POST',
       headers:{'Content-Type':'application/json'}, body: JSON.stringify({action})});
-    pview();
+    redo();
     return d;
   }catch(e){
     errorCard('Action failed', e.message);
-    pview();
+    redo();
   }
 }
 
@@ -7285,18 +7832,21 @@ function moreOpen(){
 function moreClose(){ $('moresheet').classList.remove('on'); $('morebtn').setAttribute('aria-expanded', 'false'); }
 function moreGo(where){
   moreClose();
-  ({printers: () => openPrinters(), library: () => openLibrary(), history: () => openHistory(), backups: () => openBackups(), settings: () => openSettings(), signout: () => secSignOut()}[where] || (() => {}))();
+  ({printers: () => openPrinters(), library: () => openLibrary(), history: () => openHistory(), analytics: () => openAnalytics(), backups: () => openBackups(), settings: () => openSettings(), signout: () => secSignOut()}[where] || (() => {}))();
 }
 document.addEventListener('keydown', e => { if(e.key === 'Escape' && $('moresheet').classList.contains('on')){ moreClose(); $('morebtn').focus(); } });
 document.addEventListener('keydown', e => {      // Enter / Space on a chip-button (NOT CONNECTED · tap to connect)
   const t = e.target;
-  if((e.key === 'Enter' || e.key === ' ') && t && t.matches && t.matches('.chip.conn[data-act], .frow .grow[data-act="fileMenu"], .ftile[data-act="fileMenu"]')){ e.preventDefault(); t.click(); }
+  if((e.key === 'Enter' || e.key === ' ') && t && t.matches && t.matches('.chip.conn[data-act], .frow .grow[data-act="fileMenu"], .ftile[data-act="fileMenu"], .spg[data-act], .spag[data-act], .spalert[data-act]')){ e.preventDefault(); t.click(); }
   if(e.key === 'Escape' && $('pmore').classList.contains('on')) pmoreClose();
   else if(e.key === 'Escape' && L5 && $('printer').classList.contains('files-open') && !$('modal').classList.contains('on')) filesClose();
 });
 const ACT = {
   openPrinter: b => openPrinter(b.dataset.name),
+  cardPause:  b => act('pause', b.dataset.name),               // a warned fleet card: the same Pause (one tap, no confirm) ...
+  cardCancel: b => askCancel(b.dataset.name),                  // ... and the same Cancel (the one confirm), for THAT printer
   ...PG_ACTIONS,                                  // printer groups + History filter (see the Printer groups block)
+  ...AN_ACTIONS,                                  // ==== analytics ====
   ...DW_ACTIONS,                                  // spaghetti watch-area editor (Edit printer > More options)
   ...FL_ACTIONS,                                  // main-page group switcher (see "Main page: filter by group")
   tray:      b => askTray(Number(b.dataset.tray), b.dataset.mat),

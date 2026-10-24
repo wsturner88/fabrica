@@ -254,7 +254,8 @@ class DriverFields(unittest.TestCase):
         seen = {}
 
         def fake(method, path, *a, **k):
-            seen["path"] = path
+            if "objects/query" in path:                  # (the driver also asks /printer/objects/list once, for [exclude_object])
+                seen["path"] = path
             return {"status": {
                 "print_stats": {"state": "printing", "filename": "a.gcode", "print_duration": 10,
                                 "info": {"current_layer": 2, "total_layer": 50}},

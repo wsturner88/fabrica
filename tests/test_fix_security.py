@@ -125,7 +125,7 @@ class FakeBambu:
     def sd_delete(self, filename):
         self.calls.append("DELE " + filename)
 
-    def start_print(self, filename, ams_mapping):
+    def start_print(self, filename, ams_mapping, plate="Metadata/plate_1.gcode"):
         if self.start_gate is not None:
             self.start_gate.wait(5)
         self.started.append((filename, list(ams_mapping)))

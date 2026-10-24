@@ -185,6 +185,7 @@ REST_SCOPES = [
     # ==== rename ====
     ("GET", "/api/files/facts", "read"),                      # facts to choose a file name with (cached; a busy printer is not contacted)
     # ==== end rename ====
+    ("GET", "/api/files/plate", "read"),                      # ==== plate contents ==== what is on a plate (cached; no printer is contacted)
     ("GET", "/api/settings", "read"),                         # secrets are already redacted
     ("GET", "/api/settings/schema", "read"),
     ("GET", "/api/settings/export", "read"),
@@ -192,6 +193,7 @@ REST_SCOPES = [
     ("GET", "/api/jobs", "read"),                             # job history and cost figures
     ("GET", "/api/jobs/{id}", "read"),
     ("GET", "/api/stats", "read"),
+    ("GET", "/api/analytics", "read"),                        # ==== analytics ==== the summary over the job log (like /api/stats)
     ("GET", "/api/costs/file", "read"),
     ("GET", "/api/detection", "read"),                        # detector state and per-printer verdicts
     ("GET", "/api/discover/suggestions", "read"),             # the networks the Hub would offer to scan
@@ -282,6 +284,7 @@ TOOL_SCOPES = {
     # ==== rename ====
     "file_facts": "read",                  # facts for choosing a name; cached, a busy printer is never contacted
     # ==== end rename ====
+    "plate_contents": "read",              # ==== plate contents ==== cached labels of one file; no printer is contacted
     # control
     "start_print": "control",
     "cancel_print": "control",

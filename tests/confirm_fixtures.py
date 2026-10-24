@@ -31,7 +31,7 @@ SIZES = {
     "desktop": (1280, 800, ""),
 }
 
-SCENARIOS = ("single", "two", "two-worst", "single-warn", "model-bad", "long-name", "no-ams")
+SCENARIOS = ("single", "two", "two-worst", "single-warn", "model-bad", "long-name", "no-ams", "plate", "plate-worst", "plate-missing", "plate-missing-worst")
 
 DRIVER = r"""
 try{ localStorage.setItem('fabrica.filesview', 'list'); }catch(e){}       // the dialog is opened from a file ROW: kiosks would otherwise open the Grid (tests/test_files_grid.py covers that)
@@ -39,7 +39,7 @@ const SCN = __SCENARIO__;
 const PN = SCN === 'long-name' ? 'Packaging Line Printer 12 East Wing' : 'Printer-A';
 const trays = [{tray: 0, slot_1based: 1, type: 'PLA', color_name: 'BLACK'}, {tray: 1, slot_1based: 2, type: 'PETG', color_name: 'GREEN'},
                {tray: 2, slot_1based: 3, type: 'PLA', color_name: 'WHITE'}, {tray: 3, slot_1based: 4, type: 'PETG', color_name: 'ORANGE'}];
-const NAME = SCN === 'model-bad' ? 'Wall bracket for the workshop shelf with the long name v12 final.gcode.3mf' : 'Hook.gcode.3mf';
+const NAME = SCN === 'model-bad' || SCN === 'plate-worst' || SCN === 'plate-missing-worst' ? 'Wall bracket for the workshop shelf with the long name v12 final.gcode.3mf' : 'Hook.gcode.3mf';
 const NOAMS = SCN === 'no-ams';
 const snap = {snapshot: {printer: PN, connected: true, state: 'IDLE', job: '', percent: 0, layer: 0, nozzle_c: 25, bed_c: 24, nozzle_target_c: 0, bed_target_c: 0, camera: !NOAMS},
   trays: NOAMS ? [] : trays, controls: {actions: []}, kind: NOAMS ? 'octoprint' : 'bambu', camera: !NOAMS, materials: ['PLA', 'PETG'], palette: ['GREEN', 'BLACK']};
@@ -54,6 +54,12 @@ let SUG = SCN === 'single' || SCN === 'single-warn' ? one : two;
 if(SCN === 'single-warn') SUG = {...one, notes: [same, '\u26a0 file wants GREEN but convention says WHITE for this part name']};
 if(SCN === 'two-worst') SUG = {...two, notes: [same, '⚠ filament 2 is sliced for PLA but slot 2 holds PETG (your choice last time)']};
 if(SCN === 'model-bad') SUG = {...two, model_match: false, notes: [same], model_warning: 'THIS FILE WAS SLICED FOR P1S — YOU ARE ON A1.', target_model_name: 'Bambu A1'};
+// ---- plate contents: the one compact line (what is on the plate) or the missing-labels warning; "plate-worst" is the tallest case: a model mismatch, two warnings and a long plate line
+const PLATE_LONG = {labels: 'present', source: 'm486', total: 14, groups: [{name: 'Hose Clip with a long name', count: 4}, {name: 'Hook', count: 4}, {name: 'Spool holder', count: 3}, {name: 'Lid', count: 2}, {name: 'Knob', count: 1}], summary: '4\u00d7 Hose Clip with a long name + 4\u00d7 Hook + 3\u00d7 Spool holder + 2\u00d7 Lid + 1\u00d7 Knob'};
+if(SCN === 'plate') SUG = {...two, plate: {labels: 'present', source: 'slice_info', total: 6, groups: [{name: 'Hose Clip', count: 4}, {name: 'Hook', count: 2}], summary: '4\u00d7 Hose Clip + 2\u00d7 Hook'}};
+if(SCN === 'plate-missing') SUG = {...two, plate: {labels: 'missing', source: 'slice_info', total: null, groups: [], summary: ''}};
+if(SCN === 'plate-missing-worst') SUG = {...two, model_match: false, model_warning: 'THIS FILE WAS SLICED FOR P1S \u2014 YOU ARE ON A1.', notes: [same, '\u26a0 filament 2 is sliced for PLA but slot 2 holds PETG (your choice last time)'], plate: {labels: 'missing', source: 'slice_info', total: null, groups: [], summary: ''}};
+if(SCN === 'plate-worst') SUG = {...two, model_match: false, model_warning: 'THIS FILE WAS SLICED FOR P1S \u2014 YOU ARE ON A1.', notes: [same, '\u26a0 filament 2 is sliced for PLA but slot 2 holds PETG (your choice last time)'], plate: PLATE_LONG};
 if(NOAMS) SUG = {...base, printer_kind: 'octoprint', ams_mapping: [], mapping_described: 'the loaded filament (no AMS on this printer)', filaments: undefined,
   notes: ['This printer prints with whatever filament is physically loaded \u2014 check it.'], target_model_name: 'Prusa MK4'};
 window.__starts = [];

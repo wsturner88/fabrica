@@ -163,7 +163,7 @@ class FakeBambu:
         self.downloads.append(filename)
         return self.files[filename]
 
-    def start_print(self, filename, ams_mapping):
+    def start_print(self, filename, ams_mapping, plate="Metadata/plate_1.gcode"):
         self.started.append((filename, list(ams_mapping)))
 
 
@@ -1038,7 +1038,7 @@ class TestDashboardScreen(unittest.TestCase):
 
     def test_header_button_and_screen(self):
         h = self.HTML
-        self.assertRegex(h, r'<button onclick="openHistory\(\)"[^>]*>History</button>\s*<button onclick="openLibrary\(\)"[^>]*>Library</button>')
+        self.assertRegex(h, r'<button onclick="openHistory\(\)"[^>]*>History</button>\s*(<button onclick="openAnalytics\(\)"[^>]*>Analytics</button>(<!--.*?-->)?\s*)?<button onclick="openLibrary\(\)"[^>]*>Library</button>')
         self.assertIn('<section id="library" class="screen">', h)
         for needle in ('id="lb-q"', 'data-act="lbView"', 'id="lb-hide"', 'id="lb-folders"', 'id="lb-bar"', 'id="lb-detail"',
                        "Hide printer-only files", "Open the start-print confirm", "const LB_ACT", "Tap again to delete"):
