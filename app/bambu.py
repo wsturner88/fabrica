@@ -1001,6 +1001,8 @@ class BambuPrinter:
         ams = bool(self._ams_units())
         no_ams = ("Needs an AMS: this control drives AMS unload/load, and this printer reports no AMS "
                   "(external-spool filament changes are not supported here).")
+        gl_note = ("Sent as G-code through the MQTT `gcode_line` command (the same one pre-heat uses). Beta: not yet tried "
+                   "on this printer; newer firmware may reject it outside LAN-only / developer mode.")
         ams_note = ("Sent as the AMS `ams_change_filament` MQTT command (target 255 = unload). "
                     "Dialect taken from public Bambu protocol notes; not yet tried on real hardware.")
         return {
@@ -1015,6 +1017,11 @@ class BambuPrinter:
             "load": ({"supported": True, "verified": False, "note": ams_note +
                       " Load takes the 1-based AMS slot (`tray`)."} if ams
                      else {"supported": False, "reason": no_ams}),
+            "home": {"supported": True, "verified": False, "note": gl_note},
+            "move": {"supported": True, "verified": False,
+                     "note": "Beta. " + gl_note + " This printer cannot report whether it is homed, so a jog is allowed only "
+                             "after Home all from the Hub (and for 10 minutes after the last jog)."},
+            "extrude": {"supported": True, "verified": False, "note": "Beta. " + gl_note},
         }
 
     def controls(self) -> dict:
@@ -1078,7 +1085,20 @@ class BambuPrinter:
             tmin = 0
         return (int(cur) if isinstance(cur, (int, float)) else 0), min(280, max(tmin, 220))
 
-    def unload_filament(self):
+    def _gcode_line(self, lines):
+        self.request({"print": {"sequence_id": self._seq(), "command": "gcode_line", "param": "\n".join(lines) + "\n"}})
+
+    def home_all(self):
+        self._gcode_line(["G28"])
+
+    def move_relative(self, axis, mm):
+        axis = str(axis).upper()
+        self._gcode_line(["G91", f"G1 {axis}{float(mm):g} F{600 if axis == 'Z' else 3000}", "G90"])
+
+    def extrude(self, mm):
+        self._gcode_line(["M83", f"G1 E{float(mm):g} F300", "M82"])
+
+    def unload_filament(self, nozzle=None):      # `nozzle` unused: the AMS heats the nozzle itself
         if not self._ams_units():
             raise ControlUnsupported("Needs an AMS: this printer reports none.")
         with self._lock:
@@ -1091,7 +1111,7 @@ class BambuPrinter:
                                 "target": 255, "slot_id": 255,
                                 "curr_temp": cur, "tar_temp": tar}})
 
-    def load_filament(self, tray=None):
+    def load_filament(self, tray=None, nozzle=None):
         """Load from AMS slot `tray` (1-based). With no `tray`, the only loaded slot is used."""
         trays = [t for t in self.ams_trays() if t.get("type")]
         if tray is None:
@@ -1770,17 +1790,36 @@ class OctoPrintPrinter:
 
     # ---- printer controls (see controls.py) -------------------------------
 
+    FILAMENT_NOZZLE_TEMP = True        # load / unload: the Hub heats first (M109), then Prusa's M701 / M702
+
+    _MMU_RE = re.compile(r"(?<![a-z])mmu", re.I)
+
+    @property
+    def is_mmu(self) -> bool:
+        """Does the printer's name or model say MMU (MK3S+MMU3...)? Slot logic is the printer's own: the Hub does not load,
+        unload or change filament on those."""
+        return bool(self._MMU_RE.search(f"{self.name} {self.model}"))
+
+    MMU_REASON = "MMU printer - load/unload from the printer's screen (the MMU picks the slot itself)."
+
     def control_caps(self) -> dict:
-        fw = ("Sent as G-code through OctoPrint's /api/printer/command. Prusa firmware (M701 load / "
-              "M702 unload); other Marlin builds may refuse or ignore it. Not yet tried on real hardware.")
+        fw = ("Sent as G-code through OctoPrint's /api/printer/command: heat with M109, then Prusa firmware's M701 load / "
+              "M702 unload; other Marlin builds may refuse or ignore it. Not yet tried on real hardware.")
+        gc = "G-code through OctoPrint's /api/printer/command. Not yet tried on real hardware."
+        mmu = self.is_mmu
         return {
             "light": {"supported": False, "state": None,
                       "reason": "OctoPrint has no standard light API (it depends on a plugin or a "
                                 "printer-specific G-code), so the Hub does not guess."},
             "heat": {"supported": True,
                      "note": "OctoPrint /api/printer/tool and /api/printer/bed targets"},
-            "unload": {"supported": True, "verified": False, "note": fw},
-            "load": {"supported": True, "verified": False, "note": fw},
+            "unload": ({"supported": False, "reason": self.MMU_REASON} if mmu else {"supported": True, "verified": False, "note": fw}),
+            "load": ({"supported": False, "reason": self.MMU_REASON} if mmu else {"supported": True, "verified": False, "note": fw}),
+            "home": {"supported": True, "verified": False, "note": "G28. " + gc},
+            "move": {"supported": True, "verified": False,
+                     "note": "relative G91 / G1 / G90. This printer cannot report whether it is homed, so a jog is allowed only "
+                             "after Home all from the Hub (and for 10 minutes after the last jog). " + gc},
+            "extrude": {"supported": True, "verified": False, "note": "M83 / G1 E / M82. " + gc},
         }
 
     def controls(self) -> dict:
@@ -1800,6 +1839,10 @@ class OctoPrintPrinter:
             raise PrinterError(f"Could not reach OctoPrint at {self.url}: {scrub_text(e)}") from e
         self._last_ts = 0.0          # next snapshot() re-reads the new targets
 
+    def _gcode(self, lines, what):
+        """Send G-code lines in order through OctoPrint's command queue."""
+        self._ctl_post("/api/printer/command", {"commands": list(lines)}, what)
+
     def set_temps(self, nozzle=None, bed=None):
         if nozzle is not None:
             self._ctl_post("/api/printer/tool",
@@ -1809,11 +1852,24 @@ class OctoPrintPrinter:
                            "set the bed temperature")
         return {"nozzle": nozzle, "bed": bed}
 
-    def unload_filament(self):
-        self._ctl_post("/api/printer/command", {"command": "M702"}, "unload the filament")
+    def _filament(self, cmd, nozzle, what):
+        if self.is_mmu:
+            raise ControlUnsupported(self.MMU_REASON)
+        self._gcode(([f"M109 S{int(nozzle)}"] if nozzle else []) + [cmd], what)
 
-    def load_filament(self, tray=None):
-        self._ctl_post("/api/printer/command", {"command": "M701"}, "load the filament")
+    def unload_filament(self, nozzle=None): self._filament("M702", nozzle, "unload the filament")
+    def load_filament(self, tray=None, nozzle=None): self._filament("M701", nozzle, "load the filament")
+
+    def home_all(self):
+        self._gcode(["G28"], "home the printer")
+
+    def move_relative(self, axis, mm):
+        axis = str(axis).upper()
+        feed = 600 if axis == "Z" else 3000
+        self._gcode(["G91", f"G1 {axis}{float(mm):g} F{feed}", "G90"], f"move {axis}")
+
+    def extrude(self, mm):
+        self._gcode(["M83", f"G1 E{float(mm):g} F300", "M82"], "extrude" if mm > 0 else "retract")
 
     def sd_delete(self, filename, origin="local"):
         _require_idle_for_delete(self)       # a fresh reading, like PrusaLink / Moonraker (review N-12 pattern)

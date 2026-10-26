@@ -8,6 +8,33 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- **Controls and Change filament are now pop-up cards.** Controls opens as a centred card over the dimmed printer screen (a bottom sheet with a grab
+  handle on a phone, a near-full-screen card on the 5-inch screen, both themes): a **Move** panel (a round **jog ring** - Y+ back, X+ right, Y- front,
+  X- left around **Home** - a **1 mm | 10 mm** switch, a **Z** column and a **Filament** Pull / Push column that says "Heat the nozzle to 170 first"),
+  **Nozzle** and **Bed** cards (the big temperature, the target in words - "-> 235 PETG" or "heater off" - a meter, and PLA / PETG / ABS / Off choices;
+  the chosen one has a tick and a frame) and a **Filament** card (Change filament..., Unload, Load). **Change filament** is a pop-up with a step bar
+  (Material, Heat, Home, Unload, Swap, Load: done = a tick, the current one has a thick ring and a bold word), a picture beside the words (a heating
+  ring with "182 of 235 PETG" and Material / Target / Left chips; the spool and a three-item checklist for the swap), and a footer with Cancel, Back
+  and the one next action. Home is left out of the bar when the printer is already homed ("Step 3 of 5"). New per-printer setting **Flip Y on the
+  jog pad** (Edit printer > More options, off by default): on, the top wedge is Y- (front). It is a display setting - saved without a connection
+  test, also while printing. Every safety rule and every Hub-side limit is unchanged.
+- **A Controls sheet on every printer screen, and a guided "Change filament...".** A **Controls** button (next to Light on the phone, the 10-inch
+  touch layout and the desktop; in the action strip on the 5-inch screen with either theme; first under More while a print runs) opens one sheet with
+  one compact row per section: **Filament** (Change filament..., Load, Unload), **Nozzle** (PLA 210 / PETG 235 / ABS 245 C from the new
+  Settings > Printers & safety numbers `printers.filament_temp_*`, and Off), **Bed** (the Pre-heat bed presets and Off), **Move** (Home all, which asks
+  once, and X / Y / Z -10 -1 +1 +10 mm) and **Extrude** (+10 / -10 mm, only when the nozzle is hot; the buttons say "Heat the nozzle first"), with
+  current and target temperatures in words and the Light in the header. Anything a printer cannot do is shown disabled with the reason in words. The
+  guided change has six steps, each with Back and Cancel (Cancel switches off the heater it switched on): material, heating ("Heating 142 -> 235 C"),
+  home (only when the printer says it is not homed), unload, "Swap the spool, then tap Load", load + purge, "Done - cool down now?". Klipper: the
+  printer's own `LOAD_FILAMENT` / `UNLOAD_FILAMENT` (or `M701` / `M702`) macro now runs after the Hub heated the nozzle (`M109`, `TEMP=` passed) and
+  after `G28` if Klipper says it is not homed - the fix for "Must home axis first" and for macros that heat to their own 205 C; with no macro a plain
+  G-code sequence with per-printer lengths (Edit printer > More options, default 100 / 90 mm). OctoPrint: `M109` then `M701` / `M702`; an MMU printer is
+  never loaded or unloaded by the Hub ("load/unload from the printer's screen"). PrusaLink shows everything disabled with the reason; Bambu uses the AMS
+  and `gcode_line` for move / extrude, marked beta. **Safety is enforced on the Hub:** every new action is refused while printing / paused / starting;
+  moves are relative, one axis, at most 10 mm and refused unless homed (printers that cannot report it need a Home all from the Hub in the last 10
+  minutes); extrude is at most 10 mm and refused below the printer's minimum extrude temperature (Klipper's `min_extrude_temp`, else 170 C); Home
+  needs `confirm`; a view-only sign-in never sees or reaches any of it; heaters switched on get the normal auto-off. New REST actions `home`, `move`,
+  `extrude`, `heater_off` and `material` on `POST /api/printer/<name>/control`.
 - **A Spaghetti WARNING now has Pause and Cancel print right in it.** On the printer screen (phone, 10-inch / kiosk, desktop and the 5-inch board
   with either theme) the WARNING block grows one row holding two big buttons, "Pause" and "Cancel print": the same Pause (one tap) and the same
   Cancel (the one "Keep printing / CANCEL PRINT" confirm) as the toolbar. Pause shows only while the print is running, Cancel while a print exists;

@@ -131,6 +131,9 @@ quiet hours by default.
 | `printers.preheat_bed_pla` | int | `60` | Pre-heat heats the **bed only**; one bed temperature per material (0-120 C). Every Pre-heat button reads these |
 | `printers.preheat_bed_petg` | int | `80` | bed temperature for the PETG button |
 | `printers.preheat_bed_abs` | int | `100` | bed temperature for the ABS button (a best guess: 90 or 100) |
+| `printers.filament_temp_pla` | int | `210` | Controls sheet: nozzle temperature of the Nozzle > PLA button and of Change filament / Load / Unload for PLA (170-300 C) |
+| `printers.filament_temp_petg` | int | `235` | the same for PETG |
+| `printers.filament_temp_abs` | int | `245` | the same for ABS |
 | `printers.preheat_auto_off_min` | int | `15` | env `PREHEAT_TIMEOUT_MIN` is the default; 0-240 |
 | `printers.require_bed_clear` | bool | `True` | read-only |
 

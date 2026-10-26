@@ -335,7 +335,7 @@ class TestBambu(unittest.TestCase):
 
     def test_controls_method(self):
         d = make_bambu().controls()
-        self.assertEqual(d["actions"], ["light_on", "light_off", "preheat", "cooldown", "unload", "load"])
+        self.assertEqual(d["actions"], ["light_on", "light_off", "preheat", "cooldown", "heater_off", "unload", "load", "home", "move", "extrude"])
         self.assertEqual(d["preheat"]["presets"]["PLA"], {"nozzle": None, "bed": 60})
         self.assertFalse(d["preheat"]["verified"])
 
@@ -362,8 +362,9 @@ class TestOctoPrint(unittest.TestCase):
     def test_unload_load_gcode(self):
         controls.perform(self.prn, "unload")
         controls.perform(self.prn, "load")
-        self.assertEqual(self.fake.posts(), [("/api/printer/command", {"command": "M702"}),
-                                             ("/api/printer/command", {"command": "M701"})])
+        # the Hub says how hot (PLA 210 by default) and heats first, in one queued command list
+        self.assertEqual(self.fake.posts(), [("/api/printer/command", {"commands": ["M109 S210", "M702"]}),
+                                             ("/api/printer/command", {"commands": ["M109 S210", "M701"]})])
 
     def test_light_unsupported(self):
         with self.assertRaises(controls.ControlUnsupported) as cm:
@@ -464,23 +465,23 @@ class TestMoonraker(unittest.TestCase):
     def test_macro_gating(self):
         fake, prn = self.mk([])
         d = controls.describe(prn)
-        self.assertFalse(d["unload"]["supported"])
-        self.assertIn("UNLOAD_FILAMENT", d["unload"]["reason"])
-        self.assertFalse(d["load"]["supported"])
-        with self.assertRaises(controls.ControlUnsupported):
-            controls.perform(prn, "unload")
-        self.assertEqual(fake.scripts(), [])
+        self.assertTrue(d["unload"]["supported"])                    # no macro: the plain G-code sequence (lengths from Edit printer)
+        self.assertIn("no unload macro", d["unload"]["note"])
+        self.assertTrue(d["load"]["supported"])
+        controls.perform(prn, "unload")
+        self.assertEqual(fake.scripts(), ["M109 S210\nSAVE_GCODE_STATE NAME=fabrica\nM83\nG1 E10 F300\nG1 E-100 F1500\nRESTORE_GCODE_STATE NAME=fabrica"])
 
         fake2, prn2 = self.mk(["gcode_macro UNLOAD_FILAMENT"])
         d = controls.describe(prn2)
         self.assertTrue(d["unload"]["supported"])
-        self.assertFalse(d["load"]["supported"])         # only UNLOAD exists
+        self.assertIn("UNLOAD_FILAMENT macro", d["unload"]["note"])
+        self.assertIn("no load macro", d["load"]["note"])  # only UNLOAD exists: load falls back to plain G-code
         controls.perform(prn2, "unload")
-        self.assertEqual(fake2.scripts(), ["UNLOAD_FILAMENT"])
+        self.assertEqual(fake2.scripts(), ["M109 S210\nUNLOAD_FILAMENT TEMP=210"])
 
         fake3, prn3 = self.mk(["gcode_macro load_filament"])    # case-insensitive match
         controls.perform(prn3, "load")
-        self.assertEqual(fake3.scripts(), ["load_filament"])
+        self.assertEqual(fake3.scripts(), ["M109 S210\nload_filament TEMP=210"])
 
     def test_long_macro_timeout_counts_as_started(self):
         fake, prn = self.mk(["gcode_macro UNLOAD_FILAMENT"])
@@ -720,7 +721,7 @@ class TestServer(unittest.TestCase):
         self.mfake.log.clear()
         self.assertEqual(self.post("voron", action="light_on").status_code, 200)
         self.assertEqual(self.mfake.scripts(), ["SET_PIN PIN=caselight VALUE=1"])
-        self.assertEqual(self.post("voron", action="load").status_code, 422)     # no LOAD_FILAMENT macro
+        self.assertEqual(self.post("voron", action="load").status_code, 200)     # no LOAD_FILAMENT macro: the plain sequence
         self.assertEqual(self.post("voron", action="unload").status_code, 200)
         self.bam._client.publish.reset_mock()
         self.assertEqual(self.post("p1s", action="light_on").status_code, 200)
@@ -732,13 +733,13 @@ class TestServer(unittest.TestCase):
         self.assertIn("light_on", c["actions"])
         self.assertIn("preheat", c["allowed_now"])
         self.assertIn("unload", c["actions"])
-        self.assertNotIn("load", c["actions"])
+        self.assertIn("load", c["actions"])
         self.assertEqual(c["light"], "off")
         self.assertIn("PLA", c["presets"])
         j = self.client.get("/api/printer/prusa").json()
         self.assertEqual(j["controls"]["actions"], [])
         j = self.client.get("/api/printer/mk4").json()
-        self.assertEqual(j["controls"]["actions"], ["preheat", "cooldown", "unload", "load"])
+        self.assertEqual(j["controls"]["actions"], ["preheat", "cooldown", "heater_off", "unload", "load", "home", "move", "extrude"])
         self.fake.printing = True
         refresh(self.octo)
         j = self.client.get("/api/printer/mk4").json()

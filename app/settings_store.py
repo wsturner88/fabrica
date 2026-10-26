@@ -121,6 +121,7 @@ DATETIME_FORMATS = {      # key -> (strftime, example label)
 }
 
 PREHEAT_BED_DEFAULTS = {"PLA": 60, "PETG": 80, "ABS": 100}      # pre-heat heats the BED only; one number per material
+FILAMENT_TEMP_DEFAULTS = {"PLA": 210, "PETG": 235, "ABS": 245}   # the Controls sheet's NOZZLE buttons, Change filament, Load / Unload
 
 _EVENT_FIELDS = [
     _field(kind, label, "bool", on, EVENT_HELP[kind])
@@ -275,6 +276,14 @@ SCHEMA = [
                 "Bed temperature for the PETG button.", min=0, max=120, unit="°C"),
          _field("preheat_bed_abs", "Pre-heat bed: ABS", "int", PREHEAT_BED_DEFAULTS["ABS"],
                 "Bed temperature for the ABS button. A best guess (90 or 100): set what your ABS likes.", min=0, max=120, unit="°C"),
+         _field("filament_temp_pla", "Nozzle temperature: PLA", "int", FILAMENT_TEMP_DEFAULTS["PLA"],
+                "Controls sheet: the Nozzle > PLA button, and the temperature Change filament / Load / Unload heat to for PLA. "
+                "Heaters switched on this way get the same auto-off as Pre-heat.",
+                min=170, max=300, unit="°C"),
+         _field("filament_temp_petg", "Nozzle temperature: PETG", "int", FILAMENT_TEMP_DEFAULTS["PETG"],
+                "Nozzle temperature for the PETG button.", min=170, max=300, unit="°C"),
+         _field("filament_temp_abs", "Nozzle temperature: ABS", "int", FILAMENT_TEMP_DEFAULTS["ABS"],
+                "Nozzle temperature for the ABS button.", min=170, max=300, unit="°C"),
          _field("preheat_auto_off_min", "Pre-heat auto-off (minutes)", "int", 15,
                 "A pre-heated printer cools down again if no print starts within this time (1-240 min). It cannot be turned off - heaters are never left on indefinitely.",
                 min=1, max=240, unit="min", env="PREHEAT_TIMEOUT_MIN"),
