@@ -437,6 +437,36 @@ class OctoManagerTests(unittest.TestCase):
         self.assertFalse(no["ok"])
         self.assertIn("does not look like OctoPrint", no["message"])
 
+    def test_flip_y_on_the_jog_pad_is_a_display_setting_saved_without_touching_the_connection(self):
+        """Controls pop-up: "Flip Y on the jog pad" (Edit printer > More options). Default off; saved like a label (no test, driver kept, allowed
+        while printing); the Hub's /api/printer/<name> hands it to the page as `jog_flip_y`."""
+        self.mgr.add("octoprint", self.vals())
+        pub = self.mgr.list_public()[0]
+        self.assertIs(pub["jog_flip_y"], False)
+        self.assertNotIn("jog_flip_y", pub["values"])                                # not a connection field
+        self.assertIs(fleet_store.record_jog_flip_y(self.mgr.store.get("MK4")), False)
+        first = self.printers["mk4"]
+        calls = []
+        orig = self.mgr._probe
+        self.mgr._probe = lambda *a, **k: calls.append(1) or orig(*a, **k)
+        self.mgr._busy_reason = lambda *a, **k: "printer is printing"               # busy: a connection edit would be refused, this one is not
+        up = self.mgr.update("MK4", {"jog_flip_y": True})
+        self.assertEqual(up["changed"], ["jog_flip_y"])
+        self.assertIs(up["printer"]["jog_flip_y"], True)
+        self.assertIs(self.printers["mk4"], first)                                   # the driver was not replaced
+        self.assertEqual(calls, [])                                                  # nothing was probed
+        self.assertIs(fleet_store.record_jog_flip_y(self.mgr.store.get("MK4")), True)
+        # the form posts every field along with it: the unchanged ones are a no-op, the flag still saves / clears
+        full = self.vals(jog_flip_y=False)
+        up = self.mgr.update("MK4", full)
+        self.assertEqual(up["changed"], ["jog_flip_y"])
+        self.assertIs(self.mgr.list_public()[0]["jog_flip_y"], False)
+        self.assertNotIn("jog_flip_y", self.mgr.store.get("MK4"))                     # off = the default: nothing is stored
+        self.assertEqual(self.mgr.update("MK4", {"jog_flip_y": ""})["changed"], [])    # already off: nothing changed
+        with self.assertRaises(fleet_store.FleetError):
+            self.mgr.update("MK4", {"jog_flip_y": "sideways"})
+        self.assertEqual([fleet_store.record_jog_flip_y(r) for r in ({}, None, {"jog_flip_y": "yes"}, {"jog_flip_y": 3}, {"jog_flip_y": True})], [False, False, True, False, True])
+
     def test_add_edit_remove_lifecycle(self):
         res = self.mgr.add("octoprint", self.vals(model="Test Model"))
         self.assertTrue(res["test"]["ok"])

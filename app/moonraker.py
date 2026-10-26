@@ -55,6 +55,10 @@ MOONRAKER_PORT = 7125
 
 _LIGHT_NAME = re.compile(r"light|led|lamp", re.I)      # also covers "caselight"
 _LIGHT_KINDS = ("output_pin", "led", "neopixel", "dotstar")
+_FILAMENT_MACROS = {"unload": ("unload_filament", "m702"), "load": ("load_filament", "m701")}   # the printer's own, in order of preference
+DEFAULT_UNLOAD_MM, DEFAULT_LOAD_MM = 100.0, 90.0
+JOG_FEED = {"X": 6000, "Y": 6000, "Z": 600}      # mm/min: a quick sideways tap, a slow Z tap
+EXTRUDE_FEED = 300                               # mm/min (5 mm/s): gentle enough for a cold-ish hotend's first push
 _OBJECTS = "print_stats&virtual_sdcard&display_status&extruder&heater_bed&toolhead&webhooks"
 
 
@@ -128,11 +132,22 @@ class MoonrakerPrinter:
                  "Fluidd settings automatically."},
         {"name": "model", "label": "Model", "type": "text", "required": False, "advanced": True,
          "placeholder": "Voron 2.4", "help": "Display only."},
+        {"name": "unload_mm", "label": "Unload length (mm)", "type": "text", "required": False, "advanced": True,
+         "placeholder": "100", "help": "Controls > Unload, when Klipper has no UNLOAD_FILAMENT macro of its own: how far the "
+                                       "filament is pulled back out of the hotend (default 100 mm; a long Bowden tube needs more)."},
+        {"name": "load_mm", "label": "Load length (mm)", "type": "text", "required": False, "advanced": True,
+         "placeholder": "90", "help": "Controls > Load, when Klipper has no LOAD_FILAMENT macro of its own: how far the filament "
+                                      "is pushed in (default 90 mm; a long Bowden tube needs more)."},
     ]
     CONFIG_REQUIRE_ONE_OF = []
 
-    def __init__(self, name, url, creds=None, model="", camera_base_url=""):
+    FILAMENT_NOZZLE_TEMP = True        # load / unload: the Hub says how hot (controls.py), Klipper has no AMS to decide
+
+    def __init__(self, name, url, creds=None, model="", camera_base_url="", unload_mm=None, load_mm=None):
         self.name, self.model = name, model
+        self.unload_mm = self._len_mm(unload_mm, DEFAULT_UNLOAD_MM)
+        self.load_mm = self._len_mm(load_mm, DEFAULT_LOAD_MM)
+        self._extrude_cfg = None           # (timestamp, min_extrude_temp or None)
         self.url = strip_userinfo(url).rstrip("/")       # a password typed into the address is dropped (N-7)
         self.api_key = _normalize_creds(creds)
         self.camera_base_url = (camera_base_url or "").rstrip("/")
@@ -155,6 +170,15 @@ class MoonrakerPrinter:
 
     # ---- construction helpers ----------------------------------------------
 
+    @staticmethod
+    def _len_mm(v, default):
+        """A filament length in mm from a config value: a number in (0, 1500], else the default."""
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return default
+        return f if f == f and 0 < f <= 1500 else default
+
     @classmethod
     def from_config(cls, cfg: dict, env=None):
         """Build from one `printers:` entry of config.yml. The API key (if any) comes from
@@ -164,7 +188,8 @@ class MoonrakerPrinter:
             raise PrinterError(f"Moonraker printer '{cfg.get('name', '?')}' needs a 'url'.")
         key = env.get(cfg["api_key_env"], "") if cfg.get("api_key_env") else cfg.get("api_key", "")
         return cls(cfg["name"], cfg["url"], key, cfg.get("model", ""),
-                   camera_base_url=cfg.get("camera_base_url", ""))
+                   camera_base_url=cfg.get("camera_base_url", ""),
+                   unload_mm=cfg.get("unload_mm"), load_mm=cfg.get("load_mm"))
 
     # ---- HTTP plumbing ------------------------------------------------------
 
@@ -393,7 +418,9 @@ class MoonrakerPrinter:
         ps, vs = status.get("print_stats") or {}, status.get("virtual_sdcard") or {}
         ds, ex = status.get("display_status") or {}, status.get("extruder") or {}
         bed, wh = status.get("heater_bed") or {}, status.get("webhooks") or {}
-        pos = (status.get("toolhead") or {}).get("position")
+        th = status.get("toolhead") or {}
+        pos = th.get("position")
+        homed_axes = th.get("homed_axes") if isinstance(th.get("homed_axes"), str) else None
         z_mm = self._r1(pos[2]) if isinstance(pos, (list, tuple)) and len(pos) > 2 else None
         if z_mm is not None:
             z_mm = round(pos[2], 2)
@@ -420,6 +447,8 @@ class MoonrakerPrinter:
         self._last = {
             "state": state, "raw": raw, "job": name, "percent": pct, "remaining_min": left,
             "layer": layer, "z_mm": z_mm,
+            "homed_axes": homed_axes, "homed": (all(a in homed_axes.lower() for a in "xyz") if homed_axes is not None else None),
+            "can_extrude": ex.get("can_extrude") if isinstance(ex.get("can_extrude"), bool) else None,
             "nozzle_c": self._r1(ex.get("temperature")), "nozzle_target_c": self._r1(ex.get("target")),
             "bed_c": self._r1(bed.get("temperature")), "bed_target_c": self._r1(bed.get("target")),
             "print_error": 1 if raw == "error" else 0,
@@ -474,6 +503,7 @@ class MoonrakerPrinter:
         return {**base, "connected": True, "state": s["state"], "job": s["job"],
                 "percent": s["percent"], "remaining_min": s["remaining_min"], "layer": s["layer"],
                 "z_mm": s.get("z_mm"),
+                "homed": s.get("homed"), "homed_axes": s.get("homed_axes"), "can_extrude": s.get("can_extrude"),
                 "nozzle_c": s["nozzle_c"], "nozzle_target_c": s["nozzle_target_c"],
                 "bed_c": s["bed_c"], "bed_target_c": s["bed_target_c"],
                 "print_error": s["print_error"], "fault": bool(s.get("fault")),
@@ -687,9 +717,11 @@ class MoonrakerPrinter:
         if down:
             return _controls.all_unsupported(down)
         lights = info["lights"]
-        macro = lambda n: info["macros"].get(n.lower())     # noqa: E731
-        un, ld = macro("UNLOAD_FILAMENT"), macro("LOAD_FILAMENT")
-        none_macro = "needs a `[gcode_macro %s]` in printer.cfg; this Klipper has none."
+        un, ld = self._macro_for(info, "unload"), self._macro_for(info, "load")
+        has_ex = info["extruder"]
+        no_ex = "Klipper reports no [extruder]."
+        gen_u = f"no unload macro: pulls the filament back {self.unload_mm:g} mm with plain G-code (Edit printer > More options sets the length)"
+        gen_l = f"no load macro: pushes the filament in {self.load_mm:g} mm with plain G-code (Edit printer > More options sets the length)"
         return {
             "light": ({"supported": True, "state": self._light_state(lights), "verified": False,
                        "note": "drives " + ", ".join(f"{k} {n}" for k, n in lights)} if lights else
@@ -697,21 +729,77 @@ class MoonrakerPrinter:
                        "reason": "No light found: Klipper has no output_pin / led / neopixel / dotstar "
                                  "whose name contains light, led or lamp."}),
             "heat": ({"supported": True, "note": "M104 / M140 via /printer/gcode/script"}
-                     if info["extruder"] else
-                     {"supported": False, "reason": "Klipper reports no [extruder]."}),
-            "unload": ({"supported": True, "verified": False, "note": f"runs your {un} macro"} if un
-                       else {"supported": False, "reason": none_macro % "UNLOAD_FILAMENT"}),
-            "load": ({"supported": True, "verified": False, "note": f"runs your {ld} macro"} if ld
-                     else {"supported": False, "reason": none_macro % "LOAD_FILAMENT"}),
+                     if has_ex else {"supported": False, "reason": no_ex}),
+            "unload": ({"supported": True, "verified": False,
+                        "note": f"runs your {un} macro after heating the nozzle (and homing if needed)" if un else gen_u}
+                       if has_ex else {"supported": False, "reason": no_ex}),
+            "load": ({"supported": True, "verified": False,
+                      "note": f"runs your {ld} macro after heating the nozzle (and homing if needed)" if ld else gen_l}
+                     if has_ex else {"supported": False, "reason": no_ex}),
+            "home": {"supported": True, "verified": False, "note": "G28 via /printer/gcode/script"},
+            "move": {"supported": True, "verified": False,
+                     "note": "relative G1 jogs (G91) in a saved/restored G-code state; refused unless Klipper reports the axes homed"},
+            "extrude": ({"supported": True, "verified": False,
+                         "note": "M83 + G1 E in a saved/restored G-code state; refused below the nozzle's minimum extrude temperature"}
+                        if has_ex else {"supported": False, "reason": no_ex}),
         }
+
+    @staticmethod
+    def _macro_for(info, which):
+        """The printer's own load / unload macro name (LOAD_FILAMENT / M701 ...), or None."""
+        for n in _FILAMENT_MACROS[which]:
+            if n in info["macros"]:
+                return info["macros"][n]
+        return None
 
     def controls(self) -> dict:
         return _controls.describe(self)
+
+    def extrude_min_c(self):
+        """Klipper's own min_extrude_temp for [extruder] (printer.cfg), read once per CAPS_TTL; None when it cannot be read
+        (controls.py then uses its 170 C default). A failed read is not repeated for a minute."""
+        c = self._extrude_cfg
+        now = time.time()
+        if c and now - c[0] < (self.CAPS_TTL if c[1] is not None else 60):
+            return c[1]
+        val = None
+        try:
+            res = self._call("GET", "/printer/objects/query?configfile=settings", timeout=4, what="read the config") or {}
+            st = (res.get("status") or {}).get("configfile") or {}
+            v = ((st.get("settings") or {}).get("extruder") or {}).get("min_extrude_temp")
+            val = float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0 else None
+        except (PrinterError, ValueError, AttributeError):
+            val = None
+        self._extrude_cfg = (now, val)
+        return val
 
     def _script(self, script, what, timeout=15):
         q = urllib.parse.urlencode({"script": script}, quote_via=urllib.parse.quote)
         self._call("POST", "/printer/gcode/script?" + q, what=what, timeout=timeout)
         self.refresh()
+
+    def _long_script(self, script, what, timeout=120):
+        """A script that heats / homes / moves slowly: the request can outlive a normal timeout. A timeout means it is
+        still running on the printer: accepted."""
+        try:
+            self._script(script, what, timeout=timeout)
+        except PrinterError as e:
+            if getattr(e, "status", None) is None and "timed out" in str(e):
+                return
+            raise
+
+    def _jog_script(self, body, what, timeout=30):
+        """Run `body` (G-code lines) between a saved and a restored G-code state, so G91 / M83 never outlive the tap - even
+        when Klipper refuses the move (out of range...), the state is put back before the error is passed on."""
+        script = "SAVE_GCODE_STATE NAME=fabrica\n" + body + "\nRESTORE_GCODE_STATE NAME=fabrica"
+        try:
+            self._long_script(script, what, timeout=timeout)
+        except PrinterError:
+            try:
+                self._script("RESTORE_GCODE_STATE NAME=fabrica\nG90", "restore the G-code state", timeout=8)
+            except Exception:
+                pass
+            raise
 
     def set_light(self, on: bool):
         lights = self._discover()["lights"]
@@ -735,20 +823,50 @@ class MoonrakerPrinter:
             self._script("\n".join(cmds), "set the temperatures")
         return applied
 
-    def _macro(self, key, what):
-        name = self._discover()["macros"].get(key)
-        if not name:
-            raise ControlUnsupported(f"This Klipper has no {key.upper()} macro.")
+    def home_all(self):
+        self._long_script("G28", "home the printer", timeout=180)
+
+    def move_relative(self, axis, mm):
+        axis = str(axis).upper()
+        if axis not in JOG_FEED:
+            raise ControlUnsupported(f"Unknown axis {axis!r}.")
+        self._jog_script(f"G91\nG1 {axis}{float(mm):g} F{JOG_FEED[axis]}", f"move {axis}")
+
+    def extrude(self, mm):
+        self._jog_script(f"M83\nG1 E{float(mm):g} F{EXTRUDE_FEED}", "extrude" if mm > 0 else "retract")
+
+    def _filament(self, which, nozzle, what):
+        """Unload / load: [home if Klipper says it is not homed] -> [M109 to `nozzle`] -> the printer's own macro (given
+        TEMP=, which most filament macros read) or, with no macro, a plain M83 / G1 E sequence. One script, so the order holds
+        and a failing step stops the rest."""
+        info = self._discover()
+        macro = self._macro_for(info, which)
+        lines = []
+        if self.fresh_snapshot().get("homed") is False:
+            lines.append("G28")                    # a macro that moves to an absolute Z ('Must home axis first') needs homed axes
+        if nozzle:
+            lines.append(f"M109 S{int(nozzle)}")
+        if macro:
+            lines.append(f"{macro} TEMP={int(nozzle)}" if nozzle else macro)
+            self._long_script("\n".join(lines), what, timeout=120)
+            return
+        if which == "unload":
+            move = f"G1 E10 F300\nG1 E-{self.unload_mm:g} F1500"        # push a little (forms a tip), then pull it all the way out
+        else:
+            move = f"G1 E{self.load_mm:g} F300"
+        pre = "\n".join(lines)
+        script = (pre + "\n" if pre else "") + "SAVE_GCODE_STATE NAME=fabrica\nM83\n" + move + "\nRESTORE_GCODE_STATE NAME=fabrica"
         try:
-            # a filament macro heats and waits, so the request can outlive a normal timeout
-            self._script(name, what, timeout=120)
-        except PrinterError as e:
-            if getattr(e, "status", None) is None and "timed out" in str(e):
-                return          # still running on the printer: accepted
+            self._long_script(script, what, timeout=120)
+        except PrinterError:
+            try:
+                self._script("RESTORE_GCODE_STATE NAME=fabrica\nG90", "restore the G-code state", timeout=8)
+            except Exception:
+                pass
             raise
 
-    def unload_filament(self): self._macro("unload_filament", "unload the filament")
-    def load_filament(self, tray=None): self._macro("load_filament", "load the filament")
+    def unload_filament(self, nozzle=None): self._filament("unload", nozzle, "unload the filament")
+    def load_filament(self, tray=None, nozzle=None): self._filament("load", nozzle, "load the filament")
 
     def sd_delete(self, filename, origin="local"):
         _require_idle_for_delete(self)       # N-12: re-checked at the moment of the delete

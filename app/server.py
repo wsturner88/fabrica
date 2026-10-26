@@ -308,6 +308,8 @@ def _apply_control_settings(_changed=None):
         # extra named presets from config.yml (bed value only) stay available to agents
         beds = {m: {"bed": SETTINGS.get("printers.preheat_bed_" + m.lower())} for m in ("PLA", "PETG", "ABS")}
         controls.configure({**(CFG.get("preheat_presets") or {}), **beds})
+        # nozzle temperature per material for the Controls sheet (Nozzle buttons, Change filament, Load / Unload)
+        controls.configure_filament_temps({m: SETTINGS.get("printers.filament_temp_" + m.lower()) for m in ("PLA", "PETG", "ABS")})
     except Exception as e:
         print(f"[settings] could not apply the pre-heat settings: {e}", flush=True)
 
@@ -4260,6 +4262,7 @@ async def _api_printer(request: Request):
                 "palette": sorted(PALETTE.keys()), "materials": list(MATERIALS),
                 "kind": prn.kind, "can_connect": hasattr(prn, "connect_serial"),
                 "controls": controls.summary(prn),
+                "jog_flip_y": fleet_store.record_jog_flip_y(STORE.get(prn.name)),       # the Controls jog pad shows Y- (front) on top
                 "detection": _detection_line_ex(prn.name),
                 **_camera_fields(prn)}
     return JSONResponse(await _run(work))
@@ -4277,9 +4280,12 @@ async def _api_controls(request: Request):
 @mcp.custom_route("/api/printer/{name}/control", methods=["POST"])
 @_safe_route
 async def _api_control(request: Request):
-    """{"action": light_on|light_off|preheat|cooldown|unload|load, "preset"?, "nozzle"?, "bed"?, "tray"?}
-    -> 200 {ok, message, ...} | 400 invalid | 404 unknown printer | 409 REFUSED (busy / not ready)
-    | 422 UNSUPPORTED (with reason) | 502 the printer failed."""
+    """{"action": light_on|light_off|preheat|cooldown|heater_off|unload|load|home|move|extrude, "preset"?, "nozzle"?, "bed"?,
+    "tray"?, "material"? (PLA/PETG/ABS: the nozzle temperature of the Settings page), "axis"? (X|Y|Z) + "mm"? (move / extrude, signed,
+    at most 10 per tap), "heater"? (nozzle|bed|both), "confirm"? (home needs true)}
+    -> 200 {ok, message, ...} | 400 invalid | 404 unknown printer | 409 REFUSED (busy / not ready / not homed / too cold)
+    | 422 UNSUPPORTED (with reason) | 502 the printer failed.
+    Needs a control sign-in (the key table in security.py); a view-only caller is refused here as well."""
     try:
         body = await request.json()
     except Exception:
@@ -4287,7 +4293,9 @@ async def _api_control(request: Request):
     if not isinstance(body, dict):
         return JSONResponse({"error": "INVALID: the request body must be a JSON object.",
                              "code": "invalid"}, status_code=400)
-    kw = {k: body.get(k) for k in ("preset", "nozzle", "bed", "tray")}
+    if security.caller_read_only():             # belt and braces: the key table already refuses a read-scope caller
+        return JSONResponse({"error": "REFUSED: a view-only sign-in cannot control printers.", "code": "refused"}, status_code=403)
+    kw = {k: body.get(k) for k in ("preset", "nozzle", "bed", "tray", "axis", "mm", "material", "heater", "confirm")}
     status, payload = await _run(_control, request.path_params["name"], str(body.get("action")), **kw)
     return JSONResponse(payload, status_code=status)
 

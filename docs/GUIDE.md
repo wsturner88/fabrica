@@ -544,6 +544,46 @@ preheat_presets:
 ```
 An agent or script can still pass an explicit `nozzle` temperature to the `preheat` tool; no button does.
 
+### Controls (a pop-up)
+
+Every printer screen has a **Controls** button (next to Light on the phone, the 10-inch touch layout and the desktop; in the action
+strip on the 5-inch wall screen; first under **More** while a print runs). It opens a pop-up card over the dimmed printer screen (a bottom
+sheet on a phone). Left, the **Move** panel; right, **Nozzle**, **Bed** and **Filament**; the header has the printer, its state in words
+(for example `IDLE - HOMED`), the Light and a round close button.
+
+| Part | What it does |
+|---|---|
+| Move | the **jog ring**: tap a wedge to move that way (Y+ back on top, X+ right, Y- front, X- left), **Home** in the middle (asks once); the **1 mm / 10 mm** switch sets the step (10 by default); **Z - Bed** Up / Down; **Filament** Pull / Push 10 mm, only when the nozzle is hot enough (they say "Heat the nozzle to 170 first") |
+| Nozzle | the temperature now, the target in words, a meter, PLA / PETG / ABS (210 / 235 / 245 C by default; Settings > Printers & safety) and **Off** |
+| Bed | the same with the Pre-heat bed presets |
+| Filament | **Change filament...** (guided, below), **Unload**, **Load** (each asks which material first, so the nozzle heats to the right temperature) |
+
+If the Y movement feels the wrong way round on one printer, turn on **Flip Y on the jog pad** (Edit printer > More options): the top wedge
+becomes Y- (front) and sends Y-; saved without a connection test, also while the printer is printing.
+
+Anything the printer cannot do is shown disabled with the reason in words, never hidden. **Change filament** is its own pop-up with a step
+bar (Material, Heat, Home, Unload, Swap, Load; a tick marks the finished ones, the current one has a thick ring and a bold word) and a
+footer with Cancel, Back and the one next action: pick the material (the nozzle heats, the bed is left alone), heating with a live ring,
+Home (only when the printer says it is not homed - otherwise the bar has five steps), Unload, "Swap the spool" with a three-item checklist
+then Load, a Purge button, and "Done - cool down now?". Cancel switches off the heater the flow switched on; **Keep hot** leaves it to the
+auto-off.
+
+| | Klipper | OctoPrint | PrusaLink | Bambu |
+|---|---|---|---|---|
+| Load / unload | your `LOAD_FILAMENT` / `UNLOAD_FILAMENT` (or `M701` / `M702`) macro after `M109`, passing `TEMP=`, and `G28` first if Klipper says it is not homed; with no macro a plain G-code sequence (Edit printer > More options: unload / load length, default 100 / 90 mm) | `M109`, then Prusa `M701` / `M702`; **MMU printers** (name or model says MMU): not offered, "load/unload from the printer's screen" | disabled, with the reason | AMS (existing path); you pick the slot |
+| Home / move / extrude | `G28`, relative `G91` jogs, `M83` + `G1 E` | the same over `/api/printer/command` | disabled | `gcode_line`, **beta** |
+
+**Safety, enforced by the Hub (not only the page).** All of these are refused while the printer is printing, preparing, paused, has a
+print start pending, or is not ready; a view-only sign-in cannot reach them. Moves are relative only, at most 10 mm per tap, one axis,
+and refused unless the printer is homed (Klipper reports it; OctoPrint and Bambu cannot, so a jog needs a Home all from the Hub in the
+last 10 minutes). Extrude is at most 10 mm per tap and refused below the printer's minimum extrusion temperature (Klipper's
+`min_extrude_temp`, else 170 C). Home needs `confirm: true`. Nozzle 300 C / bed 120 C limits as before, and a heater a control switches
+on gets the normal auto-off.
+
+REST additions to `POST /api/printer/<name>/control`: `home` (`"confirm": true`), `move` (`"axis": "X|Y|Z", "mm": -10..10`),
+`extrude` (`"mm"`), `heater_off` (`"heater": "nozzle|bed|both"`), and `"material": "PLA|PETG|ABS"` on `preheat` / `load` / `unload`.
+The jog-pad flip is `jog_flip_y` (true / false) in `values` of `PUT /api/printers/<name>`; `GET /api/printers` and `GET /api/printer/<name>` report it.
+
 REST: `POST /api/printer/<name>/control` with `{"action": "light_on|light_off|preheat|cooldown|unload|load",
 "preset": "PETG"}` (or explicit `nozzle` / `bed`; `tray` for a Bambu load) answers 200, 400 (bad input),
 409 `REFUSED` (busy), 422 `UNSUPPORTED` (with `reason`) or 502 (the printer failed).

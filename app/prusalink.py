@@ -860,8 +860,11 @@ class PrusaLinkPrinter:
 
     def set_light(self, on):               raise ControlUnsupported(self._NO_CONTROLS)
     def set_temps(self, nozzle=None, bed=None): raise ControlUnsupported(self._NO_CONTROLS)
-    def unload_filament(self):             raise ControlUnsupported(self._NO_CONTROLS)
-    def load_filament(self, tray=None):    raise ControlUnsupported(self._NO_CONTROLS)
+    def unload_filament(self, nozzle=None): raise ControlUnsupported(self._NO_CONTROLS)
+    def load_filament(self, tray=None, nozzle=None): raise ControlUnsupported(self._NO_CONTROLS)
+    def home_all(self):                    raise ControlUnsupported(self._NO_CONTROLS)
+    def move_relative(self, axis, mm):     raise ControlUnsupported(self._NO_CONTROLS)
+    def extrude(self, mm):                 raise ControlUnsupported(self._NO_CONTROLS)
 
     def sd_delete(self, filename, origin="local"):
         _require_idle_for_delete(self)       # N-12: re-checked at the moment of the delete (USB stick)

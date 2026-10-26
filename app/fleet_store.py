@@ -201,6 +201,23 @@ def record_detect_area(rec):
         return None
 
 
+def record_jog_flip_y(rec) -> bool:
+    """The Controls jog pad's "Flip Y" setting of a stored record: False (Y+ / back on top, the default) or True (Y- / front on top).
+    Read leniently: a hand-edited printers.json never breaks a page."""
+    v = rec.get("jog_flip_y") if isinstance(rec, dict) else None
+    return v is True or (isinstance(v, str) and v.strip().lower() in ("1", "true", "yes", "on"))
+
+
+def _clean_flip_y(value) -> bool:
+    if isinstance(value, bool) or value is None:
+        return bool(value)
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str) and value.strip().lower() in ("", "0", "1", "true", "false", "yes", "no", "on", "off"):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    raise FleetError("'Flip Y on the jog pad' must be on or off.")
+
+
 def _clean_detect_area(value):
     try:
         return framefix.clean_area(value)
@@ -1173,9 +1190,10 @@ class FleetManager:
                 "address": self._address(rec), "model": rec.get("model", ""),
                 "added_at": rec.get("added_at"), "source": rec.get("source", "dashboard"),
                 "values": {k: v for k, v in plain.items()
-                           if k not in ("name", "type", "added_at", "updated_at", "source", "groups", "detect_area")},
+                           if k not in ("name", "type", "added_at", "updated_at", "source", "groups", "detect_area", "jog_flip_y")},
                 "groups": record_groups(rec),
                 "detect_area": record_detect_area(rec),
+                "jog_flip_y": record_jog_flip_y(rec),
                 "secrets": secrets,
                 "camera_url": camera_mod.redact_url(self.store.secret(rec["name"], "camera_url")),
                 "loaded": rec["name"].lower() in self.printers,
@@ -1416,11 +1434,11 @@ class FleetManager:
         return {"printer": self.public(self.store.get(vals["name"])), "test": result}
 
     def update(self, name, values, skip_test=False, force=False) -> dict:
-        """Edit a printer. `values` may carry "groups" and / or "detect_area" (the spaghetti watch area): such an
-        edit never probes, never disconnects and is allowed while the printer is printing (a label and a
-        picture setting, not connection settings)."""
+        """Edit a printer. `values` may carry "groups", "detect_area" (the spaghetti watch area) and / or "jog_flip_y" (the Controls
+        jog pad shows Y- on top): such an edit never probes, never disconnects and is allowed while the printer is printing (a label
+        and a display setting, not connection settings)."""
         values = dict(values) if isinstance(values, dict) else {}
-        meta = {k: values.pop(k) for k in ("groups", "detect_area") if k in values}
+        meta = {k: values.pop(k) for k in ("groups", "detect_area", "jog_flip_y") if k in values}
         if not meta:
             return self._update_connection(name, values, skip_test, force)
         rec = self.store.get(name)
@@ -1428,6 +1446,7 @@ class FleetManager:
             raise NotFound(f"No printer named '{name}'.")
         groups = normalize_groups(meta["groups"], self.store.group_spellings(skip=rec["name"])) if "groups" in meta else None
         area = _clean_detect_area(meta["detect_area"]) if "detect_area" in meta else None   # bad input: nothing changes
+        flip = _clean_flip_y(meta["jog_flip_y"]) if "jog_flip_y" in meta else None
         if set(values) - {"name"}:
             res = self._update_connection(name, values, skip_test, force)
         else:
@@ -1437,6 +1456,10 @@ class FleetManager:
             res = {**res, "printer": self.public(self.store.get(rec["name"])),
                    "changed": sorted({*res.get("changed", []), "groups"})}
             self.log(f"[fleet] '{rec['name']}': groups now {', '.join(groups) or '(none)'}")
+        if flip is not None and flip != record_jog_flip_y(self.store.get(rec["name"])):
+            self.store.update(rec["name"], {"jog_flip_y": True if flip else None})        # off = the default: nothing stored
+            res = {**res, "printer": self.public(self.store.get(rec["name"])), "changed": sorted({*res.get("changed", []), "jog_flip_y"})}
+            self.log(f"[fleet] '{rec['name']}': Controls jog pad Y " + ("flipped (Y- on top)" if flip else "normal (Y+ on top)"))
         if "detect_area" in meta:
             sub = self.set_detect_area(rec["name"], area)
             if sub["changed"]:

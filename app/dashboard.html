@@ -1948,6 +1948,10 @@ function pmGuideGo(step){
 
 const PM_SECRET_WORD = {bambu:'access code', octoprint:'API key', prusalink:'password (or API key)', moonraker:'API key (only if Moonraker asks for one)'};
 
+// "Flip Y on the jog pad": a display setting of the Controls pop-up (not a connection setting: saved without a test, also while printing)
+const PM_FLIP_FIELD = {name:'jog_flip_y', label:'Flip Y on the jog pad', type:'select', required:false,
+  options:[{value:'', label:'Off - Y+ (back) on top'}, {value:'1', label:'On - Y- (front) on top'}],
+  help:'Controls pop-up: which way the top and bottom wedges of the jog ring move. Off = the top wedge is Y+ (back). On = the top wedge is Y- (front). Turn it on if this printer\'s Y axis feels the wrong way round.'};
 function pmFormBack(){ if(PM.editName) openPrinters(); else if(PM.found) pmDiscover(); else pmAddStart(); }
 
 function pmForm(typeKey, existing, draft){
@@ -1964,11 +1968,11 @@ function pmForm(typeKey, existing, draft){
     ? !!(existing && existing.secrets && existing.secrets[f.name] === 'set') || !!(draft && draft[f.name])
     : String(valOf(f) || '') !== String(f.default || '');
   dwInit(existing, draft);
-  const advOpen = adv.some(advSet) || !!DW.area;
+  const advOpen = adv.some(advSet) || !!DW.area || !!(existing && existing.jog_flip_y);
   const fields = basic.map(f => pmField(f, valOf(f), existing)).join('');
   const moreHtml = adv.length ? `<div class="pm-more">
       <button type="button" class="linkbtn pm-more-btn" id="pm-more-btn" onclick="pmMoreToggle()" aria-expanded="${advOpen}" aria-controls="pm-more-body">${advOpen ? 'Fewer options \u25BE' : 'More options \u25B8'}</button>
-      <div id="pm-more-body" class="pm-fields" ${advOpen ? '' : 'hidden'}>${adv.map(f => pmField(f, valOf(f), existing)).join('')}${dwFieldHtml(existing)}</div></div>` : '';
+      <div id="pm-more-body" class="pm-fields" ${advOpen ? '' : 'hidden'}>${adv.map(f => pmField(f, valOf(f), existing)).join('')}${existing ? pmField(PM_FLIP_FIELD, existing.jog_flip_y ? '1' : '', existing) : ''}${dwFieldHtml(existing)}</div></div>` : '';
   const f = existing ? null : PM.found;
   pgInit(existing, draft);
   const banner = f ? `<div class="pmres"><span class="chip idle">FOUND</span><span>Found on your network: ${pmEsc(f.model || f.label)} at ${pmEsc(f.address)}.
@@ -1991,6 +1995,7 @@ function pmForm(typeKey, existing, draft){
     </form>`);
   if(!existing) pmGuideSeen(typeKey, true);      // open by default the first time only
   pgRender(); dwWire();
+  PM.baseFlip = !!(existing && existing.jog_flip_y);
   PM.base = pmValues(); PM.baseGroups = pmGroupsKey(); PM.baseArea = dwKey(DW.area); PM.testSig = null;
   pmSync();
 }
@@ -2010,6 +2015,8 @@ function pmChanges(){
     if(k === 'name' || cur[k] === (base[k] == null ? '' : base[k])) return;
     all.push(k); if(!PM_NONCONN.includes(k)) conn.push(k);
   });
+  const fl = $('pm-f-jog_flip_y');
+  if(fl && (fl.value === '1') !== !!PM.baseFlip) all.push('jog_flip_y');      // a display setting: never needs a connection test
   const pend = $('pg-in');
   if(pmGroupsKey() !== PM.baseGroups || (pend && pend.value.trim())) all.push('groups');
   if(dwActive() && dwKey(DW.area) !== PM.baseArea) all.push('detect_area');       // the watch area is a detector setting: saves without a printer test
@@ -2087,6 +2094,7 @@ async function pmSave(skip, force){
   if(PM.saving || PM.testing) return;
   pgAdd('', true);                   // a group name typed but not yet added is added now
   const editing = !!PM.editName, values = pmCollect(); values.groups = (PM.groups || []).slice();
+  if(editing && $('pm-f-jog_flip_y')) values.jog_flip_y = $('pm-f-jog_flip_y').value === '1';
   if(editing && dwActive()) values.detect_area = DW.area;          // {x,y,w,h} percent, or null = the whole picture
   PM.draft = values;
   pmRemask();
@@ -3767,6 +3775,8 @@ html:not(.lay-5in) #files { grid-area:files; margin-top:0; min-height:0; }
   html:not(.lay-5in) #printer .tbar #p-frefresh { order:8; flex:1 1 auto; padding:4px 8px; font-size:14px; }
   html:not(.lay-5in) #printer .tbar #p-fcount { display:none; }
   html:not(.lay-5in) #printer .tbar #p-light button { order:5; flex:1 1 0; min-height:52px; font-size:17px; }
+  html:not(.lay-5in) #printer .tbar #p-light button { flex:1 1 auto; font-size:15px; padding:6px 8px; }   /* Controls + Light + Refresh + More share the one row under the title */
+  html:not(.lay-5in) #printer .tbar #p-frefresh, html:not(.lay-5in) #printer .tbar .fmore-tb { font-size:15px; padding:4px 8px; }
   html:not(.lay-5in) #p-controls .ctlrow > button, html:not(.lay-5in) #p-controls .ctlsplit { flex:1 1 calc(50% - 8px); }
 }
 @media (orientation:landscape) and (max-height:500px) and (max-width:932px) {
@@ -3802,6 +3812,172 @@ html:not(.lay-5in) #printer.strip #p-controls { min-width:0; }
 }
 </style>
 <style>
+/* ==== controls sheet ====
+   Controls and Change filament are POP-UP cards over the dimmed printer screen: centred on a 10-inch screen or desktop, a bottom sheet with a grab
+   handle on a phone, a near-full-screen card on the 5-inch screen and landscape phones. Controls = a Move panel (jog ring, step switch, Z and filament
+   columns) beside Nozzle, Bed and Filament cards; Change filament = a step bar, a picture beside the words, and a footer with the one next action.
+   Words on every control and a tick + frame on the chosen one: meaning is never colour alone. Colours come from the page's own variables (so Bridge works too). */
+.btn-ctls { white-space:nowrap; }
+#modal:has(.cs) { background:rgba(5,7,10,.62); }
+#mbody:has(.cs) { --cs-panel:color-mix(in srgb,var(--card2) 55%,var(--card)); --cs-ring:250px; --cs-vw:84px; --cs-vh:62px; --cs-art:210px;
+  width:min(980px,96vw); max-width:none; height:auto; max-height:min(96vh,640px); padding:0; display:flex; flex-direction:column; overflow:hidden;
+  border-radius:22px; border:1px solid var(--line); box-shadow:0 24px 60px rgba(0,0,0,.55); }
+#mbody:has(.cs-wiz) { width:min(860px,96vw); }
+.cs { display:flex; flex-direction:column; flex:1 1 auto; min-height:0; }
+.cs-grab { display:none; flex:none; width:44px; height:5px; border-radius:5px; background:var(--line); margin:8px auto 0; }
+.cs-mh { display:flex; align-items:center; gap:10px; flex:none; padding:10px 16px; border-bottom:1px solid var(--line);
+  background:linear-gradient(color-mix(in srgb,var(--card2) 40%,var(--card)),var(--card)); }
+.cs-mh h2 { margin:0; font-size:19px; font-weight:800; line-height:1.2; min-width:0; overflow-wrap:anywhere; }
+.cs-pill { flex:none; font-size:12px; font-weight:800; letter-spacing:.06em; padding:4px 10px; border-radius:999px; border:1.5px solid var(--dim); color:var(--txt); white-space:nowrap; }
+.cs-sp { flex:1 1 0; min-width:0; }
+.cs-mh button { flex:none; }
+.cs-mh .cs-light { min-height:44px; padding:4px 14px; font-size:15px; border-radius:12px; white-space:nowrap; }
+.cs-x { position:relative; width:44px; height:44px; min-height:44px; padding:0; border-radius:50%; font-size:18px; line-height:1; background:var(--card2); }
+.cs-sr { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; }
+.cs .beta { font-size:10px; font-weight:700; letter-spacing:.06em; border:1px solid var(--dim); border-radius:6px; padding:1px 5px; color:var(--dim); }
+.cs-lbl { display:flex; align-items:center; gap:6px; font-size:12px; font-weight:800; letter-spacing:.08em; text-transform:uppercase; color:var(--dim); }
+/* ---- Controls */
+.cs-ctl { display:grid; grid-template-columns:minmax(0,1.15fr) minmax(0,1fr); gap:14px; padding:14px; flex:1 1 auto; min-height:0; overflow-y:auto; overflow-x:hidden; overscroll-behavior:contain; align-items:start; }
+.cs-left, .cs-temps { display:flex; flex-direction:column; gap:10px; min-width:0; }
+.cs-panel { background:var(--cs-panel); border:1px solid var(--line); border-radius:18px; padding:10px 14px; min-width:0; }
+.cs-mrow { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.cs-seg { display:inline-flex; background:var(--bg); border:1px solid var(--line); border-radius:12px; padding:3px; gap:2px; }
+.cs-seg button { min-height:44px; padding:4px 14px; font-size:14px; border:0; border-radius:9px; background:transparent; color:var(--dim); }
+.cs-seg button.on { background:var(--card2); color:var(--txt); font-weight:800; box-shadow:inset 0 0 0 1.5px var(--txt); }
+.cs-pad { display:flex; align-items:center; justify-content:center; flex-wrap:wrap; gap:10px 18px; margin-top:8px; }
+.cs-ring { flex:none; width:var(--cs-ring); height:var(--cs-ring); display:block; }
+.cs-wg { cursor:pointer; outline:none; }
+.cs-wg .bg { fill:var(--card2); stroke:var(--line); stroke-width:1.5; }
+.cs-wg:active .bg, .cs-home:active .hb { fill:#33404e; }
+.cs-wg:focus-visible .bg, .cs-home:focus-visible .hb { stroke:var(--txt); stroke-width:3; }
+.cs-wg .chev, .cs-home .hi { fill:none; stroke:var(--txt); stroke-linecap:round; stroke-linejoin:round; }
+.cs-wg .chev { stroke-width:3.4; }
+.cs-wg text, .cs-home text { fill:var(--txt); font-weight:800; }
+.cs-wg text.sub { fill:var(--dim); font-weight:700; }
+.cs-wg.dis, .cs-home.dis { opacity:.45; cursor:default; }
+.cs-wg.dis .bg { stroke-dasharray:5 4; }
+.cs-home .hb { fill:var(--card); stroke:var(--txt); stroke-width:2; }
+.cs-col { display:flex; flex-direction:column; align-items:center; gap:6px; }
+.cs-ax { font-size:12px; font-weight:800; letter-spacing:.04em; color:var(--dim); text-transform:uppercase; }
+.cs-vb { width:var(--cs-vw); min-height:var(--cs-vh); padding:2px 3px; border-radius:14px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:1px; font-weight:800; font-size:15px; line-height:1.15; }
+.cs-vb small { font-size:11px; color:var(--dim); font-weight:700; }
+.cs-vb:disabled { border-style:dashed; }
+.cs-lockmsg { font-size:11px; line-height:1.25; color:var(--dim); text-align:center; width:calc(var(--cs-vw) + 12px); overflow-wrap:anywhere; }
+.cs-tc .cs-top { display:flex; align-items:baseline; gap:8px; margin:2px 0 4px; flex-wrap:wrap; }
+.cs-bigt { font-size:30px; font-weight:800; line-height:1.15; }
+.cs-tgt { color:var(--dim); font-weight:700; font-size:15px; }
+.cs-meter { height:8px; background:var(--bg); border:1px solid var(--line); border-radius:9px; overflow:hidden; margin-bottom:8px; }
+.cs-meter > span { display:block; height:100%; }
+.cs-meter i { display:block; height:100%; min-width:3px; border-radius:9px; background:linear-gradient(90deg,#5aa0e6,#e0892b); }
+.cs-chips4 { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:6px; }
+.cs-chip { min-height:46px; padding:5px 2px; border-radius:11px; font-size:14px; line-height:1.15; text-align:center; overflow-wrap:anywhere; }
+.cs-chip span { display:block; font-size:11px; color:var(--dim); font-weight:700; }
+.cs-chip.on, .cs-chips > button.on { background:var(--card2); box-shadow:inset 0 0 0 2px var(--txt); font-weight:800; }
+.cs-fil { display:flex; align-items:center; gap:12px; margin-top:8px; }
+.cs-spool { flex:none; width:64px; height:64px; }
+.cs-fbtns { flex:1 1 0; min-width:0; display:flex; flex-direction:column; gap:6px; }
+.cs-fbtns > button { min-height:44px; padding:4px 8px; font-size:15px; line-height:1.1; border-radius:12px; }
+.cs-fbtns .primary { font-size:16px; font-weight:800; padding:8px; min-height:48px; }
+.cs-two { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
+.cs-lock { flex:none; border-left:5px solid var(--amber); padding:2px 10px; font-size:14px; line-height:1.3; overflow-wrap:anywhere; }
+.cs-msg { flex:none; font-size:14px; line-height:1.3; padding:2px 0; overflow-wrap:anywhere; }
+.cs-note { flex:none; font-size:12px; line-height:1.3; color:var(--dim); overflow-wrap:anywhere; }
+.cs-confirm { margin-top:8px; display:flex; flex-direction:column; gap:8px; }
+.cs-confirm p { font-size:16px; line-height:1.35; }
+.cs-confirm button { min-height:48px; }
+/* ---- Change filament / Load / Unload */
+.cs-steps { display:flex; justify-content:space-between; padding:14px 22px 6px; position:relative; flex:none; }
+.cs-steps::before { content:""; position:absolute; left:calc(22px + (100% - 44px) / var(--n,6) / 2); right:calc(22px + (100% - 44px) / var(--n,6) / 2); top:33px; height:3px; background:var(--line); }
+.cs-st { position:relative; flex:1 1 0; min-width:0; display:flex; flex-direction:column; align-items:center; gap:5px; font-size:12px; font-weight:700; color:var(--dim); text-align:center; }
+.cs-st i { width:40px; height:40px; border-radius:50%; background:var(--cs-panel); border:2px solid var(--line); display:grid; place-items:center; font-style:normal; font-size:17px; }
+.cs-st.done i { background:var(--card2); border-color:var(--dim); color:var(--txt); font-weight:800; }
+.cs-st.now { color:var(--txt); font-weight:800; }
+.cs-st.now i { border:3px solid var(--txt); background:var(--card2); box-shadow:0 0 0 5px rgba(236,238,241,.1); }
+.cs-wiz .cs-msg { padding:4px 22px 0; }
+.cs-wb { display:grid; grid-template-columns:minmax(0,var(--cs-art)) minmax(0,1fr); gap:22px; align-items:center; padding:10px 28px 18px; flex:1 1 auto; min-height:0; overflow-y:auto; overflow-x:hidden; overscroll-behavior:contain; }
+.cs-art { display:flex; align-items:center; justify-content:center; min-width:0; }
+.cs-art svg { width:100%; max-width:var(--cs-art); height:auto; display:block; }
+.cs-art .sf { fill:var(--card2); } .cs-art .sb { fill:var(--bg); } .cs-art .ss { stroke:var(--dim); } .cs-art .st { stroke:var(--txt); } .cs-art .fn { fill:none; } .cs-art .ft { fill:var(--txt); } .cs-art .fd { fill:var(--dim); }
+.cs-art .track { stroke:var(--card2); } .cs-art text { fill:var(--txt); font-weight:800; } .cs-art text.dim { fill:var(--dim); font-weight:700; }
+.cs-art > span { display:block; width:100%; }
+.cs-art .cs-chips { width:100%; grid-template-columns:minmax(0,1fr); }
+.cs-wt { min-width:0; }
+.cs-wt h3 { font-size:24px; font-weight:800; line-height:1.2; margin:0 0 8px; overflow-wrap:anywhere; }
+.cs-wt p { color:var(--dim); font-size:15px; line-height:1.4; margin:0 0 12px; overflow-wrap:anywhere; }
+.cs-facts { display:flex; flex-wrap:wrap; gap:8px; }
+.cs-fact { background:var(--cs-panel); border:1px solid var(--line); border-radius:10px; padding:7px 10px; font-size:13px; font-weight:700; }
+.cs-fact span:first-child { color:var(--dim); font-weight:600; }
+.cs-list { list-style:none; margin:4px 0 0; padding:0; display:flex; flex-direction:column; gap:8px; }
+.cs-list li { display:flex; gap:10px; align-items:center; background:var(--cs-panel); border:1px solid var(--line); border-radius:12px; padding:9px 11px; font-size:15px; line-height:1.25; }
+.cs-list b { flex:none; width:26px; height:26px; border-radius:50%; background:var(--card2); border:1.5px solid var(--dim); display:grid; place-items:center; font-size:13px; }
+.cs-chips { display:grid; grid-template-columns:repeat(auto-fit,minmax(104px,1fr)); gap:8px; }
+.cs-chips > button { min-height:56px; font-size:18px; padding:6px 8px; line-height:1.15; }
+.cs-chips > button small, .cs-slot small { display:block; font-size:12px; font-weight:600; color:var(--dim); line-height:1.1; }
+.cs-wb .cs-chips { margin-top:4px; }
+.cs-wf { display:flex; align-items:center; gap:10px; flex:none; padding:12px 16px; border-top:1px solid var(--line); background:color-mix(in srgb,var(--bg) 40%,var(--card)); }
+.cs-wf button { min-height:52px; font-size:16px; font-weight:800; padding:8px 18px; line-height:1.15; border-radius:13px; }
+.cs-ghost { background:transparent; border:1.5px solid var(--line); }
+.cs-stop { border-color:var(--bad); }
+.cs-grow { flex:1 1 0; min-width:0; }
+.cs-wf .primary { padding:8px 26px; }
+.cs-wf .wait { opacity:.55; }
+@media (max-width:600px) {
+  #modal:has(.cs) { align-items:flex-end; justify-content:center; background:rgba(5,7,10,.62); }
+  #mbody:has(.cs) { --cs-ring:178px; --cs-vw:76px; --cs-vh:46px; --cs-art:130px; width:100%; max-width:none; height:auto; max-height:calc(100dvh - 10px); border:0; border-top:1px solid var(--line);
+    border-radius:24px 24px 0 0; padding:0 0 var(--sab,0px); }
+  .cs-grab { display:block; }
+  .cs-mh { padding:8px calc(12px + var(--sar,0px)) 8px calc(12px + var(--sal,0px)); gap:8px; }
+  .cs-mh h2 { font-size:17px; }
+  .cs-pill .hm { display:none; }
+  .cs-mh .cs-light { padding:4px 10px; font-size:14px; }
+  .cs-ctl { grid-template-columns:minmax(0,1fr); gap:8px; padding:8px 12px; }
+  .cs-panel { padding:8px 12px; }
+  .cs-pad { margin-top:4px; gap:6px 14px; }
+  .cs-tc { display:grid; grid-template-columns:auto minmax(0,1fr); column-gap:10px; align-items:center; }
+  .cs-tc > .cs-lbl { grid-column:1; } .cs-tc > .cs-top { grid-column:2; margin:0; justify-content:flex-end; } .cs-tc > .cs-meter, .cs-tc > .cs-chips4 { grid-column:1 / -1; }
+  .cs-bigt { font-size:26px; line-height:1.1; } .cs-meter { margin:4px 0 6px; }
+  .cs-chip { min-height:44px; padding:3px 2px; } .cs-fil { margin-top:4px; } .cs-fbtns .primary { min-height:44px; }
+  .cs-spool { width:56px; height:56px; }
+  .cs-left { display:contents; }
+  .cs-left > .cs-move { order:1; } .cs-temps { order:2; } .cs-left > .cs-note { order:3; } .cs-left > .cs-lock, .cs-left > .cs-msg { order:0; }
+  .cs-ecol { flex:1 1 100%; display:grid; grid-template-columns:1fr 1fr; gap:6px 8px; justify-items:stretch; }
+  .cs-ecol .cs-ax, .cs-ecol .cs-lockmsg { grid-column:1 / -1; text-align:center; width:auto; }
+  .cs-ecol .cs-vb { width:auto; min-height:46px; }
+  .cs-ecol { gap:4px 8px; }
+  .cs-wb { grid-template-columns:minmax(0,1fr); gap:12px; padding:8px 16px 14px; }
+  .cs-wt h3 { font-size:21px; }
+  .cs-steps { padding:10px 8px 4px; }
+  .cs-steps::before { left:calc(8px + (100% - 16px) / var(--n,6) / 2); right:calc(8px + (100% - 16px) / var(--n,6) / 2); top:29px; }
+  .cs-st { font-size:11px; }
+  .cs-st i { width:36px; height:36px; font-size:15px; }
+  .cs-wf { flex-wrap:wrap; padding:10px 12px; gap:8px; }
+  .cs-wf .primary { flex:1 1 100%; order:-1; padding:8px 12px; }
+  .cs-wf .cs-grow { display:none; }
+  .cs-wf button:not(.primary) { flex:1 1 0; padding:8px 10px; }
+  .cs-chips { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .cs-art .cs-chips { grid-template-columns:repeat(3,minmax(0,1fr)); }
+}
+/* the 5-inch screen and landscape phones: the card is nearly the whole screen and every row is kept as short as it can be */
+@media (orientation:landscape) and (max-height:500px) and (max-width:932px) {
+  #modal:has(.cs) { align-items:center; justify-content:center; }
+  #mbody:has(.cs) { --cs-ring:184px; --cs-vw:74px; --cs-vh:48px; --cs-art:150px; width:calc(100vw - 16px); max-width:none; max-height:calc(100vh - 12px); border-radius:18px; }
+  .cs-mh { padding:4px 12px; gap:8px; } .cs-mh h2 { font-size:17px; } .cs-pill { font-size:11px; padding:3px 8px; }
+  .cs-ctl { gap:8px; padding:8px 10px; } .cs-left, .cs-temps { gap:6px; }
+  .cs-panel { padding:6px 10px; border-radius:14px; }
+  .cs-pad { margin-top:4px; gap:6px 10px; }
+  .cs-tc .cs-top { margin:0 0 2px; } .cs-bigt { font-size:26px; line-height:1.1; } .cs-meter { margin-bottom:5px; }
+  .cs-chip { min-height:44px; padding:3px 2px; } .cs-fil { margin-top:4px; gap:10px; } .cs-spool { width:52px; height:52px; }
+  .cs-fbtns { gap:4px; } .cs-fbtns > button { min-height:44px; padding:2px 6px; } .cs-fbtns .primary { min-height:44px; font-size:15px; padding:4px; }
+  .cs-lock, .cs-msg { font-size:13px; line-height:1.2; }
+  .cs-steps { padding:6px 14px 2px; } .cs-steps::before { left:calc(14px + (100% - 28px) / var(--n,6) / 2); right:calc(14px + (100% - 28px) / var(--n,6) / 2); top:22px; }
+  .cs-st { font-size:11px; gap:2px; } .cs-st i { width:32px; height:32px; font-size:14px; }
+  .cs-wb { gap:16px; padding:6px 20px 8px; } .cs-wt h3 { font-size:20px; margin-bottom:4px; } .cs-wt p { font-size:14px; line-height:1.3; margin-bottom:8px; }
+  .cs-list { gap:5px; } .cs-list li { padding:5px 9px; font-size:14px; }
+  .cs-chips > button { min-height:48px; font-size:16px; padding:4px 6px; }
+  .cs-wf { padding:8px 12px; } .cs-wf button { min-height:48px; padding:6px 14px; font-size:15px; } .cs-wf .primary { padding:6px 18px; }
+  .cs-msg { padding:0; } .cs-wiz .cs-msg { padding:2px 20px 0; }
+}
+
 /* ==== 5-inch wall screen: /dashboard?layout=5in (800x480 landscape, capacitive touch) ====
    Opt-in only (see l5Parse at the top): every rule is scoped under html.lay-5in, so the 1024x600 wall kiosk, desktop and phone layouts are
    untouched. Default look = "Quiet Grid"; ?layout=5in&theme=bridge adds html.th-bridge = "Bridge" (same DOM, re-skinned by the rules at the end).
@@ -6420,6 +6596,7 @@ const L5_SYMBOLS = '<svg width="0" height="0" style="position:absolute" aria-hid
   '<symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" stroke-width="2.5"/></symbol>' +
   '<symbol id="i-bulb" viewBox="0 0 24 24"><path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-4 10.5c.7.6 1 1.3 1 2.5h6c0-1.2.3-1.9 1-2.5A6 6 0 0 0 12 3z"/></symbol>' +
   '<symbol id="i-flame" viewBox="0 0 24 24"><path d="M12 3c1 4 5 5 5 10a5 5 0 0 1-10 0c0-2 1-3 2-4 0 2 1 3 2 3 0-3-1-6 1-9z"/></symbol>' +
+  '<symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 6h8M16 6h4M4 12h3M11 12h9M4 18h10M18 18h2M14 4v4M7 10v4M16 16v4"/></symbol>' +
   '<symbol id="i-snow" viewBox="0 0 24 24"><path d="M12 2v20M2 12h20M5 5l14 14M19 5L5 19"/></symbol></svg>';
 const FR5 = '<div class="fr5" aria-hidden="true"><i class="elb"></i><b class="elt" data-fr="elbow"></b><i class="bara"></i><b class="lab" data-fr="lab"></b><i class="rfill"></i><i class="elbb"></i><i class="bbl"></i><i class="bbr"></i></div>';
 function filesOpen(){
@@ -7359,7 +7536,18 @@ const BUSY_STATES = ['RUNNING', 'PREPARE', 'PAUSE'];
 function ctlRender(d){
   const c = d.controls || {}, det = c.detail || {}, acts = c.actions || [], box = $('p-controls');
   CTL.d = d;
-  if(!acts.length && !L5){ box.hidden = true; CTL.sig = ''; CTL.deadline = null; $('p-light').innerHTML = ''; CTL.rare = []; return; }
+  // the Controls sheet button: in the toolbar next to Light (every layout but the 5-inch), in the 5-inch action strip, and always first under More (also while printing)
+  const csHot = BUSY_STATES.includes((d.snapshot || {}).state);
+  const csLab = L5 ? IC('sliders') + 'Controls' : 'Controls';        // the toolbar row has no room to spare: the word alone (the emoji sits on the More entry and the sheet)
+  const ctlsBtn = '<button data-ctl class="btn-ctls" onclick="csOpen()" title="Filament, nozzle and bed temperature, move, extrude and light in one sheet">' + csLab + '</button>';
+  const ctlsMore = '<button data-ctl class="btn-ctls" onclick="' + (L5 ? 'pmoreClose();' : 'closeModal();') + 'csOpen()">' + '<span aria-hidden="true">\ud83c\udf9b\ufe0f</span> Controls</button>';
+  const csPhone = !L5 && PHONE_MQ.matches;       // phone: next to Light in the toolbar; 10-inch / desktop: in the control strip (the toolbar row is full there); 5-inch: its action strip
+  if(!acts.length && !L5){
+    CTL.sig = ''; CTL.deadline = null; CTL.rare = [ctlsMore];
+    $('p-light').innerHTML = (csHot || !csPhone) ? '' : ctlsBtn;
+    $('p-ctl-btns').innerHTML = (csHot || csPhone) ? '' : ctlsBtn; box.hidden = csHot || csPhone;
+    if(CS.open) csRender(); return;
+  }
   box.hidden = false;
   const s = d.snapshot || {}, allowed = new Set(c.allowed_now || []);
   const busy = BUSY_STATES.includes(s.state);
@@ -7372,7 +7560,7 @@ function ctlRender(d){
     const w = why(a);
     return btn(label + beta(entry) + (w ? ' <small>(' + w.word + ')</small>' : ''), on, !!w, w ? w.full : '', cls);
   };
-  const b = [], rare = [];
+  const b = [], rare = [ctlsMore];
   if(acts.includes('light_on')){
     const L = det.light || {}, st = c.light;
     if(st === 'on' || st === 'off') b.push(btn(ic5('bulb') + 'Light: ' + st.toUpperCase() + beta(L), "ctlDo('" + (st === 'on' ? 'light_off' : 'light_on') + "')", false, 'Tap to turn the light ' + (st === 'on' ? 'off' : 'on'), 'btn-light lt-' + st));
@@ -7403,7 +7591,7 @@ function ctlRender(d){
   let strip = b, lights = [];
   CTL.rare = rare;
   if(!L5){          // the Light button goes into the toolbar row; Pre-heat / Cool down stay in the strip
-    lights = b.filter(x => x.indexOf('btn-light') >= 0); strip = b.filter(x => x.indexOf('btn-light') < 0);
+    lights = (busy || !csPhone ? [] : [ctlsBtn]).concat(b.filter(x => x.indexOf('btn-light') >= 0)); strip = b.filter(x => x.indexOf('btn-light') < 0).concat(busy || csPhone ? [] : [ctlsBtn]);
   }
   if(L5){   // the 5-inch action strip: Pause/Resume . Light . Cancel while printing; Pre-heat . Cool down . Light when idle. Files and More are fixed buttons after it.
     const st = s.state, up = !!s.connected && st !== 'DISCONNECTED' && st !== 'UNKNOWN';
@@ -7412,7 +7600,7 @@ function ctlRender(d){
     if(st === 'PAUSE') lead.push(btn(ic5('play') + 'Resume', "act('resume')"));
     if(connectable(s, d.can_connect)) lead.push('<button class="primary" onclick="doConnect()">Connect</button>');
     if(busy) tail.push('<button class="danger" onclick="askCancel()">' + IC('x') + 'Cancel&hellip;</button>');
-    strip = lead.concat(b.filter(x => x.indexOf('btn-light') < 0), b.filter(x => x.indexOf('btn-light') >= 0), tail);
+    strip = lead.concat(b.filter(x => x.indexOf('btn-light') < 0), b.filter(x => x.indexOf('btn-light') >= 0), busy ? [] : [ctlsBtn], tail);
   }
   let msg = '';
   if(CTL.msg){
@@ -7429,6 +7617,7 @@ function ctlRender(d){
     $('p-ctl-msg').innerHTML = msg;
   }
   ctlTick();
+  if(CS.open) csRender();
 }
 
 // once a second: the countdown text, and let an old result message fade out
@@ -7477,7 +7666,7 @@ function ctlPreheat(){
 function ctlUnloadAsk(){
   const un = ((CTL.d && CTL.d.controls.detail) || {}).unload || {};
   $('mbody').innerHTML = `<h2>Unload the filament on ${pmEsc(CUR)}?</h2>
-    <div class="note" style="font-size:17px;color:var(--txt)">The printer heats the nozzle and pulls the filament back out. Keep hands and tools clear of the print head, and make sure nothing is printing.</div>
+    <div class="note" style="font-size:17px;color:var(--txt)">The printer heats the nozzle and pulls the filament back out. The nozzle heats to PLA's temperature (or what it is already set to); for another material use Controls &gt; Filament. Keep hands and tools clear of the print head, and make sure nothing is printing.</div>
     ${un.note ? '<div class="note">' + pmEsc(un.note) + '</div>' : ''}${un.verified === false ? '<div class="note">(beta) Not yet confirmed on every printer of this type &mdash; watch it the first time.</div>' : ''}
     <div class="row" style="margin-top:12px"><button class="big grow" onclick="closeModal()">Cancel</button>
       <button class="big grow danger" onclick="ctlDo('unload')">Unload filament</button></div>`;
@@ -7500,14 +7689,369 @@ function ctlLoadConfirm(slot){
   if(slot != null && !Number.isInteger(slot)) return;      // the slot number goes into the command: integers only
   const ld = ((CTL.d && CTL.d.controls.detail) || {}).load || {};
   $('mbody').innerHTML = `<h2>Load filament${slot ? ' from slot ' + slot : ''} on ${pmEsc(CUR)}?</h2>
-    <div class="note" style="font-size:17px;color:var(--txt)">The printer heats the nozzle and pushes the filament in. Keep hands and tools clear of the print head, and make sure nothing is printing.</div>
+    <div class="note" style="font-size:17px;color:var(--txt)">The printer heats the nozzle and pushes the filament in. The nozzle heats to PLA's temperature (or what it is already set to); for another material use Controls &gt; Filament. Keep hands and tools clear of the print head, and make sure nothing is printing.</div>
     ${ld.note ? '<div class="note">' + pmEsc(ld.note) + '</div>' : ''}${ld.verified === false ? '<div class="note">(beta) Not yet confirmed on every printer of this type &mdash; watch it the first time.</div>' : ''}
     <div class="row" style="margin-top:12px"><button class="big grow" onclick="closeModal()">Cancel</button>
       <button class="big grow danger" onclick="ctlDo('load',${slot ? '{tray:' + slot + '}' : 'null'})">Load filament</button></div>`;
   $('modal').classList.add('on');
 }
 
-function closeModal(){ $('modal').classList.remove('on'); clearTimeout(BK.timer); if(typeof cfStop==='function') cfStop(); }
+// ==== controls sheet ====
+// "Controls" on every printer screen: ONE sheet for what a person does standing at the printer - change filament, heat the nozzle or the bed,
+// move the head, push or pull a little filament, the light. Built from /api/printer/<name> -> controls.detail: the Hub says what this printer
+// can do, what is allowed right now and why not. Every limit (busy, not homed, too cold, 10 mm per tap, max temperatures) is ALSO enforced by the Hub.
+// Meaning is words (+ a tick on the chosen button), never colour alone. All data-act / data-* - no handler strings.
+const CS = { open:false, view:'main', step:1, material:null, tgt:null, heated:false, busy:false, msg:null, confirmHome:false, fil:null, sig:'', timer:null, jog:10, needHome:false, hs:[] };
+const CS_STEPS = 6;
+const csDet = () => ((CTL.d && CTL.d.controls && CTL.d.controls.detail) || {});
+const csSnap = () => ((CTL.d && CTL.d.snapshot) || {});
+const csFmt = c => (c == null || !isFinite(Number(c))) ? '—' : tnum(c) + tdeg();
+const csLive = (k, v) => '<span data-live="' + k + '">' + esc(v) + '</span>';          // text that changes with every poll: updated in place, so a tap is never swallowed
+const csStrip = s => String(s || '').replace(/^(FAILED|REFUSED|UNSUPPORTED|INVALID): /, '');
+const csSup = k => { const e = csDet()[k]; return !!(e && e.supported); };
+const csCan = k => { const e = csDet()[k]; return !!(e && e.supported && e.allowed_now); };
+
+function csOpen(opts){
+  if(document.body.classList.contains('viewonly')) return;            // a view-only sign-in never gets here (and the Hub refuses it too)
+  pmoreClose();
+  Object.assign(CS, {open:true, view:'main', step:1, material:null, tgt:null, heated:false, busy:false, msg:null, confirmHome:false, fil:null, sig:'', needHome:false, hs:[]}, opts || {});     // CS.jog (1 or 10 mm) is kept between openings
+  $('mbody').innerHTML = '<div class="cs"></div>';
+  $('modal').classList.add('on');
+  csRender();
+  clearInterval(CS.timer); CS.timer = setInterval(csPoll, 1500);
+  pview();
+}
+function csPoll(){ if(!CS.open){ csClosed(); return; } if(!CS.busy && !document.hidden) pview(); }
+function csClosed(){ CS.open = false; clearInterval(CS.timer); CS.timer = null; CS.sig = ''; }
+
+function csBtn(lab, act, data, dis, cls, extra){
+  const a = Object.keys(data || {}).map(k => ' data-' + k + '="' + esc(data[k]) + '"').join('');
+  return '<button type="button" data-act="' + act + '"' + a + (cls ? ' class="' + cls + '"' : '') + (dis ? ' disabled' : '') + (extra || '') + '>' + lab + '</button>';
+}
+const csFlip = () => !!(CTL.d && CTL.d.jog_flip_y);                 // "Flip Y on the jog pad" (Edit printer > More options): the top wedge is Y- (front)
+const csBetaTag = on => on ? ' <span class="beta">BETA</span>' : '';
+const csClamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const csHeadBtn = (act, word, dis) => '<button type="button" class="cs-x" data-act="' + act + '"' + (dis ? ' disabled' : '') + ' title="' + word + '"><span aria-hidden="true">&#10005;</span><span class="cs-sr">' + word + '</span></button>';
+function csHead(title, pill, extra, xAct, xWord, xDis){
+  return '<div class="cs-mh"><h2>' + title + '</h2><span class="cs-pill">' + pill + '</span><span class="cs-sp"></span>' + (extra || '') + csHeadBtn(xAct, xWord, xDis) + '</div>';
+}
+
+// ---- the jog ring: four wedges (Y+/Y- top and bottom, X- / X+ left and right) around the Home button. Geometry copied from the approved mock-up.
+function csRing(flip, ok, mm, homeOk){
+  const size = 250, c = size / 2, R = c - 4, r = size * 0.2, g = 3, n1 = v => +v.toFixed(1);
+  const rad = d => (d - 90) * Math.PI / 180, p = (rr, d) => [c + rr * Math.cos(rad(d)), c + rr * Math.sin(rad(d))];
+  const seg = (a0, ax, sign, lbl, sub) => {
+    const [x1, y1] = p(R, a0 - 45 + g), [x2, y2] = p(R, a0 + 45 - g), [x3, y3] = p(r + 6, a0 + 45 - g), [x4, y4] = p(r + 6, a0 - 45 + g), [ax1, ay1] = p(R - 16, a0);
+    const lx = c + R * 0.62 * Math.cos(rad(a0)), ly = c + R * 0.62 * Math.sin(rad(a0));
+    const say = 'Move ' + ax + (sign < 0 ? ' minus ' : ' plus ') + mm + ' millimetres (' + sub + ')';
+    return '<g class="cs-wg' + (ok ? '' : ' dis') + '" role="button" tabindex="' + (ok ? 0 : -1) + '" aria-disabled="' + (ok ? 'false' : 'true') + '" data-act="csJog" data-axis="' + ax + '" data-sign="' + sign + '" aria-label="' + say + '">' +
+      '<path class="bg" d="M' + [x1, y1].map(n1) + ' A' + R + ',' + R + ' 0 0 1 ' + [x2, y2].map(n1) + ' L' + [x3, y3].map(n1) + ' A' + (r + 6) + ',' + (r + 6) + ' 0 0 0 ' + [x4, y4].map(n1) + ' Z"/>' +
+      '<g transform="translate(' + n1(ax1) + ',' + n1(ay1) + ') rotate(' + a0 + ')"><path class="chev" d="M-10,5 L0,-5 L10,5"/></g>' +
+      '<text x="' + n1(lx) + '" y="' + n1(ly + 1) + '" text-anchor="middle" font-size="' + n1(size * 0.078) + '">' + lbl + '</text>' +
+      '<text class="sub" x="' + n1(lx) + '" y="' + n1(ly + size * 0.07) + '" text-anchor="middle" font-size="' + n1(size * 0.058) + '">' + sub + '</text></g>';
+  };
+  const top = flip ? seg(0, 'Y', -1, 'Y−', 'front') : seg(0, 'Y', 1, 'Y+', 'back'), bot = flip ? seg(180, 'Y', 1, 'Y+', 'back') : seg(180, 'Y', -1, 'Y−', 'front');
+  return '<svg class="cs-ring" viewBox="0 0 ' + size + ' ' + size + '" role="group" aria-label="Move the print head, ' + mm + ' millimetres per tap">' + top + seg(90, 'X', 1, 'X+', 'right') + bot + seg(270, 'X', -1, 'X−', 'left') +
+    '<g class="cs-home' + (homeOk ? '' : ' dis') + '" role="button" tabindex="' + (homeOk ? 0 : -1) + '" aria-disabled="' + (homeOk ? 'false' : 'true') + '" data-act="csHome" aria-label="Home all axes">' +
+    '<circle class="hb" cx="' + c + '" cy="' + c + '" r="' + r + '"/>' +
+    '<path class="hi" stroke-width="2.6" d="M' + (c - 13) + ',' + (c + 1) + ' L' + c + ',' + (c - 12) + ' L' + (c + 13) + ',' + (c + 1) + ' M' + (c - 9) + ',' + (c - 2) + ' L' + (c - 9) + ',' + (c + 11) + ' L' + (c + 9) + ',' + (c + 11) + ' L' + (c + 9) + ',' + (c - 2) + '"/>' +
+    '<text x="' + c + '" y="' + (c + 26) + '" text-anchor="middle" font-size="' + n1(size * 0.05) + '">HOME</text></g></svg>';
+}
+const CS_SPOOL = '<svg class="cs-spool" viewBox="0 0 64 64" aria-hidden="true"><circle cx="32" cy="32" r="28" style="fill:var(--card2);stroke:var(--dim)" stroke-width="2"/>' +
+  '<circle cx="32" cy="32" r="18" fill="none" style="stroke:var(--txt)" stroke-width="7" stroke-dasharray="3 2"/><circle cx="32" cy="32" r="6" style="fill:var(--bg);stroke:var(--dim)" stroke-width="2"/>' +
+  '<path d="M50,40 C58,46 60,54 62,62" style="stroke:var(--txt)" stroke-width="2.5" fill="none" stroke-linecap="round"/></svg>';
+
+function csMain(){
+  const d = csDet(), s = csSnap(), mo = d.motion || {}, fil = d.filament || {}, temps = fil.temps || {}, presets = (d.preheat && d.preheat.presets) || {};
+  const E = k => d[k] || {supported:false, reason:'Not reported by this printer.'};
+  const notes = [], beta = [];
+  const note = r => { r = String(r || ''); if(r && !notes.includes(r)) notes.push(r); };
+  const bet = (k, nm) => { if(E(k).supported && E(k).verified === false && !beta.includes(nm)) beta.push(nm); };
+  const light = E('light');
+  const lightBtn = light.supported
+    ? csBtn('Light: ' + (light.state === 'on' ? 'ON' : light.state === 'off' ? 'OFF' : 'on / off'), 'csLight', {on: light.state === 'on' ? '1' : '0'}, false, 'cs-light')
+    : csBtn('No light', 'csNone', {}, true, 'cs-light');
+  if(!light.supported) note(light.reason || 'There is no light to control on this printer.');
+  const locked = [E('preheat'), E('cooldown'), E('home')].find(e => e.supported && e.blocked);
+  // ---- filament
+  const chg = E('change_filament');
+  if(!chg.supported) note(chg.reason);
+  if(!E('load').supported) note(E('load').reason);
+  if(!E('unload').supported) note(E('unload').reason);
+  bet('change_filament', 'filament');
+  const cardFil = '<div class="cs-panel"><div class="cs-lbl"><span aria-hidden="true">🧵</span> Filament' + csBetaTag(E('change_filament').verified === false) + '</div><div class="cs-fil">' + CS_SPOOL +
+    '<div class="cs-fbtns">' + csBtn('Change filament…', 'csFlow', {}, !csCan('change_filament'), 'primary') +
+    '<div class="cs-two">' + csBtn('&#11014; Unload', 'csFil', {w:'unload'}, !csCan('unload')) + csBtn('&#11015; Load', 'csFil', {w:'load'}, !csCan('load')) + '</div></div></div></div>';
+  // ---- nozzle and bed: the big number now, the target in words, a meter, four choices (the chosen one has a tick and a frame)
+  const heat = E('preheat'), nt = Number(s.nozzle_target_c) || 0, bt = Number(s.bed_target_c) || 0;
+  if(!heat.supported) note(heat.reason);
+  bet('preheat', 'heaters');
+  const nozNames = Object.keys(temps), bedNames = Object.keys(presets);
+  const nozOn = m => Math.abs(nt - temps[m]) < 1.5, bedOn = m => Number((presets[m] || {}).bed) > 0 && Math.abs(bt - Number(presets[m].bed)) < 1.5;
+  const tcard = (key, icon, name, now, tgt, ref, chips, offBtn, bta) => {
+    const cur = Number(now), pct = isFinite(cur) ? csClamp(Math.round((tgt > 0 ? cur / tgt : cur / (ref || 1)) * 100), 0, 100) : 0;
+    const lab = name === 'Nozzle' ? nozNames.find(nozOn) : bedNames.find(bedOn);
+    return '<div class="cs-panel cs-tc"><div class="cs-lbl"><span aria-hidden="true">' + icon + '</span> ' + name + csBetaTag(bta) + '</div>' +
+      '<div class="cs-top"><span class="cs-bigt">' + csLive(key, csFmt(now)) + '</span><span class="cs-tgt">' + csLive(key + 'tg', tgt > 0 ? '→ ' + tnum(tgt) + tdeg() + (lab ? ' ' + lab : '') : 'heater off') + '</span></div>' +
+      '<div class="cs-meter" role="progressbar" aria-label="' + name + ' temperature" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + pct + '"><span data-lh="' + key + 'bar"><i style="width:' + pct + '%"></i></span></div>' +
+      '<div class="cs-chips4" role="group" aria-label="' + name + ' temperature">' + chips + offBtn + '</div></div>';
+  };
+  const chip = (on, nm, sub, k, v, dis) => csBtn((on ? '✓ ' : '') + esc(nm) + (sub ? ' <span>' + sub + '</span>' : ''), k === 'off' ? 'csOff' : 'csHeat', k === 'off' ? {h:v} : {k, v}, dis, 'cs-chip' + (on ? ' on' : ''), ' aria-pressed="' + (on ? 'true' : 'false') + '"');
+  const nozChips = nozNames.map(m => chip(nozOn(m), m, tnum(temps[m]) + tdeg(), 'nozzle', m, !csCan('preheat'))).join('');
+  const bedChips = bedNames.map(m => chip(bedOn(m), m, tnum((presets[m] || {}).bed) + tdeg(), 'bed', m, !csCan('preheat'))).join('');
+  const hot = Math.max(0, ...nozNames.map(m => Number(temps[m]) || 0)), hotBed = Math.max(0, ...bedNames.map(m => Number((presets[m] || {}).bed) || 0));
+  const cardNoz = tcard('noz', '🌡️', 'Nozzle', s.nozzle_c, nt, hot, nozChips, chip(nt <= 0, 'Off', '', 'off', 'nozzle', !csCan('heater_off')), heat.verified === false);
+  const cardBed = tcard('bed', '🛏️', 'Bed', s.bed_c, bt, hotBed, bedChips, chip(bt <= 0, 'Off', '', 'off', 'bed', !csCan('heater_off')), heat.verified === false);
+  // ---- move
+  const mv = E('move'), hm = E('home');
+  if(!hm.supported) note(hm.reason);
+  bet('move', 'move'); bet('home', 'move');
+  const mvOk = csCan('move'), step = CS.jog === 1 ? 1 : 10;
+  const ex = E('extrude'), min = Number(mo.min_extrude_c) || 170;
+  if(!ex.supported) note(ex.reason);
+  bet('extrude', 'extrude');
+  const exOk = csCan('extrude'), cold = ex.supported && !exOk && !locked;
+  const zb = (lab, sign) => csBtn(lab + ' <small>Z' + (sign < 0 ? '−' : '+') + ' ' + step + ' mm</small>', 'csJog', {axis:'Z', sign}, !mvOk, 'cs-vb', ' aria-label="Move Z ' + (sign < 0 ? 'minus' : 'plus') + ' ' + step + ' millimetres"');
+  const eb = (lab, sub, mm) => csBtn(lab + ' <small>' + sub + '</small>', 'csExtrude', {mm}, !exOk, 'cs-vb');
+  let pad;
+  if(CS.confirmHome && csCan('home')){
+    pad = '<div class="cs-confirm cs-conf"><p><b>Home all axes?</b> The print head and the bed will move. Keep hands clear.</p><div class="cs-two">' +
+      csBtn('Yes, home all axes', 'csHomeYes', {}, false, 'primary') + csBtn('No', 'csHomeNo', {}, false, '') + '</div></div>';
+  } else {
+    pad = '<div class="cs-pad">' + csRing(csFlip(), mvOk, step, csCan('home')) +
+      '<div class="cs-col"><div class="cs-ax">Z · Bed</div>' + zb('&#9650; Up', 1) + zb('&#9660; Down', -1) + '</div>' +
+      '<div class="cs-col cs-ecol"><div class="cs-ax">Filament</div>' + eb('&#9650; Pull', 'retract 10', -10) + eb('&#9660; Push', 'extrude 10', 10) +
+      (cold ? '<div class="cs-lockmsg">🔒 Heat the nozzle to ' + tnum(min) + tdeg() + ' first</div>' : '') + '</div></div>';
+    if(mv.supported && !mvOk && mv.blocked && !locked) note(mv.blocked);
+  }
+  const cardMove = '<div class="cs-panel cs-move"><div class="cs-mrow"><div class="cs-lbl"><span aria-hidden="true">🕹️</span> Move' + csBetaTag(mv.verified === false || hm.verified === false || ex.verified === false) + '</div>' +
+    '<div class="cs-seg" role="group" aria-label="Distance per tap">' + [1, 10].map(n => csBtn(n + ' mm', 'csStep', {mm:n}, false, step === n ? 'on' : '', ' aria-pressed="' + (step === n ? 'true' : 'false') + '"')).join('') + '</div></div>' + pad + '</div>';
+  const lock = locked ? '<div class="cs-lock" role="status"><b>Locked:</b> ' + esc(String(locked.blocked).replace(/^./, c => c.toUpperCase())) + '</div>' : '';
+  const msg = CS.msg ? '<div class="cs-msg ' + (CS.msg.wait ? 'w' : CS.msg.ok ? 'ok' : 'bad') + '" role="status">' +
+    (CS.msg.wait ? '<b>SENDING&hellip;</b> ' : CS.msg.ok ? '<b>&#10003; DONE</b> ' : '<b>&#10007; FAILED</b> ') + esc(CS.msg.text) + '</div>' : '';
+  const foot = (beta.length ? '<div class="cs-note">beta (not yet tried on this printer): ' + esc(beta.join(', ')) + '. Watch the printer the first time.</div>' : '') +
+    notes.map(n => '<div class="cs-note">' + esc(n) + '</div>').join('');
+  const state = String(s.state || '').toUpperCase() || 'UNKNOWN';
+  const pill = esc(state) + (mv.supported ? ' <span class="hm">&middot; ' + (mo.homed ? 'HOMED' : 'NOT HOMED') + '</span>' : '');
+  return '<div class="cs-grab" aria-hidden="true"></div>' + csHead(esc(CUR) + ' &middot; Controls', pill, lightBtn, 'csClose', 'Close') +
+    '<div class="cs-ctl"><div class="cs-left">' + lock + msg + cardMove + foot + '</div><div class="cs-temps">' + cardNoz + cardBed + cardFil + '</div></div>';
+}
+
+// ---- the picture on the left of a pop-up step: simple, one idea each, drawn in the page's own colours
+const CS_ART = {
+  swap: '<svg viewBox="0 0 210 200" aria-hidden="true"><circle cx="72" cy="100" r="58" class="sf ss" stroke-width="2.5"/><circle cx="72" cy="100" r="38" class="fn st" stroke-width="12" stroke-dasharray="4 3"/>' +
+    '<circle cx="72" cy="100" r="12" class="sb ss" stroke-width="2.5"/><path d="M118,132 C150,150 168,150 186,118" class="fn st" stroke-width="4" stroke-linecap="round"/>' +
+    '<rect x="176" y="56" width="26" height="62" rx="6" class="sf ss" stroke-width="2.5"/><text x="189" y="46" text-anchor="middle" class="dim" font-size="13">HEAD</text></svg>',
+  home: '<svg viewBox="0 0 210 200" aria-hidden="true"><path d="M105,34 L170,92 L150,92 L150,158 L60,158 L60,92 L40,92 Z" class="sf st" stroke-width="4" stroke-linejoin="round"/>' +
+    '<rect x="90" y="110" width="30" height="48" rx="4" class="sb ss" stroke-width="3"/><text x="105" y="188" text-anchor="middle" font-size="18">HOME</text></svg>',
+  head: (dir, word) => '<svg viewBox="0 0 210 200" aria-hidden="true"><rect x="70" y="20" width="70" height="60" rx="10" class="sf ss" stroke-width="3"/><path d="M92,80 L118,80 L105,102 Z" class="sf ss" stroke-width="3" stroke-linejoin="round"/>' +
+    '<text x="105" y="56" text-anchor="middle" class="dim" font-size="14">HEAD</text><path d="M105,' + (dir < 0 ? '190 L105,128 M84,148 L105,126 L126,148' : '112 L105,112 L105,172 M84,152 L105,174 L126,152') + '" class="fn st" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>' +
+    '<text x="170" y="150" text-anchor="middle" font-size="16">' + word + '</text></svg>',
+  done: '<svg viewBox="0 0 210 200" aria-hidden="true"><circle cx="105" cy="96" r="70" class="sf st" stroke-width="5"/><path d="M70,98 L97,125 L142,70" class="fn st" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  heat: (now, tgt) => {
+    const p = csClamp(tgt > 0 && isFinite(now) ? now / tgt : 0, 0, 1), C = 2 * Math.PI * 86;
+    return '<svg viewBox="0 0 210 210" aria-hidden="true"><defs><linearGradient id="csg"><stop offset="0" stop-color="#5aa0e6"/><stop offset="1" stop-color="#e0892b"/></linearGradient></defs>' +
+      '<circle cx="105" cy="105" r="86" class="fn track" stroke-width="16"/><circle cx="105" cy="105" r="86" fill="none" stroke="url(#csg)" stroke-width="16" stroke-linecap="round" stroke-dasharray="' + (+(C * p).toFixed(1)) + ' ' + (+C.toFixed(1)) + '" transform="rotate(-90 105 105)"/>' +
+      '<text x="105" y="104" text-anchor="middle" font-size="46">' + (isFinite(now) ? tnum(now) : '—') + tdeg() + '</text><text x="105" y="134" text-anchor="middle" class="dim" font-size="16">of ' + tnum(tgt) + tdeg() + ' · ' + esc(CS.material || '') + '</text></svg>';
+  },
+};
+
+// one pop-up page: header (title, pill, X), optional step bar, picture + words, footer
+function csWiz(title, pill, xAct, xWord, xDis, bar, msg, art, words, foot){
+  return '<div class="cs-grab" aria-hidden="true"></div>' + csHead(title, pill, '', xAct, xWord, xDis) + bar + msg + '<div class="cs-wb"><div class="cs-art">' + art + '</div><div class="cs-wt">' + words + '</div></div><div class="cs-wf">' + foot + '</div>';
+}
+const csMsgBar = wd => CS.msg ? '<div class="cs-msg ' + (CS.msg.wait ? 'w' : CS.msg.ok ? 'ok' : 'bad') + '" role="status">' + (CS.msg.wait ? '<b>' + wd + '&hellip;</b> ' : CS.msg.ok ? '<b>&#10003; DONE</b> ' : '<b>&#10007; FAILED</b> ') + esc(CS.msg.text) + '</div>' : '';
+const csGrow = '<span class="cs-grow"></span>';
+const csCancelBtn = dis => csBtn('&#10005; Cancel', 'csCancel', {}, dis, 'cs-ghost cs-stop');
+const csBackBtn = dis => csBtn('&#8249; Back', 'csBack', {}, dis, 'cs-ghost');
+const csPri = (lab, act, data, dis, wait) => csBtn(lab, wait ? 'csNone' : act, data, dis, 'primary' + (wait ? ' wait' : ''));
+
+// Load / Unload on their own: which material (the nozzle temperature) first, then one confirm
+function csFilView(){
+  const d = csDet(), fil = d.filament || {}, temps = fil.temps || {}, which = CS.fil && CS.fil.w === 'unload' ? 'unload' : 'load', s = csSnap();
+  const need = !!fil.needs_nozzle_temp, trays = (CTL.d && CTL.d.trays) || [];
+  if(need && !CS.material) CS.material = Object.keys(temps).find(m => Math.abs((Number(s.nozzle_target_c) || 0) - temps[m]) < 1.5) || Object.keys(temps)[0] || null;
+  const chips = need ? '<div class="cs-chips" role="group" aria-label="Material">' + Object.keys(temps).map(m => csBtn((CS.material === m ? '✓ ' : '') + esc(m) + ' ' + tnum(temps[m]) + tdeg(), 'csPick', {m:m}, false,
+    CS.material === m ? 'on' : '', ' aria-pressed="' + (CS.material === m ? 'true' : 'false') + '"')).join('') + '</div>' : '';
+  const slots = (which === 'load' && trays.length) ? '<div class="cs-chips" role="group" aria-label="AMS slot">' + trays.map(t => csBtn('Slot ' + esc(t.slot_1based) + ' <small>' + (t.type ? esc((t.color_name || '') + ' ' + t.type) : 'EMPTY') + '</small>',
+    'csDoFil', {w:'load', tray:t.slot_1based}, !t.type, 'cs-slot')).join('') + '</div>' : '';
+  const verb = which === 'unload' ? 'Unload' : 'Load';
+  const words = '<h3>' + verb + ' filament</h3><p>' + (need ? 'The nozzle heats to the material’s temperature first (it switches off by itself later). ' : 'The printer heats the nozzle itself. ') +
+    'Keep hands and tools clear of the print head.</p>' + chips + slots;
+  const act = slots ? '' : csPri((which === 'unload' ? '&#11014; ' : '&#11015; ') + verb, 'csDoFil', {w:which}, CS.busy || !csCan(which));
+  return csWiz(verb + ' filament &middot; ' + esc(CUR), verb.toUpperCase(), 'csBack', 'Back', CS.busy, '', csMsgBar('SENDING'), CS_ART.head(which === 'unload' ? -1 : 1, verb.toUpperCase()), words, csBackBtn(CS.busy) + csGrow + act);
+}
+
+// ---- the guided filament change: 1 material > 2 heat > 3 home (only if needed) > 4 unload > 5 swap + load > 6 purge > done
+const CS_NODES = [['mat', 1, '🧵', 'Material'], ['heat', 2, '🌡️', 'Heat'], ['home', 3, '🏠', 'Home'], ['unload', 4, '⬆', 'Unload'], ['swap', 5, '🔄', 'Swap'], ['load', 6, '⬇', 'Load']];
+function csNodes(){            // the step bar: Home is left out when this printer does not need homing (and the numbering stays honest)
+  const st = CS.step, withHome = !!CS.needHome || st === 3;
+  const nodes = CS_NODES.filter(n => withHome || n[0] !== 'home');
+  const cur = st >= 7 ? nodes.length : nodes.findIndex(n => n[0] === (st === 1 ? 'mat' : st === 2 ? 'heat' : st === 3 ? 'home' : st === 4 ? 'unload' : st === 5 ? (CS.busy ? 'load' : 'swap') : 'load'));
+  return {nodes, cur, n: nodes.length};
+}
+function csBar(){
+  const {nodes, cur, n} = csNodes();
+  return '<div class="cs-steps" style="--n:' + n + '" role="list" aria-label="Steps">' + nodes.map((nd, i) => {
+    const done = i < cur, now = i === cur;
+    return '<div class="cs-st ' + (done ? 'done' : now ? 'now' : 'todo') + '" role="listitem"' + (now ? ' aria-current="step"' : '') + '><i aria-hidden="true">' + (done ? '✓' : nd[2]) + '</i><span>' + nd[3] + (done ? '<span class="cs-sr"> (done)</span>' : now ? '<span class="cs-sr"> (now)</span>' : '') + '</span></div>';
+  }).join('') + '</div>';
+}
+function csHeatLeft(cur, t){        // seconds left to the target, from how fast the nozzle has been warming over the last half minute (null = not known yet)
+  const h = CS.hs || [], last = h[h.length - 1], first = h.find(x => last && last.t - x.t <= 30000);
+  if(!last || !first || last.t - first.t < 4000 || !(t > 0) || !isFinite(cur)) return null;
+  const rate = (last.c - first.c) / ((last.t - first.t) / 1000);
+  return rate > 0.05 ? Math.max(0, (t - 3 - cur) / rate) : null;
+}
+function csFlowView(){
+  const d = csDet(), s = csSnap(), fil = d.filament || {}, temps = fil.temps || {}, st = CS.step, trays = (CTL.d && CTL.d.trays) || [];
+  const {nodes, cur, n} = csNodes();
+  const pill = st >= 7 ? 'DONE' : 'STEP ' + (cur + 1) + ' OF ' + n;
+  const title = 'Change filament &middot; ' + esc(CUR), bar = csBar(), msg = csMsgBar('WORKING');
+  const mat = esc(CS.material || ''), page = (art, words, foot) => csWiz(title, '<span class="cs-step">' + pill + '</span>', st >= 7 ? 'csClose' : 'csCancel', st >= 7 ? 'Close' : 'Cancel', st < 7 && CS.busy, bar, msg, art, words, foot);
+  const tail = (dis, primary) => csCancelBtn(dis) + csBackBtn(dis) + csGrow + primary;
+  if(st === 1){
+    const chips = '<div class="cs-chips" role="group" aria-label="Material">' + Object.keys(temps).map(m => csBtn(esc(m) + ' <small>' + tnum(temps[m]) + tdeg() + '</small>', 'csMat', {m:m}, CS.busy, 'cs-slot')).join('') + '</div>';
+    return page(chips, '<h3>Pick the new material</h3><p>Which filament is going in? The nozzle heats to its temperature; the bed is left alone.</p>', tail(CS.busy, ''));
+  }
+  if(st === 2){
+    const t = Number(CS.tgt) || 0, now = Number(s.nozzle_c);
+    const off = (Number(s.nozzle_target_c) || 0) <= 0 && !CS.busy;
+    const left = csHeatLeft(now, t);
+    const art = '<span data-lh="heatring">' + CS_ART.heat(now, t) + '</span>';
+    const words = '<h3>' + (off ? 'The nozzle heater is off' : 'Heating the nozzle') + '</h3><p>' + (off ? 'Tap Heat again to start heating.' : 'The old filament has to be soft before it can come out. The next step starts by itself when the nozzle is hot.') + '</p>' +
+      '<div class="cs-facts"><div class="cs-fact"><span>Material</span> ' + mat + '</div><div class="cs-fact"><span>Target</span> ' + tnum(t) + tdeg() + '</div><div class="cs-fact"><span>Now</span> ' + csLive('heat', isFinite(now) ? tnum(now) + tdeg() : '—') + '</div>' +
+      '<div class="cs-fact"><span>Left</span> ' + csLive('left', off ? '—' : left == null ? 'working it out' : '~' + ctlMinutes(left)) + '</div></div>';
+    return page(art, words, tail(CS.busy, off ? csPri('Heat again', 'csMat', {m:CS.material}, false) : csPri('&#11014; Unload — when hot', 'csNone', {}, true, true)));
+  }
+  if(st === 3){
+    return page(CS_ART.home, '<h3>Home the printer</h3><p>The printer is not homed, and loading needs that. Homing moves the print head and the bed &mdash; keep hands clear.</p>', tail(CS.busy, csPri('🏠 Home now', 'csFlowHome', {}, CS.busy || !csCan('home'))));
+  }
+  if(st === 4){
+    return page(CS_ART.head(-1, 'OUT'), CS.busy ? '<h3>Unloading&hellip;</h3><p>This can take a minute &mdash; keep hands clear.</p>' :
+      '<h3>Unload the old filament</h3><p>The nozzle is hot (' + csLive('hot', csFmt(s.nozzle_c)) + '). Keep hands clear of the print head, then tap Unload.</p>', tail(CS.busy, csPri('&#11014; Unload', 'csFlowUnload', {}, CS.busy || !csCan('unload'))));
+  }
+  if(st === 5){
+    const slots = trays.length ? '<div class="cs-chips" role="group" aria-label="AMS slot">' + trays.map(t => csBtn('Slot ' + esc(t.slot_1based) + ' <small>' + (t.type ? esc((t.color_name || '') + ' ' + t.type) : 'EMPTY') + '</small>', 'csFlowLoad', {tray:t.slot_1based}, CS.busy || !t.type, 'cs-slot')).join('') + '</div>' : '';
+    if(CS.busy) return page(CS_ART.head(1, 'IN'), '<h3>Loading&hellip;</h3><p>The filament is being pushed in.</p>', tail(true, csPri('&#11015; Loading…', 'csNone', {}, true, true)));
+    const list = '<ol class="cs-list"><li><b>1</b>Pull the old filament fully out</li><li><b>2</b>Cut the new tip at an angle ✂️</li><li><b>3</b>Push it into the head until it stops</li></ol>';
+    return page(CS_ART.swap, '<h3>Swap the spool</h3>' + list + (slots ? '<p style="margin-top:10px">Then pick the slot to load.</p>' + slots : ''),
+      tail(false, trays.length ? '' : csPri('&#11015; Load' + (CS.material ? ' ' + mat : ''), 'csFlowLoad', {}, !csCan('load'))));
+  }
+  if(st === 6){
+    const ok = csCan('extrude');
+    return page(CS_ART.head(1, 'PURGING'), '<h3>Loaded &mdash; purge a little</h3><p>Push a little out until the new filament comes out clean, then tap Done.' + (ok ? '' : ' (Heat the nozzle first to purge.)') + '</p>',
+      tail(CS.busy, csBtn('Purge +10 mm', 'csPurge', {}, CS.busy || !ok, 'cs-ghost') + csPri('✓ Done', 'csFlowDone', {}, CS.busy)));
+  }
+  const left = (d.preheat || {}).auto_off_in_s;
+  return page(CS_ART.done, '<h3>Done &mdash; cool down now?</h3><p>If you keep it hot, the heaters switch off by themselves' + (left != null ? ' in ' + esc(ctlMinutes(left)) : ' after a while') + '.</p>',
+    csGrow + csBtn('Keep hot', 'csKeep', {}, CS.busy, 'cs-ghost') + csBtn('Cool down', 'csCool', {}, CS.busy, 'primary'));
+}
+
+function csRender(){
+  if(!CS.open) return;
+  const box = $('mbody');
+  if(!$('modal').classList.contains('on') || !box.firstElementChild || !box.firstElementChild.classList.contains('cs')){ csClosed(); return; }   // another dialog took the box (or it was closed): the sheet is gone
+  const det = csDet();
+  // the heating step moves on by itself once the nozzle is hot
+  if(CS.view === 'flow' && CS.step === 2 && !CS.busy){
+    const cur = Number(csSnap().nozzle_c), t = Number(CS.tgt) || 0, mo = det.motion || {};
+    if(isFinite(cur)){ const last = CS.hs[CS.hs.length - 1], now = Date.now(); if(!last || now - last.t >= 1000){ CS.hs.push({t:now, c:cur}); if(CS.hs.length > 24) CS.hs.shift(); } }
+    if(t > 0 && isFinite(cur) && cur >= t - 3){ CS.needHome = CS.needHome || (mo.homed_how === 'reported' && mo.homed === false); CS.step = CS.needHome ? 3 : 4; CS.msg = null; }
+  }
+  let body;
+  if(!det.preheat && !det.light) body = '<div class="cs-grab" aria-hidden="true"></div>' + csHead(esc(CUR) + ' &middot; Controls', esc(String(csSnap().state || '').toUpperCase() || 'UNKNOWN'), '', 'csClose', 'Close') + '<div class="cs-ctl"><p class="cs-say">This printer’s controls are not available right now.</p></div>';
+  else body = CS.view === 'flow' ? csFlowView() : CS.view === 'fil' ? csFilView() : csMain();
+  const live = {}, liveh = {};
+  const struct = body.replace(/(<span data-live="([a-z]+)">)([^<]*)/g, (m, a, k, v) => { live[k] = v; return a; })
+    .replace(/(<span data-lh="([a-z]+)">)([\s\S]*?)(<\/span>)/g, (m, a, k, v, z) => { liveh[k] = v; return a + z; });
+  const cls = 'cs' + (CS.view !== 'main' && det.preheat ? ' cs-wiz' : '');
+  if(struct !== CS.sig){ CS.sig = struct; box.innerHTML = '<div class="' + cls + '">' + body + '</div>'; }
+  else {
+    Object.keys(live).forEach(k => { const e = box.querySelector('[data-live="' + k + '"]'); if(e) e.innerHTML = live[k]; });
+    Object.keys(liveh).forEach(k => { const e = box.querySelector('[data-lh="' + k + '"]'); if(e) e.innerHTML = liveh[k]; });
+  }
+}
+
+async function csAct(action, extra, longMs){
+  if(CS.busy) return null;
+  CS.busy = true; CS.msg = {wait:true, text:'Sending to ' + CUR + '…'}; csRender();
+  let out = null;
+  try{
+    out = await api(papi(CUR, '/control'), {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({action, ...(extra || {})})}, longMs || 45000);
+    CS.msg = {ok:true, text:out.message || 'sent', at:Date.now()};
+  }catch(e){
+    CS.msg = {ok:false, text:csStrip(e.message), at:Date.now()};
+    out = null;
+  }
+  CS.busy = false;
+  csRender();
+  try{ await pview(); }catch(e){}
+  csRender();
+  return out;
+}
+setInterval(() => { if(CS.open && CS.msg && CS.msg.ok && Date.now() - CS.msg.at > 7000){ CS.msg = null; csRender(); } }, 1000);
+
+function csGo(n){ CS.step = n; CS.msg = null; csRender(); }
+async function csFlowStart(m){
+  CS.material = m; CS.tgt = (csDet().filament || {}).temps ? csDet().filament.temps[m] : null; CS.step = 2; CS.msg = null; CS.hs = [];
+  const out = await csAct('preheat', {material:m});
+  if(out){ CS.heated = true; if(out.nozzle != null) CS.tgt = out.nozzle; CS.msg = null; }
+  else CS.step = 1;                        // the Hub said no (busy / too hot): back to the choice, the reason is on screen
+  csRender();
+}
+async function csCancelFlow(){
+  if(CS.busy) return;
+  const wasHeated = CS.heated;
+  CS.view = 'main'; CS.step = 1; CS.heated = false; CS.msg = null; csRender();
+  if(wasHeated) await csAct('heater_off', {heater:'nozzle'});      // Cancel switches off the heater the flow switched on
+}
+const CS_ACTIONS = {
+  csClose:   () => closeModal(),
+  csNone:    () => {},
+  csLight:   b => csAct(b.dataset.on === '1' ? 'light_off' : 'light_on'),
+  csFlow:    () => { const mo = csDet().motion || {}; CS.view = 'flow'; CS.step = 1; CS.material = null; CS.msg = null; CS.heated = false; CS.hs = [];
+    CS.needHome = mo.homed_how === 'reported' && mo.homed === false; csRender(); },       // the Home step is only in the bar when this printer will need it
+  csFil:     b => { CS.view = 'fil'; CS.fil = {w:b.dataset.w === 'unload' ? 'unload' : 'load'}; CS.material = null; CS.msg = null; csRender(); },
+  csPick:    b => { CS.material = b.dataset.m; csRender(); },
+  csDoFil:   async b => {
+    const w = b.dataset.w === 'unload' ? 'unload' : 'load', ex = {};
+    if(CS.material) ex.material = CS.material;
+    if(w === 'load' && b.dataset.tray && Number.isInteger(Number(b.dataset.tray))) ex.tray = Number(b.dataset.tray);
+    const out = await csAct(w, ex, 200000);
+    if(out){ CS.view = 'main'; CS.msg = {ok:true, text:out.message || 'sent', at:Date.now()}; csRender(); }
+  },
+  csHeat:    b => csAct('preheat', b.dataset.k === 'nozzle' ? {material:b.dataset.v} : {preset:b.dataset.v}),
+  csOff:     b => csAct('heater_off', {heater:b.dataset.h === 'bed' ? 'bed' : 'nozzle'}),
+  csHome:    b => { if(b.getAttribute('aria-disabled') === 'true') return; CS.confirmHome = true; csRender(); },
+  csHomeNo:  () => { CS.confirmHome = false; csRender(); },
+  csHomeYes: async () => { CS.confirmHome = false; await csAct('home', {confirm:true}, 200000); },
+  csStep:    b => { CS.jog = Number(b.dataset.mm) === 1 ? 1 : 10; csRender(); },                                    // 1 mm | 10 mm per tap (the Hub still allows at most 10)
+  csJog:     b => { if(b.getAttribute('aria-disabled') === 'true') return; const ax = b.dataset.axis, sg = Number(b.dataset.sign), mm = sg * (CS.jog === 1 ? 1 : 10);
+    if(['X', 'Y', 'Z'].includes(ax) && (sg === 1 || sg === -1)) csAct('move', {axis:ax, mm}); },
+  csExtrude: b => { const mm = Number(b.dataset.mm); if(Number.isFinite(mm)) csAct('extrude', {mm}); },
+  // the guided change
+  csMat:     b => csFlowStart(b.dataset.m),
+  csBack:    () => { if(CS.busy) return; CS.msg = null;
+    if(CS.view === 'fil' || (CS.view === 'flow' && CS.step === 1)){ CS.view = 'main'; CS.step = 1; }
+    else if(CS.step === 2 || CS.step === 3 || CS.step === 4) CS.step = 1;
+    else if(CS.step >= 5) CS.step = CS.step - 1;
+    csRender(); },
+  csCancel:  () => csCancelFlow(),
+  csFlowHome: async () => { const o = await csAct('home', {confirm:true}, 200000); if(o) csGo(4); },
+  csFlowUnload: async () => { const o = await csAct('unload', {material:CS.material}, 200000); if(o){ CS.step = 5; csRender(); } },
+  csFlowLoad: async b => { const ex = {material:CS.material}; if(b.dataset.tray && Number.isInteger(Number(b.dataset.tray))) ex.tray = Number(b.dataset.tray);
+    const o = await csAct('load', ex, 200000); if(o){ CS.step = 6; csRender(); } },
+  csPurge:   () => csAct('extrude', {mm:10}),
+  csFlowDone: () => { CS.step = 7; CS.msg = null; csRender(); },
+  csCool:    async () => { const o = await csAct('cooldown'); if(o){ CS.heated = false; CS.view = 'main'; CS.step = 1; csRender(); } },
+  csKeep:    () => { CS.view = 'main'; CS.step = 1; CS.heated = false; CS.msg = {ok:true, text:'The heaters stay on; they switch off by themselves (the auto-off).', at:Date.now()}; csRender(); },
+};
+
+// the jog ring's wedges are SVG groups with role=button: Enter / Space press them like a button
+document.addEventListener('keydown', e => { const t = e.target; if((e.key === 'Enter' || e.key === ' ') && t && t.matches && t.matches('.cs [role="button"][data-act]')){ e.preventDefault(); t.dispatchEvent(new MouseEvent('click', {bubbles:true})); } });
+
+function closeModal(){ $('modal').classList.remove('on'); clearTimeout(BK.timer); if(typeof cfStop==='function') cfStop(); csClosed(); }
 $('modal').addEventListener('click', e => { if (e.target === $('modal')) closeModal(); });
 
 
@@ -7898,6 +8442,7 @@ const ACT = {
   fmRename:  b => { pmoreClose(); rnOpen(CUR, b.dataset.f); },
   fmDelete:  b => { pmoreClose(); askDelete(b.dataset.f); },
   stTzDismiss: () => stTzDismiss(),
+  ...CS_ACTIONS,                                  // ==== controls sheet ====
   ...(typeof LB_ACT !== 'undefined' ? LB_ACT : {}),   // ==== library ====
   ...(typeof RN_ACT !== 'undefined' ? RN_ACT : {}),   // ==== rename ====
 };

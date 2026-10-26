@@ -30,6 +30,19 @@ Optional driver extras (all additive):
                                   printer's own reports showed the change. confirmed False = "sent but NOT
                                   confirmed": the auto-off retries it, the UI says so.
 
+Controls sheet extras (all optional, all additive; a driver without them reports them unsupported):
+    control_caps()["home"|"move"|"extrude"]     same shape as the other entries
+    home_all()                                   G28 / Klipper homing
+    move_relative(axis, mm)                      one relative jog, |mm| <= MOVE_MAX_MM (this module checks it first)
+    extrude(mm)                                  signed, |mm| <= EXTRUDE_MAX_MM (checked here: hot enough first)
+    unload_filament(nozzle=None) / load_filament(tray=None, nozzle=None)
+                                                 `nozzle` is the temperature to heat to first (drivers that heat
+                                                 by themselves, like the Bambu AMS, ignore it)
+    FILAMENT_NOZZLE_TEMP = True                  class trait: load / unload need the Hub to say how hot (Klipper, OctoPrint)
+    extrude_min_c()                              the printer's own minimum extrusion temperature, or None (default 170)
+    snapshot()["homed"]                          True / False when the printer REPORTS its homed axes (Klipper); None =
+                                                 unknown, then only a Home the Hub itself sent (and not too long ago) counts
+
 `verified: False` on a capability means "written from the printer family's documentation, never
 exercised on real hardware" (see docs/drivers.md).
 
@@ -44,7 +57,15 @@ import tempfile
 import threading
 import time
 
-ACTIONS = ("light_on", "light_off", "preheat", "cooldown", "unload", "load")
+ACTIONS = ("light_on", "light_off", "preheat", "cooldown", "unload", "load", "home", "move", "extrude", "heater_off")
+
+# The Controls sheet (jog, extrude, filament change). Every limit here is enforced on the server, not only in the page.
+MOVE_MAX_MM = 10.0              # one tap moves one axis at most this far (relative moves only)
+EXTRUDE_MAX_MM = 10.0           # one tap pushes / pulls at most this much filament
+MIN_EXTRUDE_C = 170             # cold-extrusion guard when the printer does not say its own minimum
+AXES = ("X", "Y", "Z")
+HEATERS = ("nozzle", "bed", "both")
+HUB_HOMED_TTL_S = 600.0         # printers that cannot REPORT being homed: a Home the Hub sent counts for this long after the last move
 
 # Heaters and filament are only touched when the printer is parked. RUNNING / PREPARE / PAUSE
 # are busy; UNKNOWN / DISCONNECTED mean we cannot reach the controller at all.
@@ -224,6 +245,41 @@ def configure(presets=None, resolver=None, log=print, exclusive=False, data_dir=
 
 def presets() -> dict:
     return {k: dict(v) for k, v in _presets.items()}
+
+
+# Nozzle temperature per material for the Controls sheet (Nozzle buttons, Change filament, Load / Unload). The numbers are the
+# Settings page's printers.filament_temp_pla / _petg / _abs; these are only the fallbacks.
+DEFAULT_FILAMENT_TEMPS = {"PLA": 210, "PETG": 235, "ABS": 245}
+_filament_temps: dict = dict(DEFAULT_FILAMENT_TEMPS)
+
+
+def configure_filament_temps(temps=None, log=print):
+    """Install the nozzle temperature of each material (name -> degrees C, 1..NOZZLE_MAX). A bad entry is skipped with a log
+    line and keeps the built-in number; None / {} resets to the defaults."""
+    global _filament_temps
+    merged = dict(DEFAULT_FILAMENT_TEMPS)
+    if isinstance(temps, dict):
+        for name, t in temps.items():
+            try:
+                v = check_temp(t, NOZZLE_MAX, f"filament {name} nozzle")
+                if v < MIN_EXTRUDE_C:
+                    raise ControlInvalid(f"filament {name} nozzle temperature must be at least {MIN_EXTRUDE_C} C.")
+                merged[str(name).strip().upper()] = v
+            except ControlInvalid as e:
+                log(f"[controls] ignoring filament temperature: {e}")
+    _filament_temps = merged
+
+
+def filament_temps() -> dict:
+    return dict(_filament_temps)
+
+
+def material_nozzle(material) -> int:
+    """Nozzle temperature for a material name (PLA, PETG, ...) or ControlInvalid."""
+    name = str(material).strip().upper()
+    if name not in _filament_temps:
+        raise ControlInvalid(f"Unknown material {material!r}. Known: {', '.join(_filament_temps)}.")
+    return _filament_temps[name]
 
 
 # Runtime hooks the server installs (kept here so the module still imports nothing from the app):
@@ -850,7 +906,7 @@ _ALL_UNSUPPORTED_REASON = "This printer's driver has no printer controls."
 
 
 def all_unsupported(reason):
-    caps = {k: {"supported": False, "reason": reason} for k in ("heat", "unload", "load")}
+    caps = {k: {"supported": False, "reason": reason} for k in ("heat", "unload", "load", "home", "move", "extrude")}
     caps["light"] = {"supported": False, "state": None, "reason": reason}
     return caps
 
@@ -875,16 +931,16 @@ def _gate(snap, action):
     state = snap.get("state")
     connected = bool(snap.get("connected"))
     if connected and state in BUSY_STATES:
-        return f"printer is {state}: heaters and filament are not touched during a print."
+        return f"printer is {state}: heaters, filament and movement are not touched during a print."
     if snap.get("start_pending"):
-        return ("a print start was just sent to this printer and has not shown up yet: heaters and filament "
-                "are not touched until it does (or about 2 minutes pass).")
-    if action == "cooldown":
+        return ("a print start was just sent to this printer and has not shown up yet: heaters, filament and "
+                "movement are not touched until it does (or about 2 minutes pass).")
+    if action in ("cooldown", "heater_off"):
         if not connected:
             return f"printer is not connected (state {state}" + (f": {snap.get('error')}" if snap.get("error") else "") + ")."
         return None
     if state in BUSY_STATES:
-        return f"printer is {state}: heaters and filament are not touched during a print."
+        return f"printer is {state}: heaters, filament and movement are not touched during a print."
     if not connected or state not in IDLE_STATES:
         return (f"printer is not ready (state {state}"
                 + (f": {snap.get('error')}" if snap.get("error") else "") + ").")
@@ -916,6 +972,122 @@ def _cap_entry(cap, gate_reason):
     return e
 
 
+# ------------------------------------------------------------------ homed / hot enough (server-side rules for move + extrude)
+
+def _hub_homed(prn, snap) -> bool:
+    """A printer that cannot REPORT its homed axes (OctoPrint, Bambu): did the Hub home it, recently, and has it
+    stayed connected and out of a print since? Anything else is 'not homed' - motors may have been switched off."""
+    at = getattr(prn, "_hub_homed_at", None)
+    if at is None:
+        return False
+    busy = bool(snap.get("connected")) and snap.get("state") in BUSY_STATES
+    if not snap.get("connected") or busy or time.monotonic() - at > HUB_HOMED_TTL_S:
+        prn._hub_homed_at = None
+        return False
+    return True
+
+
+def note_homed(prn):
+    prn._hub_homed_at = time.monotonic()
+
+
+def homed_state(prn, snap):
+    """(homed: bool, how: 'reported' | 'hub'). A driver that reports `homed` in its snapshot is believed
+    (False means NOT homed); otherwise only the Hub's own recent Home counts."""
+    if snap.get("homed") in (True, False):
+        return bool(snap["homed"]), "reported"
+    return _hub_homed(prn, snap), "hub"
+
+
+def _extrude_min(prn, snap) -> int:
+    fn = getattr(prn, "extrude_min_c", None)
+    v = None
+    if callable(fn):
+        try:
+            v = fn()
+        except Exception:
+            v = None
+    if isinstance(v, (int, float)) and not isinstance(v, bool) and 0 < v <= NOZZLE_MAX:
+        return int(round(v))
+    return MIN_EXTRUDE_C
+
+
+def _too_cold(prn, snap):
+    """None when the nozzle is hot enough to push filament, else the sentence that says why."""
+    need = _extrude_min(prn, snap)
+    cur = snap.get("nozzle_c")
+    if isinstance(cur, bool) or not isinstance(cur, (int, float)):
+        return f"The nozzle temperature is unknown. Heat the nozzle first (it must be at least {need} C)."
+    if cur < need:
+        return f"Heat the nozzle first: it is {cur:g} C and extruding needs at least {need} C."
+    if snap.get("can_extrude") is False:
+        return "Heat the nozzle first: the printer says it is too cold to extrude."
+    return None
+
+
+def _not_homed(prn, snap):
+    ok, how = homed_state(prn, snap)
+    if ok:
+        return None
+    return ("The axes are not homed. Home first."
+            if how == "reported" else
+            "The Hub has not homed this printer lately (it cannot read the printer's homed state). Home first.")
+
+
+def clean_axis(axis) -> str:
+    a = str(axis).strip().upper() if isinstance(axis, str) else ""
+    if a not in AXES:
+        raise ControlInvalid(f"axis must be one of {', '.join(AXES)}.")
+    return a
+
+
+def clean_mm(value, limit, what) -> float:
+    """Signed millimetres, finite, not zero, at most `limit` either way. bool / text / NaN are rejected."""
+    if isinstance(value, bool) or value is None:
+        raise ControlInvalid(f"{what}: give a distance in mm.")
+    if not isinstance(value, (int, float)):            # a JSON number only: no "5", no text
+        raise ControlInvalid(f"{what}: the distance must be a number, got {value!r}.")
+    f = float(value)
+    if f != f or f in (float("inf"), float("-inf")):
+        raise ControlInvalid(f"{what}: the distance must be a finite number.")
+    if abs(f) > limit:
+        raise ControlInvalid(f"{what}: {f:g} mm is more than the {limit:g} mm allowed per tap.")
+    f = round(f, 2)
+    if f == 0:
+        raise ControlInvalid(f"{what}: the distance cannot be 0.")
+    return f
+
+
+def _nozzle_for_filament(prn, snap, nozzle, material):
+    """The nozzle temperature a load / unload heats to first: an explicit one, else the material's, else what the
+    nozzle is already set to, else the first material (PLA). Only for printers that need the Hub to say (Klipper, OctoPrint)."""
+    named = material_nozzle(material) if material not in (None, "") else None        # an unknown material is refused on every printer
+    if not getattr(prn, "FILAMENT_NOZZLE_TEMP", False):
+        return None
+    if nozzle is not None:
+        n = check_temp(nozzle, NOZZLE_MAX, "nozzle")
+    elif named is not None:
+        n = named
+    else:
+        t = snap.get("nozzle_target_c")
+        n = int(round(t)) if isinstance(t, (int, float)) and not isinstance(t, bool) and t >= MIN_EXTRUDE_C else next(iter(_filament_temps.values()))
+    if n < MIN_EXTRUDE_C:
+        raise ControlInvalid(f"The nozzle must be at least {MIN_EXTRUDE_C} C to load or unload filament.")
+    return n
+
+
+def _call_driver(fn, *args, **kw):
+    """Call a driver primitive, passing only the keyword arguments its signature has (older / test drivers stay valid)."""
+    import inspect
+    try:
+        params = inspect.signature(fn).parameters
+        if not any(p.kind is p.VAR_KEYWORD for p in params.values()):
+            kw = {k: v for k, v in kw.items() if k in params}
+    except (TypeError, ValueError):
+        pass
+    return fn(*args, **kw)
+
+
 def describe(prn) -> dict:
     """Everything an agent or UI needs to know about this printer's controls right now."""
     snap = prn.snapshot()
@@ -932,9 +1104,9 @@ def describe(prn) -> dict:
     heat = caps["heat"]
     preheat = _cap_entry(heat, gate)
     cooldown = _cap_entry(heat, cool_gate)
+    preheat["presets"] = presets()                  # also for a printer that cannot heat: the sheet shows the same buttons, disabled, with the reason
+    preheat["limits"] = {"nozzle_max_c": NOZZLE_MAX, "bed_max_c": BED_MAX}
     if preheat["supported"]:
-        preheat["presets"] = presets()
-        preheat["limits"] = {"nozzle_max_c": NOZZLE_MAX, "bed_max_c": BED_MAX}
         eff = effective_timeout_seconds()
         preheat["auto_off_timeout_min"] = round(eff / 60.0, 2) if eff else 0
         preheat["auto_off_in_s"] = remaining
@@ -943,18 +1115,44 @@ def describe(prn) -> dict:
             preheat["last_auto_off"] = {"result": last["result"], "ago_s": round(time.time() - last["at"])}
     unload = _cap_entry(caps["unload"], gate)
     load = _cap_entry(caps["load"], gate)
+    # ---- the Controls sheet: Home / Move / Extrude / one heater off / Change filament
+    homed, how = homed_state(prn, snap)
+    home = _cap_entry(caps["home"], gate)
+    move = _cap_entry(caps["move"], gate or _not_homed(prn, snap))
+    cold = _too_cold(prn, snap)
+    extrude = _cap_entry(caps["extrude"], gate or cold)
+    heater_off = _cap_entry(heat, cool_gate)
+    # Change filament needs heat + unload + load; MMU / PrusaLink / no-macro printers say which part is missing
+    parts = [("heating the nozzle", heat), ("unloading", caps["unload"]), ("loading", caps["load"])]
+    missing = next(((w, c) for w, c in parts if not c.get("supported")), None)
+    change = _cap_entry({"supported": missing is None,
+                         "reason": (missing[1].get("reason") or f"This printer cannot do {missing[0]}.") if missing else "",
+                         "verified": False if (caps["unload"].get("verified") is False or caps["load"].get("verified") is False) else True},
+                        gate)
+    if change.get("verified") is True:
+        change.pop("verified", None)
     out = {"printer": getattr(prn, "name", None), "kind": getattr(prn, "kind", None),
            "state": snap.get("state"), "connected": bool(snap.get("connected")),
-           "light": light, "preheat": preheat, "cooldown": cooldown, "unload": unload, "load": load}
+           "light": light, "preheat": preheat, "cooldown": cooldown, "unload": unload, "load": load,
+           "home": home, "move": move, "extrude": extrude, "heater_off": heater_off, "change_filament": change}
+    out["motion"] = {"homed": homed, "homed_how": how, "min_extrude_c": _extrude_min(prn, snap),
+                     "nozzle_c": snap.get("nozzle_c"), "nozzle_target_c": snap.get("nozzle_target_c"),
+                     "bed_c": snap.get("bed_c"), "bed_target_c": snap.get("bed_target_c"),
+                     "max_move_mm": MOVE_MAX_MM, "max_extrude_mm": EXTRUDE_MAX_MM, "axes": list(AXES)}
+    out["filament"] = {"temps": filament_temps(), "needs_nozzle_temp": bool(getattr(prn, "FILAMENT_NOZZLE_TEMP", False)),
+                       "unload_mm": getattr(prn, "unload_mm", None), "load_mm": getattr(prn, "load_mm", None)}
     actions = []
     if light["supported"]:
         actions += ["light_on", "light_off"]
     if preheat["supported"]:
-        actions += ["preheat", "cooldown"]
+        actions += ["preheat", "cooldown", "heater_off"]
     if unload["supported"]:
         actions.append("unload")
     if load["supported"]:
         actions.append("load")
+    for name in ("home", "move", "extrude"):
+        if out[name]["supported"]:
+            actions.append(name)
     out["actions"] = actions
     return out
 
@@ -971,7 +1169,7 @@ def summary(prn) -> dict:
     allowed = []
     if d["light"]["supported"]:
         allowed += ["light_on", "light_off"]
-    for name in ("preheat", "cooldown", "unload", "load"):
+    for name in ("preheat", "cooldown", "unload", "load", "home", "move", "extrude", "heater_off", "change_filament"):
         if d[name].get("allowed_now"):
             allowed.append(name)
     return {"actions": d["actions"], "allowed_now": allowed,
@@ -983,7 +1181,12 @@ def summary(prn) -> dict:
 
 # ------------------------------------------------------------------ perform
 
-def perform(prn, action, preset=None, nozzle=None, bed=None, tray=None) -> dict:
+_NEED = {"light_on": "light", "light_off": "light", "preheat": "heat", "cooldown": "heat", "heater_off": "heat",
+         "unload": "unload", "load": "load", "home": "home", "move": "move", "extrude": "extrude"}
+
+
+def perform(prn, action, preset=None, nozzle=None, bed=None, tray=None, axis=None, mm=None, material=None,
+            heater=None, confirm=None) -> dict:
     """Run one control. Raises ControlInvalid (400) / ControlUnsupported (422) / ControlRefused (409);
     a printer-side failure propagates as the driver's own error. Order of checks: known action ->
     supported by this printer -> valid arguments -> safe right now -> send."""
@@ -991,20 +1194,42 @@ def perform(prn, action, preset=None, nozzle=None, bed=None, tray=None) -> dict:
         raise ControlInvalid(f"Unknown action {action!r}. Known: {', '.join(ACTIONS)}.")
     snap = prn.snapshot()               # first: drivers that discover on the wire need a fresh poll
     caps = _caps(prn)
-    need = {"light_on": "light", "light_off": "light", "preheat": "heat", "cooldown": "heat",
-            "unload": "unload", "load": "load"}[action]
-    cap = caps[need]
+    cap = caps[_NEED[action]]
     if not cap.get("supported"):
         raise ControlUnsupported(cap.get("reason") or "Not supported by this printer.")
     temps = None
     if action == "preheat":
+        if material not in (None, "") and nozzle is None:
+            nozzle = material_nozzle(material)       # a material button heats the NOZZLE; the bed is left alone
         temps = resolve_temps(preset, nozzle, bed)
     if action == "load" and tray is not None:
         if isinstance(tray, bool) or not isinstance(tray, int) or tray < 1:
             raise ControlInvalid("tray must be a slot number starting at 1.")
+    jog = None
+    if action == "move":
+        jog = (clean_axis(axis), clean_mm(mm, MOVE_MAX_MM, "move"))
+    elif action == "extrude":
+        jog = clean_mm(mm, EXTRUDE_MAX_MM, "extrude")
+    elif action == "heater_off":
+        heater = str(heater or "").strip().lower()
+        if heater not in HEATERS:
+            raise ControlInvalid(f"heater must be one of {', '.join(HEATERS)}.")
+    elif action == "home" and confirm is not True:
+        raise ControlInvalid("Home all moves the print head and the bed: send confirm=true to say you are sure.")
     reason = _gate(snap, action)
     if reason:
         raise ControlRefused(reason)
+    if action == "move":
+        reason = _not_homed(prn, snap)
+        if reason:
+            raise ControlRefused(reason)
+    elif action == "extrude":
+        reason = _too_cold(prn, snap)
+        if reason:
+            raise ControlRefused(reason)
+    fil_temp = None
+    if action in ("load", "unload"):
+        fil_temp = _nozzle_for_filament(prn, snap, nozzle, material)
 
     note_control(prn)                   # background chores (prewarm) now leave this printer alone for a while
     res = {"ok": True, "action": action, "printer": getattr(prn, "name", None)}
@@ -1024,9 +1249,9 @@ def perform(prn, action, preset=None, nozzle=None, bed=None, tray=None) -> dict:
         applied = prn.set_temps(n, b) or {"nozzle": n, "bed": b}
         res.update(preset=pname, nozzle=applied.get("nozzle"), bed=applied.get("bed"),
                    auto_off_in_s=round(secs))
-        res["message"] = (f"pre-heat sent ("
-                          + (f"nozzle {applied.get('nozzle')}, " if applied.get("nozzle") is not None else "")
-                          + f"bed {applied.get('bed')} C" + (f", {pname}" if pname else "") + ")"
+        what = ", ".join(([f"nozzle {applied.get('nozzle')}"] if applied.get("nozzle") is not None else [])
+                         + ([f"bed {applied.get('bed')}"] if applied.get("bed") is not None else []))
+        res["message"] = (f"pre-heat sent ({what} C" + (f", {pname}" if pname else "") + ")"
                           + f"; heaters switch off in {round(secs / 60, 1)} min unless a print starts")
         if _unconfirmed(applied):
             res["confirmed"] = False
@@ -1045,10 +1270,44 @@ def perform(prn, action, preset=None, nozzle=None, bed=None, tray=None) -> dict:
         else:
             cancel_auto_off(prn)
             res["message"] = "cool-down sent (nozzle 0, bed 0)"
-    elif action == "unload":
-        prn.unload_filament()
-        res["message"] = "unload sent - watch the printer; it heats the nozzle first"
-    elif action == "load":
-        prn.load_filament(tray)
-        res["message"] = "load sent - watch the printer; it heats the nozzle first"
+    elif action == "heater_off":
+        n_off, b_off = (0 if heater in ("nozzle", "both") else None), (0 if heater in ("bed", "both") else None)
+        hres = prn.set_temps(n_off, b_off)
+        bad = _unconfirmed(hres)
+        other_on = (heater == "nozzle" and (snap.get("bed_target_c") or 0) > 0) or \
+                   (heater == "bed" and (snap.get("nozzle_target_c") or 0) > 0)
+        if bad:
+            res["confirmed"] = False
+            res["message"] = f"{heater} off sent but NOT confirmed ({bad}); check the printer"
+        else:
+            if not other_on:
+                cancel_auto_off(prn)         # nothing left that the auto-off would have to switch off
+            res["message"] = f"{heater} heater off sent" + ("; the other heater still switches off by itself" if other_on else "")
+    elif action == "home":
+        _call_driver(prn.home_all)
+        note_homed(prn)
+        res["message"] = "home all sent - the printer is homing; keep hands clear"
+    elif action == "move":
+        ax, dist = jog
+        _call_driver(prn.move_relative, ax, dist)
+        if getattr(prn, "_hub_homed_at", None) is not None:
+            note_homed(prn)                           # a move keeps a Hub-tracked 'homed' fresh
+        res.update(axis=ax, mm=dist)
+        res["message"] = f"moved {ax} {dist:+g} mm"
+    elif action == "extrude":
+        _call_driver(prn.extrude, jog)
+        res.update(mm=jog)
+        res["message"] = f"{'extruded' if jog > 0 else 'retracted'} {abs(jog):g} mm of filament"
+    elif action in ("unload", "load"):
+        if fil_temp is not None:
+            schedule_auto_off(prn, nozzle=fil_temp, bed=None)       # the nozzle this heats gets the same auto-off as a pre-heat
+            res["nozzle"] = fil_temp
+        if action == "unload":
+            _call_driver(prn.unload_filament, nozzle=fil_temp)
+            res["message"] = ("unload sent" + (f" (nozzle {fil_temp} C)" if fil_temp else "")
+                              + " - watch the printer" + ("" if fil_temp else "; it heats the nozzle first"))
+        else:
+            _call_driver(prn.load_filament, tray, nozzle=fil_temp)
+            res["message"] = ("load sent" + (f" (nozzle {fil_temp} C)" if fil_temp else "")
+                              + " - watch the printer" + ("" if fil_temp else "; it heats the nozzle first"))
     return res

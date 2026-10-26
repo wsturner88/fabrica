@@ -166,6 +166,16 @@ It imports nothing from the drivers (drivers import it), so a new driver needs n
 | Moonraker | discovered from `/printer/objects/list`: `output_pin` -> `SET_PIN PIN=<n> VALUE=1\|0`; `led` / `neopixel` / `dotstar` -> `SET_LED LED=<n> RED= GREEN= BLUE= WHITE=1\|0`; state from `objects/query` (**unverified**) | `POST /printer/gcode/script` `M104` / `M140` (no heated bed = bed skipped) | only when `gcode_macro UNLOAD_FILAMENT` / `LOAD_FILAMENT` exist (case-insensitive); the call may outlive a normal timeout and then counts as started (**unverified**) |
 | PrusaLink | unsupported | unsupported | unsupported: the v1 API has no light, temperature, G-code or filament endpoint (from the API description; not checked on hardware) |
 
+Controls sheet extras (all optional; a driver without them reports them unsupported): `control_caps()` entries `home`, `move`,
+`extrude`; primitives `home_all()`, `move_relative(axis, mm)`, `extrude(mm)`; `unload_filament(nozzle=None)` /
+`load_filament(tray=None, nozzle=None)`; the class trait `FILAMENT_NOZZLE_TEMP = True` when the Hub must say how hot (Klipper,
+OctoPrint); `extrude_min_c()`; and `snapshot()["homed"]` (True / False when the printer reports its axes, else None - then only a Home
+the Hub sent in the last 10 minutes counts). Moonraker: `G28`; jogs and extrusion run between `SAVE_GCODE_STATE` /
+`RESTORE_GCODE_STATE` so G91 / M83 never outlive the tap (a refused move restores the state before the error is passed on); load /
+unload run `M109`, then your macro (`UNLOAD_FILAMENT` / `M702`, `LOAD_FILAMENT` / `M701`, given `TEMP=`), preceded by `G28` when
+`toolhead.homed_axes` is not `xyz`; with no macro a plain `M83` / `G1 E` sequence. OctoPrint: the same G-code in one
+`/api/printer/command` `commands` list; MMU printers are refused. PrusaLink: everything unsupported. Bambu: `gcode_line` (beta).
+
 Bambu unload/load notes: needs `print.ams.ams` in the printer's report; the temperature fields
 (`curr_temp` = current nozzle, `tar_temp` = the filament's `nozzle_temp_min` but at least 220 C) and the
 `ams_id` / `slot_id` fields follow public protocol notes and may differ per firmware. Newer Bambu
