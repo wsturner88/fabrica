@@ -153,7 +153,7 @@ class PageTests(unittest.TestCase):
     def test_phone(self):
         R = self.go("phone", "?group=Home", (390, 800))
         self.check(R, "phone")
-        self.assertLessEqual(R["open"]["tbarRows"], 3)                        # a phone: title row, the sort buttons, then Grid / List + Refresh + More (a wrap, never a clipped button)
+        self.assertLessEqual(R["open"]["tbarRows"], 4)                        # a phone: title row, (Pause / Cancel while printing), Controls + Light, then Sort + Refresh + More (a wrap, never a clipped button)
 
     def test_five_inch_files_sheet(self):
         self.check(self.go("l5", "?group=Home&layout=5in", (800, 480)), "5in")
