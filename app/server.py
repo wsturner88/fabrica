@@ -237,6 +237,81 @@ def _cached_meta_for(printer_name: str, job: str):
     return best
 
 
+def _seen_entry(prn, job):
+    """The last listing's entry for a job name. OctoPrint reports the running job WITHOUT its folder ("Phone Stand …")
+    while its file list keys the file WITH it ("Jobs/Phone Stand ….gcode"): exact key first, then the one entry
+    whose name after the last '/' matches (two files of that name in different folders = ambiguous = None)."""
+    seen = _FILES_SEEN.get(prn.name.lower()) or {}
+    key = costs.file_key(job)
+    if not key:
+        return None
+    if key in seen:
+        entry = seen[key]
+    else:
+        hits = [e for k, e in seen.items() if k.rsplit("/", 1)[-1] == key.rsplit("/", 1)[-1]]
+        entry = hits[0] if len(hits) == 1 else None
+    if not isinstance(entry, dict):
+        return None
+    # the raw listing has no materials / grams for OctoPrint files: those come from the header read kept in the metadata
+    # cache (the same merge the file list does in list_sd_files) - cache only, never a request
+    entry = dict(entry)
+    try:
+        with _cache_lock:
+            e = _cache_load().get(f"{prn.name}|{entry.get('name')}|{entry.get('size')}") or {}
+        if not entry.get("materials") and e.get("materials"):
+            entry["materials"] = list(e["materials"])
+        for k in ("weight_g", "layer_mm", "nozzle_mm"):
+            if not entry.get(k) and e.get(k):
+                entry[k] = e[k]
+    except Exception:
+        pass
+    return entry
+
+
+_JOBMAT_MEMO: dict = {}       # (printer lower, job) -> (time, [materials]); the cards poll every few seconds, the file cache is read at most once a minute per job
+
+
+def _job_materials(prn, snap) -> list:
+    """The materials the slicer wrote into the file of the job that is RUNNING right now (["PETG"], ["PLA", "PETG"]), for the fleet cards and the
+    Controls pop-up. Caches only (the last listing, the metadata cache): never a request to a printer. [] = not known - the page then says nothing
+    (it never works a material out from a temperature)."""
+    try:
+        job = (snap or {}).get("job")
+        if not job or (snap or {}).get("state") not in ("RUNNING", "PREPARE", "PAUSE"):
+            return []
+        key = (prn.name.lower(), str(job))
+        hit = _JOBMAT_MEMO.get(key)
+        if hit and time.time() - hit[0] < 60:
+            return list(hit[1])
+        mats = []
+        entry = _seen_entry(prn, job)
+        if isinstance(entry, dict):
+            mats = [str(m) for m in (entry.get("materials") or ([entry.get("filament_type")] if entry.get("filament_type") else [])) if m]
+        if not mats:
+            meta = _cached_meta_for(prn.name, job)
+            if meta:
+                mats = [str(f.get("type")) for f in (meta.get("filaments") or []) if isinstance(f, dict) and f.get("type")] \
+                    or [str(m) for m in (meta.get("materials") or []) if m]
+        out, seen = [], set()
+        for m in mats:
+            m = m.strip().upper()
+            if m and m not in seen:
+                seen.add(m)
+                out.append(m)
+        if len(_JOBMAT_MEMO) > 200:
+            _JOBMAT_MEMO.clear()
+        _JOBMAT_MEMO[key] = (time.time(), out)
+        return list(out)
+    except Exception:
+        return []
+
+
+def _with_job_materials(prn, snap: dict) -> dict:
+    """snap + `job_materials` (only when known; see _job_materials)."""
+    mats = _job_materials(prn, snap)
+    return {**snap, "job_materials": mats} if mats else snap
+
+
 def _apply_ams_choice(prn, key: str, res: dict) -> dict:
     """If this Hub started the print itself it knows which AMS tray feeds each filament: price what is
     actually loaded rather than what the slicer assumed (type + colour from the tray, grams from the file)."""
@@ -270,7 +345,7 @@ def _job_resolver(printer, job):
     if prn is None or not key:
         return {}
     if _is_octo(prn):
-        entry = (_FILES_SEEN.get(prn.name.lower()) or {}).get(key)
+        entry = _seen_entry(prn, job)
         return joblog.resolved_from_file_entry(entry, kind=getattr(prn, "kind", None)) if entry else {}
     meta = _cached_meta_for(prn.name, job)
     if not meta:
@@ -4241,7 +4316,7 @@ async def _api_filedetail(request: Request):
 async def _api_fleet(request: Request):
     def work():
         group_of = {k.lower(): v for k, v in FLEET.store.groups_by_printer().items()}
-        return [{**LINKS.apply(prn.name, prn.snapshot()), **_camera_fields(prn), "groups": group_of.get(str(prn.name).lower(), []),
+        return [{**_with_job_materials(prn, LINKS.apply(prn.name, prn.snapshot())), **_camera_fields(prn), "groups": group_of.get(str(prn.name).lower(), []),
                  "can_connect": hasattr(prn, "connect_serial")}      # the NOT CONNECTED chip on a fleet card is only a button when this is true
                 for prn in list(PRINTERS.values())]
     out = await _run(work)
@@ -4258,7 +4333,7 @@ async def _api_printer(request: Request):
         trays = []
         for t in prn.ams_trays():
             trays.append({**t, "color_name": color_name(t["color"]) if t["color"] else None})
-        return {"snapshot": {**LINKS.apply(prn.name, prn.snapshot()), **_camera_fields(prn)}, "trays": trays,
+        return {"snapshot": {**_with_job_materials(prn, LINKS.apply(prn.name, prn.snapshot())), **_camera_fields(prn)}, "trays": trays,
                 "palette": sorted(PALETTE.keys()), "materials": list(MATERIALS),
                 "kind": prn.kind, "can_connect": hasattr(prn, "connect_serial"),
                 "controls": controls.summary(prn),

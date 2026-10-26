@@ -45,7 +45,9 @@ FLEET_DRIVER = PRE + r"""
 await sleep(300); await setFleet(FLEET);
 const cards = () => [...document.querySelectorAll('#fleet .pcard')];
 const snap = () => ({
-  spg: cards().map(c => (c.querySelector('.spg, .spag') || {textContent: ''}).textContent.replace(/\s+/g, ' ').trim()),
+  spg: cards().map(c => (c.querySelector('.spg') || {textContent: ''}).textContent.replace(/\s+/g, ' ').trim()),      // the big WARNING / FAILURE block (the only "Spaghetti: ..." line a card still has)
+  spb: cards().map(c => (c.querySelector('.spb') || {title: ''}).title),                                                      // the small badge: its tooltip keeps the full words
+  spbw: cards().map(c => (c.querySelector('.spb') || {textContent: ''}).textContent.trim()),                                  // ... and its visible word
   cls: cards().map(c => c.className),
   heights: cards().map(c => r(c).h), bottoms: cards().map(c => r(c).b), vh: innerHeight,
   banner: (() => { const b = document.getElementById('sp-alert'); return {hidden: b.hidden, text: b.textContent, h: r(b).h}; })(),
@@ -79,14 +81,18 @@ class FleetCardTests(unittest.TestCase):
         R = self.kiosk()
         self.assertNotIn("error", R, R.get("error"))
         self.assertEqual(R["alerts"], [])
-        self.assertEqual(R["calm"]["spg"], ["Spaghetti: WATCHING", "Spaghetti: READY", "Spaghetti: NO CAMERA", "Spaghetti: READY"])
+        self.assertEqual(R["calm"]["spb"], ["Spaghetti: WATCHING", "Spaghetti: READY", "Spaghetti: NO CAMERA", ""])      # an offline printer (D) has no badge: it is not being watched
+        self.assertEqual(R["calm"]["spbw"], ["OK", "READY", "NO CAM", ""])
+        self.assertEqual(R["calm"]["spg"], ["", "", "", ""])                                                              # no "Spaghetti: WATCHING" line any more
         self.assertEqual(R["calm"]["chipTicks"], ["\u2713 All", "Home"])     # the active group chip carries a tick, not only a colour
 
     def test_a_warning_or_failure_is_a_word_plus_emphasis_and_a_banner(self):
         R = self.kiosk()
         for k, word in (("warn", "WARNING"), ("fail", "FAILURE")):
             S = R[k]
-            self.assertEqual(S["spg"][0], "⚠ Spaghetti: " + word, k)
+            self.assertEqual(S["spg"][0], "⚠ Spaghetti: " + word, k)                       # the BIG block is still there ...
+            self.assertEqual(S["spb"][0], "Spaghetti: " + word, k)                          # ... and so is the badge, with a triangle word
+            self.assertEqual(S["spbw"][0], "WARN" if k == "warn" else "FAIL", k)
             self.assertIn("sp-alert", S["cls"][0], k)
             self.assertFalse(S["banner"]["hidden"], k)
             self.assertIn("SPAGHETTI " + word + ": Printer-A", S["banner"]["text"], k)
@@ -98,9 +104,11 @@ class FleetCardTests(unittest.TestCase):
         for k in ("warm", "ok", "off"):
             self.assertNotIn("sp-alert", " ".join(R[k]["cls"]), k)
             self.assertTrue(R[k]["banner"]["hidden"], k)
-        self.assertEqual(R["ok"]["spg"][1], "Spaghetti: READY".replace("READY", "OFF"))           # Printer-B is on the "do not watch" list
-        self.assertEqual(R["down"]["spg"][0], "Spaghetti: DETECTOR DOWN")
-        self.assertEqual(R["off"]["spg"][0], "Spaghetti: OFF")
+        self.assertEqual(R["ok"]["spb"][1], "Spaghetti: OFF")                     # Printer-B is on the "do not watch" list
+        self.assertEqual(R["ok"]["spbw"][1], "OFF")
+        self.assertEqual(R["down"]["spb"][0], "Spaghetti: DETECTOR DOWN")
+        self.assertEqual(R["down"]["spbw"][0], "DOWN")
+        self.assertEqual(R["off"]["spb"][0], "Spaghetti: OFF")
 
     def test_all_cards_keep_one_shape_with_and_without_an_alert(self):
         R = self.kiosk()
@@ -275,7 +283,10 @@ R.sortTime = [...document.querySelectorAll('#files .frow .fname')].map(e => e.te
   R.chooser.open = document.getElementById('modal').classList.contains('on'); R.chooser.btns = modalBtns(); R.chooser.h = Math.min(...[...document.querySelectorAll('#mbody button')].map(b => r(b).h));
   document.querySelector('#mbody [data-k="name"]').click(); await sleep(100);
   R.chooser.closed = !document.getElementById('modal').classList.contains('on'); R.chooser.label1 = c.textContent.trim(); R.chooser.order = [...document.querySelectorAll('#files .frow .fname')].map(e => e.textContent);
-  c.click(); await sleep(100); R.chooser.btns2 = modalBtns(); document.querySelector('#mbody [data-k="latest"]').click(); await sleep(100); R.chooser.label2 = c.textContent.trim(); }
+  c.click(); await sleep(100); R.chooser.btns2 = modalBtns(); document.querySelector('#mbody [data-k="latest"]').click(); await sleep(100); R.chooser.label2 = c.textContent.trim();
+  c.click(); await sleep(100); document.querySelector('#mbody [data-act="fviewPick"][data-v="grid"]').click(); await sleep(150);          // Grid / List live in the chooser (they left the toolbar row)
+  R.chooser.grid = {closed: !document.getElementById('modal').classList.contains('on'), view: document.getElementById('files').dataset.view, store: localStorage.getItem('fabrica.filesview')};
+  c.click(); await sleep(100); R.chooser.btns3 = modalBtns(); document.querySelector('#mbody [data-act="fviewPick"][data-v="list"]').click(); await sleep(150); R.chooser.list = document.getElementById('files').dataset.view; }
 // the Spaghetti switch writes detection.excluded_printers (and nothing else)
 window.__calls.length = 0;
 document.getElementById('sp-tog').click(); await sleep(500);
@@ -431,26 +442,30 @@ class PrinterScreenTests(unittest.TestCase):
                 self.assertEqual(R[k]["tbarRows"], 1, (wide, k))
             c = R["chooser"]
             self.assertEqual((c["label0"], c["open"], c["closed"]), ("Sort: Time \u25be", True, True))
-            self.assertEqual(c["btns"], ["Recent", "Date", "Name", "\u2713 Time*", "Close"])      # words, a tick on the active one
+            self.assertEqual(c["btns"], ["Recent", "Date", "Name", "\u2713 Time*", "Grid", "\u2713 List*", "Close"])      # words, a tick on the active one; Grid / List live here too
             self.assertGreaterEqual(c["h"], 44)
             self.assertEqual(c["label1"], "Sort: Name \u25be")
             self.assertEqual(c["order"], sorted(c["order"], key=str.lower))
-            self.assertEqual(c["btns2"], ["Recent", "Date", "\u2713 Name*", "Time", "Close"])
+            self.assertEqual(c["btns2"], ["Recent", "Date", "\u2713 Name*", "Time", "Grid", "\u2713 List*", "Close"])
             self.assertEqual(c["label2"], "Sort: Recent \u25be")
-            self.assertIsNone(R["c"]["sortc"])                            # a printer with no list of files has no sort at all
-            for k in ("d",):                                              # idle: the full group stays, the one button stays away
-                self.assertEqual(R[k]["sort"], ["\u2713 Recent*", "Date", "Name", "Time"], (wide, k))
-                self.assertIsNone(R[k]["sortc"], (wide, k))
+            self.assertEqual(c["grid"], {"closed": True, "view": "grid", "store": "grid"}, wide)        # picking Grid in the chooser switches the files (and is remembered) ...
+            self.assertIn("\u2713 Grid*", c["btns3"], wide)                                              # ... and the chooser then ticks Grid
+            self.assertEqual(c["list"], "list", wide)
+            self.assertEqual(R["c"]["sortc"]["text"], "Sort: Recent \u25be")
+            for k in ("d",):                                              # idle: the one button too (the always-on Controls button needs the room); the row stays ONE row
+                self.assertEqual(R[k]["sort"], [], (wide, k))
+                self.assertEqual(R[k]["sortc"]["text"], "Sort: Recent \u25be", (wide, k))
                 self.assertEqual(R[k]["tbarRows"], 1, (wide, k))
         self.assertIsNone(self.go("desk", "", (1440, 900))["a"]["sortc"])                           # the desktop has the room: all four
         self.assertEqual(self.go("desk", "", (1440, 900))["a"]["sort"], ["\u2713 Recent*", "Date", "Name", "Time"])
-        self.assertIsNone(self.go("phone", "", (390, 844))["a"]["sortc"])                           # the phone keeps its own full-width row
+        ph = self.go("phone", "", (390, 844))["a"]
+        self.assertEqual((ph["sort"], ph["sortc"]["text"]), ([], "Sort: Recent \u25be"))                 # the phone too: one Sort button (Grid / List are in its chooser)
 
     def test_files_sort_in_the_toolbar_row_with_a_tick_and_the_current_file_is_tagged(self):
         R = self.kiosk()
         a = R["a"]
-        self.assertEqual(R["d"]["sort"], ["✓ Recent*", "Date", "Name", "Time"])
-        self.assertLessEqual(R["d"]["sortRow"]["b"], R["d"]["tbar"]["b"] + 4)        # inside the one toolbar row (the idle printer: the full group)
+        self.assertEqual(R["d"]["sortc"]["text"], "Sort: Recent ▾")                      # the 10-inch row: ONE sort button (its chooser has the four choices + Grid / List)
+        self.assertLessEqual(R["d"]["sortc"]["row"]["b"], R["d"]["tbar"]["b"] + 4)       # inside the one toolbar row
         self.assertEqual(R["sortBefore"][0], "Bracket x12 for the workshop shelf")      # newest first
         self.assertEqual(R["sortName"], sorted(R["sortName"], key=str.lower))
         self.assertEqual(R["sortNameBtns"], ["Recent", "Date", "✓ Name*", "Time"])
@@ -490,7 +505,7 @@ class PrinterScreenTests(unittest.TestCase):
         self.assertEqual((a["big"], a["spag"]["word"], a["cam"]["on"]), ("42%", "WATCHING", True))
         self.assertEqual(a["small"], [])
         self.assertLessEqual(a["cancel"]["r"], 390)
-        self.assertEqual(a["sort"], ["✓ Recent*", "Date", "Name", "Time"])
+        self.assertEqual((a["sort"], a["sortc"]["text"]), ([], "Sort: Recent ▾"))
         self.assertEqual(R["c"]["panel"]["vis"], True)
         self.assertGreaterEqual(R["lvA"], 1)
 

@@ -58,17 +58,14 @@ class StaticTests(unittest.TestCase):
         for needle in ("esc(CUR)", "esc(CS.msg.text)", "esc(m)", "esc(t.slot_1based)", "esc(String(locked.blocked)", "esc(n)"):
             self.assertIn(needle, CS_JS, needle)
 
-    def test_the_button_is_in_the_toolbar_the_5in_strip_and_always_first_under_more(self):
+    def test_the_button_is_one_static_toolbar_button_and_also_first_under_more(self):
         fn = block("function ctlRender(d){", "// once a second")
-        self.assertIn("const ctlsBtn = '<button data-ctl class=\"btn-ctls\" onclick=\"csOpen()\"", fn)
+        self.assertRegex(HTML, r'<button type="button" id="p-ctlbtn" data-ctl class="btn-ctls ctlmain" onclick="csOpen\(\)"')     # always in the toolbar HTML: no state can hide it
+        self.assertLess(HTML.index('id="p-ctlbtn"'), HTML.index('<span id="p-light"'))                          # right group, before Light
         self.assertIn("rare = [ctlsMore]", fn)                                     # More: always, also while printing
-        self.assertIn("(busy || !csPhone ? [] : [ctlsBtn]).concat(", fn)           # phone: next to Light in the toolbar
-        self.assertIn("busy || csPhone ? [] : [ctlsBtn])", fn)                    # 10-inch / desktop: the control strip (the toolbar row is full)
-        self.assertIn("busy ? [] : [ctlsBtn], tail)", fn)                          # the 5-inch action strip
-        self.assertIn("IC('sliders') + 'Controls'", fn)                           # an icon AND the word on the 5-inch strip
-        self.assertIn("if(!acts.length && !L5){", fn)
-        self.assertIn("CTL.rare = [ctlsMore]", fn)                                 # a printer with no actions (PrusaLink) still gets the button
-        self.assertIn('data-ctl', fn.split("const ctlsBtn")[1].split("\n")[0])      # a view-only sign-in never sees it
+        self.assertIn("CTL.rare = [ctlsMore]", fn)                                 # a printer with no actions (PrusaLink) still gets the entry
+        self.assertNotIn("ctlsBtn", fn)                                            # the old strip / Light-span copies are gone: ONE button
+        self.assertIn("html.lay-5in body:not(.viewonly) #printer .tbar > #p-ctlbtn", HTML)   # visible in the 5-inch header, but a view-only sign-in never sees it
 
     def test_a_view_only_sign_in_cannot_open_the_sheet(self):
         self.assertIn("if(document.body.classList.contains('viewonly')) return;", block("function csOpen(", "function csPoll"))
@@ -113,7 +110,9 @@ const REASON_LINK = "PrusaLink's v1 API has no light, temperature, G-code or fil
 const REASON_MMU = "MMU printer - load/unload from the printer's screen (the MMU picks the slot itself).";
 const GATE_BUSY = 'printer is RUNNING: heaters, filament and movement are not touched during a print.';
 FLEET = [mk('Rook', ['Home'], 'IDLE', 0, '', {kind: 'moonraker'}), mk('Press', ['Home'], 'RUNNING', 42, 'Bracket x12.gcode', {kind: 'moonraker', nozzle_c: 215, nozzle_target_c: 215, bed_c: 60, bed_target_c: 60}),
-  mk('Link', ['Home'], 'IDLE', 0, '', {kind: 'prusalink'}), mk('MK3', ['Home'], 'IDLE', 0, '', {kind: 'octoprint'}), mk('P1S', ['Home'], 'IDLE', 0, '', {kind: 'bambu'})];
+  mk('Link', ['Home'], 'IDLE', 0, '', {kind: 'prusalink'}), mk('MK3', ['Home'], 'IDLE', 0, '', {kind: 'octoprint'}), mk('P1S', ['Home'], 'IDLE', 0, '', {kind: 'bambu'}),
+  mk('MK4', ['Home'], 'RUNNING', 19, 'Phone Stand.gcode', {kind: 'moonraker', nozzle_c: 245, nozzle_target_c: 245, bed_c: 85, bed_target_c: 85, job_materials: ['PETG']}),
+  mk('Bare', ['Home'], 'RUNNING', 19, 'Mystery.gcode', {kind: 'moonraker', nozzle_c: 245, nozzle_target_c: 245, bed_c: 85, bed_target_c: 85})];
 const SC = {Rook: {homed: true, how: 'reported', light: 'off'}, Press: {homed: true, how: 'reported', light: 'on'}, Link: {}, MK3: {homed: false, how: 'hub', mmu: true}, P1S: {homed: false, how: 'hub', beta: true, light: 'off'}};
 const TRAYS = [{tray: 0, slot_1based: 1, type: 'PLA', color_name: 'GREEN'}, {tray: 1, slot_1based: 2, type: 'PETG', color_name: 'BLACK'}, {tray: 2, slot_1based: 3, type: '', color_name: ''}];
 window.__posts = []; window.__fail = {};
@@ -203,7 +202,7 @@ const tap = async (el, wait) => { el.dispatchEvent(new MouseEvent('click', {bubb
 const gT = g => [...g.querySelectorAll('text')].map(x => x.textContent).join(' ');
 const wedge = lab => [...document.querySelectorAll('#mbody .cs-wg')].find(g => gT(g).startsWith(lab));
 const jogZ = sg => document.querySelector('#mbody [data-act=csJog][data-axis=Z][data-sign="' + sg + '"]');
-const ctlButton = () => { const c = [...document.querySelectorAll('#printer button.btn-ctls')].filter(vis); return c.length ? {text: T(c[0]), n: c.length, where: c[0].closest('#p-light') ? 'light' : c[0].closest('#p-ctl-btns') ? 'strip' : 'other', h: Math.round(c[0].getBoundingClientRect().height)} : null; };
+const ctlButton = () => { const c = [...document.querySelectorAll('#printer button.btn-ctls')].filter(vis); return c.length ? {text: T(c[0]), n: c.length, where: c[0].closest('.tbar') ? 'toolbar' : c[0].closest('#p-light') ? 'light' : c[0].closest('#p-ctl-btns') ? 'strip' : 'other', row: Math.round((c[0].getBoundingClientRect().top + c[0].getBoundingClientRect().bottom) / 2 / 14), r: Math.round(c[0].getBoundingClientRect().right), l: Math.round(c[0].getBoundingClientRect().left), vw: document.documentElement.clientWidth, locked: null, h: Math.round(c[0].getBoundingClientRect().height)} : null; };
 const posts = () => window.__posts.slice();
 const open = async n => { await fleet(); await sleep(120); openPrinter(n); await sleep(600); };
 const toolbarRows = () => { const bar = document.querySelector('#printer .tbar'); return new Set([...bar.children].filter(vis).map(e => { const b = e.getBoundingClientRect(); return Math.round((b.top + b.bottom) / 2 / 14); })).size; };
@@ -313,14 +312,24 @@ await click(/^Change filament/); await click(/^PLA/, 300);
 R.refused = wiz();
 delete window.__fail.preheat; closeModal();
 
-// ---- 5. Press: printing. No Controls button in the toolbar; it is the first thing under More; the sheet is locked in words, the light still works
+// ---- 5. Press: printing. The Controls button is STILL in the toolbar row; the pop-up opens with its parts locked and ONE line in words; the light still works; More has the entry too
 await open('Press');
 R.press = {btn: ctlButton(), tbar: toolbarRows()};
+document.querySelector('#printer button.btn-ctls').click(); await sleep(300);
+R.press.opened = sheetOpen(); R.press.sheet = sheet(); R.press.lock = T(document.querySelector('#mbody .cs-lock')); R.press.nlock = document.querySelectorAll('#mbody .cs-lock').length;
+R.press.light = btnInfo(bt(/^Light/));
+window.__posts.length = 0; { const b = bt(/^PLA 210/); b && b.click(); await sleep(100); await tap(wedge('X+')); R.press.posts = posts(); }
+R.press.tg = cards().tgt;
+closeModal();
 if(L5){ document.getElementById('p-more5').click(); await sleep(250); R.press.more = [...document.querySelectorAll('#pmore-box button')].map(T); document.querySelector('#pmore-box .btn-ctls').click(); await sleep(300); }
 else { document.querySelector('.fmore-tb').click(); await sleep(250); R.press.more = [...document.querySelectorAll('#mbody button')].filter(vis).map(T); document.querySelector('#mbody .btn-ctls').click(); await sleep(300); }
-R.press.sheet = sheet(); R.press.lock = T(document.querySelector('#mbody .cs-lock'));
-window.__posts.length = 0; { const b = bt(/^PLA 210/); b && b.click(); await sleep(100); await tap(wedge('X+')); R.press.posts = posts(); }
-closeModal();
+R.press.moreOpened = sheetOpen(); closeModal();
+
+// ---- 5b. the material word comes ONLY from the running job's own file: a PETG job at 245 C (the ABS preset's temperature) never says ABS; no material in the file = no word
+for(const [k, n] of [['mk4', 'MK4'], ['bare', 'Bare']]){
+  await open(n); document.querySelector('#printer button.btn-ctls').click(); await sleep(300);
+  R[k] = {tgt: cards().tgt, chips: cards().chips[0].map(b => b.t + ':' + b.pressed), text: T(document.querySelector('#mbody .cs')), btn: ctlButton()}; closeModal();
+}
 
 // ---- 6. Link (PrusaLink): everything is shown disabled with the reason in words
 await open('Link');
@@ -381,20 +390,36 @@ class SheetBrowserTests(unittest.TestCase):
         return [(name, self.run_layout(name, q, size)) for name, (q, size) in self.LAYOUTS.items()]
 
     # ------------------------------------------------------------------ the button, on every layout
-    def test_the_controls_button_is_on_every_layout_with_a_word_and_a_finger_sized_target(self):
+    def test_the_controls_button_is_on_every_layout_idle_and_printing_with_a_word_and_a_finger_sized_target(self):
         for name, R in self.each():
-            b = R["rook"]["btn"]
-            self.assertIsNotNone(b, name)
-            self.assertIn("Controls", b["text"], name)                           # a word, not only an icon
-            self.assertGreaterEqual(b["h"], 36 if name == "desktop" else 43, name)       # the desktop (mouse) layout is 36 px tall on its whole toolbar
-            self.assertEqual(b["n"], 1, name)
-            self.assertEqual(b["where"], "light" if name == "phone" else "strip", name)       # phone: beside Light; every other layout: the control strip
+            for state, key in (("idle", "rook"), ("printing", "press")):
+                b = R[key]["btn"]
+                self.assertIsNotNone(b, (name, state))
+                self.assertIn("Controls", b["text"], (name, state))                       # a word, not only an icon
+                self.assertGreaterEqual(b["h"], 36 if name == "desktop" else 43, (name, state))       # the desktop (mouse) layout is 36 px tall on its whole toolbar
+                self.assertEqual(b["n"], 1, (name, state))
+                self.assertEqual(b["where"], "toolbar", (name, state))                    # in the top toolbar row, never in a strip
+                self.assertGreaterEqual(b["l"], 0, (name, state))
+                self.assertLessEqual(b["r"], b["vw"], (name, state))                       # (the page's own width: CI draws a 15 px scrollbar)
             self.assertTrue(R["rook"]["open"], name)
+            self.assertTrue(R["press"]["opened"], name)                                    # a printing printer opens the pop-up from the same button
+            self.assertTrue(R["press"]["moreOpened"], name)                                # ... and from More
 
-    def test_the_toolbar_stays_one_row_on_the_wide_layouts(self):
+    def test_the_toolbar_stays_one_row_on_the_wide_layouts_idle_and_printing_also_with_a_wide_font(self):
         for name in ("kiosk", "desktop"):
-            R = self.run_layout(name, *self.LAYOUTS[name])
+            R = self.run_layout(name, *self.LAYOUTS[name])               # (the driver runs with the wide fallback font the Linux CI machines draw)
             self.assertEqual(R["rook"]["tbar"], 1, name)
+            self.assertEqual(R["press"]["tbar"], 1, name)
+            self.assertEqual(R["rook"]["btn"]["row"], R["press"]["btn"]["row"], name)
+
+    def test_the_phone_and_5_inch_toolbars_do_not_wrap_past_four_rows_and_the_5_inch_header_stays_one_row(self):
+        for name in ("phone",):
+            R = self.run_layout(name, *self.LAYOUTS[name])
+            self.assertLessEqual(R["press"]["tbar"], 4, name)
+            self.assertLessEqual(R["rook"]["tbar"], 3, name)
+        for name in ("5in", "bridge"):
+            R = self.run_layout(name, *self.LAYOUTS[name])
+            self.assertEqual(R["press"]["btn"]["where"], "toolbar", name)
 
     # ------------------------------------------------------------------ the pop-up fits: no cut words, no sideways scroll
     def test_the_popup_fits_every_layout_with_no_cut_words_and_no_sideways_scroll(self):
@@ -501,7 +526,7 @@ class SheetBrowserTests(unittest.TestCase):
     def test_the_meters_say_the_same_thing_in_numbers(self):
         for name, R in self.each():
             self.assertTrue(all(0 <= int(p) <= 100 for p in R["rook"]["cards"]["pct"]), name)
-            self.assertEqual(R["rook"]["live"]["tg"], "→ 235° PETG", name)               # the target in words, with the material it matches
+            self.assertEqual(R["rook"]["live"]["tg"], "→ 235°", name)                     # the target in words - NO material word: nothing in a file says one (a temperature never names a material)
             self.assertEqual(R["rook"]["live"]["noz"], "215°", name)
             self.assertEqual(R["rook"]["live"]["pct"], "91", name)                       # 215 of 235, filling toward the target
 
@@ -511,7 +536,7 @@ class SheetBrowserTests(unittest.TestCase):
             self.assertEqual(r["afterNoz"]["posts"], [{"printer": "Rook", "action": "preheat", "material": "PETG"}], name)
             self.assertIn("✓ PETG 235°:true", r["afterNoz"]["chips"], name)
             self.assertIn("Off:false", r["afterNoz"]["chips"], name)
-            self.assertEqual(r["afterNoz"]["tgt"], "→ 235° PETG", name)
+            self.assertEqual(r["afterNoz"]["tgt"], "→ 235°", name)                      # the chip is ticked, but the words never claim a material the file did not name
             self.assertEqual(r["afterBed"], [{"printer": "Rook", "action": "preheat", "preset": "PETG"}], name)
             self.assertEqual(r["afterOff"], [{"printer": "Rook", "action": "heater_off", "heater": "nozzle"}], name)
 
@@ -651,18 +676,41 @@ class SheetBrowserTests(unittest.TestCase):
             self.assertIn("bad", r["cls"], name)
 
     # ------------------------------------------------------------------ what each printer family is shown
-    def test_a_printing_printer_is_locked_in_words_and_reaches_the_sheet_through_more(self):
+    def test_a_printing_printer_is_locked_in_words_and_the_sheet_opens_from_the_toolbar_and_from_more(self):
         for name, R in self.each():
             p = R["press"]
-            self.assertIsNone(p["btn"], name)                                               # no extra row while printing
             self.assertTrue(any("Controls" in t for t in p["more"]), name)
-            self.assertIn("Locked:", p["lock"], name)
-            self.assertIn("not touched during a print", p["lock"], name)
+            self.assertEqual(p["lock"], "🔒 Locked while printing", name)                  # ONE clear line in words ...
+            self.assertEqual(p["nlock"], 1, name)                                          # ... not a second reason line
             dis = {b["t"]: b["dis"] for b in p["sheet"]["btns"]}
             for t in ("Change filament…", "Unload", "Load", "PLA 210°", "Off", "Up", "Pull"):
                 self.assertTrue(any(t in k and v for k, v in dis.items()), (name, t))
             self.assertTrue(all(w["dis"] for w in p["sheet"]["wedges"]), name)           # the ring is locked as well
+            self.assertFalse(p["light"]["dis"], name)                                       # the light still works
             self.assertEqual(p["posts"], [], name)                                          # a disabled button sends nothing
+
+    def test_the_idle_sheet_has_no_locked_line(self):
+        for name, R in self.each():
+            self.assertNotIn("Locked", R["rook"]["cold"]["text"], name)
+
+    def test_a_material_word_comes_only_from_the_running_jobs_file_never_from_a_temperature(self):
+        for name, R in self.each():
+            self.assertEqual(R["mk4"]["tgt"][0], "→ 245° PETG", name)                      # the file says PETG (an ABS-hot 245 C): PETG, never ABS
+            self.assertNotIn("ABS 245°", R["mk4"]["tgt"][0], name)
+            self.assertIn("✓ ABS 245°:true", R["mk4"]["chips"], name)                      # the chip may still tick the preset whose temperature matches ...
+            self.assertEqual(R["bare"]["tgt"][0], "→ 245°", name)                          # ... but with no material in any file there is NO word
+            self.assertNotIn("ABS", R["bare"]["tgt"][0], name)
+            self.assertEqual(R["rook"]["live"]["tg"], "→ 235°", name)                      # an idle printer heated by hand: no job, no word
+            self.assertEqual(R["press"]["tg"][0], "→ 215°", name)                          # a running job with no material in its file: no word either
+
+    def test_the_page_never_names_a_material_by_matching_a_temperature(self):
+        self.assertNotIn("nozNames.find(nozOn)", HTML)
+        self.assertNotIn("bedNames.find(bedOn)", HTML)
+        fn = block("function jobMats(s){", "// the material in words")
+        self.assertIn("BUSY_STATES.includes(s.state)", fn)                                  # a job that is running now ...
+        self.assertIn("job_materials", fn)                                                  # ... the snapshot's list from its file ...
+        self.assertIn("FS.files.find(", fn)                                                 # ... or the printer screen's file row of that job
+        self.assertNotRegex(fn, r"temps|_target_c|nozzle_c|presets")                       # (never a temperature)
 
     def test_prusalink_shows_everything_disabled_with_the_reason_in_words(self):
         for name, R in self.each():

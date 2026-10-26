@@ -673,6 +673,7 @@ if(L5){ document.documentElement.classList.add('lay-5in'); if(L5T === 'bridge') 
     <button type="button" id="p-frefresh" data-act="filesRefresh" title="Re-read the file list from the printer">&#8635; Refresh</button><!-- every layout but the 5-inch (its files sheet has its own): same one toolbar row, a word label, 44 px -->
     <span class="grow"></span>
     <span id="vo-chip2" class="chip idle" hidden>VIEW-ONLY</span>
+    <button type="button" id="p-ctlbtn" data-ctl class="btn-ctls ctlmain" onclick="csOpen()" title="Open Controls: temperatures, move, filament, light (locked while a print runs)"><span class="ce" aria-hidden="true">&#127899;&#65039;</span> Controls</button><!-- ALWAYS here, idle or printing, on every layout: opens the Controls pop-up (its parts are locked, in words, while a print runs) -->
     <span id="p-light" data-ctl></span><!-- the Light button (10-inch / desktop / phone): the one control worth a place in the toolbar row -->
     <button type="button" data-ctl class="fmore-tb" data-act="filesMore" aria-haspopup="dialog" title="Back up the files, re-read their details">More &#8943;</button>
     <button data-ctl onclick="bkStart(CUR)" title="Zip every file on this printer into a backup on the Hub">Back up files</button>
@@ -3730,6 +3731,16 @@ html:not(.lay-5in) #p-sortc { display:none; }
   html:not(.lay-5in):not([data-view="desktop"]) #printer.busy #p-sort { display:none; }
   html:not(.lay-5in):not([data-view="desktop"]) #printer.busy #p-sortc:not([hidden]) { display:inline-flex; align-items:center; flex:none; min-height:44px; padding:4px 8px; font-size:13px; white-space:nowrap; }
 }
+/* the 10-inch row and any narrow window (761-1199 px, all views): ONE "Sort: Recent ▾" button (its chooser also holds Grid / List) stands in for the four sort buttons AND the Grid / List pair,
+   so the always-on Controls button, Light, More, Pause and Cancel fit on the one row even with a wide fallback font */
+@media (min-width:761px) and (max-width:1199px) and (not ((orientation:landscape) and (max-height:500px) and (max-width:932px))) {
+  html:not(.lay-5in) #printer .tbar #p-sort, html:not(.lay-5in) #printer .tbar #p-view { display:none; }
+  html:not(.lay-5in) #printer .tbar #p-sortc:not([hidden]) { display:inline-flex; align-items:center; flex:none; min-height:44px; padding:4px 8px; font-size:13px; white-space:nowrap; }
+  html[data-view="desktop"] #printer .tbar #p-sortc:not([hidden]) { min-height:36px; }
+}
+@media (min-width:761px) and (not ((orientation:landscape) and (max-height:500px) and (max-width:932px))) {
+  html:not(.lay-5in):not([data-view="desktop"]) #printer.busy #p-view { display:none; }      /* printing on the 10-inch layout: Grid / List live in the sort chooser too */
+}
 html:not(.lay-5in) #p-fcount { display:none; }                 /* the count rides in the sort group's name; the one toolbar row has no room for the words */
 /* the files: the one in the printer right now says so */
 html:not(.lay-5in) .frow .nowtag { flex:none; font-size:15px; font-weight:800; padding:0 14px; border:2px solid var(--txt); border-radius:10px; min-height:44px; display:flex; align-items:center; }
@@ -4384,9 +4395,9 @@ html.lay-5in.th-bridge .fr5 .elt { position:absolute; left:14px; top:44px; font-
 html.lay-5in.th-bridge .fr5 .bara { position:absolute; left:128px; top:0; width:300px; height:32px; background:var(--tan); }
 html.lay-5in.th-bridge .fr5 .lab { position:absolute; left:436px; top:0; width:190px; height:32px; display:flex; align-items:center; color:var(--tan); font-size:18px; font-weight:700; letter-spacing:.04em; white-space:nowrap; text-transform:uppercase; overflow:hidden; text-overflow:ellipsis; display:block; line-height:32px; }
 html.lay-5in.th-bridge #printer .fr5 .lab, html.lay-5in.th-bridge #files .fr5 .lab { display:none; }
-html.lay-5in.th-bridge .fr5 .rfill { position:absolute; left:0; width:72px; bottom:70px; top:268px; background:var(--gray2); }
+html.lay-5in.th-bridge .fr5 .rfill { position:absolute; left:0; width:72px; bottom:70px; top:328px; background:var(--gray2); }
 html.lay-5in.th-bridge #home .fr5 .rfill { display:none; }
-html.lay-5in.th-bridge #printer:not(:has(.btn-light)) .fr5 .rfill { top:208px; }
+html.lay-5in.th-bridge #printer:not(:has(.btn-light)) .fr5 .rfill { top:268px; }
 html.lay-5in.th-bridge #files .fr5 .rfill { top:328px; }
 html.lay-5in.th-bridge .fr5 .elbb { position:absolute; left:0; bottom:0; width:124px; height:66px; background:var(--tan); border-radius:0 0 0 44px; }
 html.lay-5in.th-bridge .fr5 .elbb::after { content:""; position:absolute; left:72px; bottom:14px; width:52px; height:52px; background:#000; border-radius:0 0 0 26px; }
@@ -4857,6 +4868,41 @@ html.lay-5in.th-bridge #p-act button.danger { border:4px solid var(--txt); }
 html.lay-5in.th-bridge #fleet .pcard .stat .spq { height:28px; margin-top:2px; }
 html.lay-5in.th-bridge #fleet .pcard .stat .spq button { height:28px; border:0; border-radius:16px; background:var(--tan); color:#000; font-size:12px; letter-spacing:.05em; text-transform:uppercase; }
 html.lay-5in.th-bridge #fleet .pcard .stat .spq .spq-c { background:var(--rose); border:3px solid var(--txt); color:#000; }
+/* ==== slimmer fleet cards: no Nozzle / Bed line, no "Spaghetti: WATCHING" line - a small badge on the "Done" row, the update time on the picture ==== */
+html:not(.lay-5in) .pcard .erow { display:flex; align-items:center; gap:8px; min-width:0; }
+html:not(.lay-5in) .pcard .erow .eta { flex:1 1 0; min-width:0; }
+.spb { flex:none; display:inline-flex; align-items:center; gap:5px; border:1.5px solid var(--dim); border-radius:11px; padding:4px 8px; font-size:11px; font-weight:800; letter-spacing:.06em; line-height:1.2; color:var(--txt); background:transparent; white-space:nowrap; }
+.spb svg { width:16px; height:16px; }
+.spb b { font-weight:800; }
+.spb.off, .spb.nocamera { color:var(--dim); }
+.spb.alert, .spb.down { border:3px solid var(--txt); background:var(--card2); padding:2px 7px; }          /* a warning: a heavy frame + a triangle + the word, not a colour */
+.spb.down b { text-decoration:underline; }
+html:not(.lay-5in) .cardcam { position:relative; }
+html:not(.lay-5in) .cardcam .camstat { position:absolute; right:7px; bottom:7px; height:auto; max-width:calc(100% - 14px); padding:3px 7px; border-radius:7px; background:rgba(0,0,0,.66); color:#e8ebef; font-size:11.5px; font-weight:700; line-height:1.25; }
+html:not(.lay-5in) .cardcam .camstat:empty { display:none; }
+html.lay-5in .spag .spb { font-size:11px; padding:2px 7px; }
+html.lay-5in .spag .spb svg { width:14px; height:14px; }
+/* ==== the always-on Controls button (toolbar row, every layout, idle AND printing) ====
+   One real button in the printer screen's top row. 10-inch / desktop: right group, before Light. Phone: with Refresh + More on the row under Light / Pause / Cancel.
+   5-inch quiet: the header, right of the title. 5-inch Bridge: a block of the left rail under More. The emoji is decoration; the WORD is the label. */
+html:not(.lay-5in) #printer .tbar #p-ctlbtn { flex:none; white-space:nowrap; font-weight:700; display:inline-flex; align-items:center; justify-content:center; gap:5px; border:2px solid var(--txt); background:var(--card2); }
+html:not(.lay-5in) #printer .tbar #p-ctlbtn .ce { font-size:1.05em; line-height:1; }
+@media (min-width:761px) { html:not(.lay-5in) #printer .tbar #p-ctlbtn { padding:6px 9px; font-size:14px; min-height:44px; } html[data-view="desktop"] #printer .tbar #p-ctlbtn { min-height:36px; } }
+@media (max-width:760px), (orientation:landscape) and (max-height:500px) and (max-width:932px) {
+  /* phone rows: title . Pause / Cancel (while printing) . Controls + Light . Sort + Refresh + More (Grid / List are in the sort chooser) */
+  html:not(.lay-5in) #printer .tbar #p-ctlbtn, html:not(.lay-5in) #printer .tbar #p-light button { order:7; flex:1 1 calc(50% - 4px); min-height:52px; padding:4px 10px; font-size:17px; }
+  html:not(.lay-5in) #printer .tbar #p-sort, html:not(.lay-5in) #printer .tbar #p-view { display:none; }
+  html:not(.lay-5in) #printer .tbar #p-sortc:not([hidden]) { display:inline-flex; align-items:center; justify-content:center; order:8; flex:1 1 auto; min-height:48px; padding:4px 10px; font-size:15px; white-space:nowrap; }
+  html:not(.lay-5in) #printer .tbar #p-frefresh { order:9; flex:1 1 auto; }
+  html:not(.lay-5in) #printer .tbar .fmore-tb { order:10; flex:none; }
+}
+html.lay-5in body:not(.viewonly) #printer .tbar > #p-ctlbtn { display:inline-flex !important; order:4; flex:none; align-items:center; justify-content:center; gap:6px; height:44px; min-height:44px; padding:0 16px; border-radius:12px; font-size:16px; font-weight:700; white-space:nowrap; }
+html.lay-5in #printer .tbar > #p-ctlbtn .ce { font-size:18px; line-height:1; }
+html.lay-5in.th-bridge #printer .tbar > #p-ctlbtn { position:absolute; left:-128px; top:268px; width:72px; height:56px; min-height:56px; padding:0 8px 6px 0; border:0; border-radius:0; background:var(--tan); color:#000; flex-direction:column; align-items:flex-end; justify-content:flex-end; gap:0; font-size:10px; letter-spacing:0; text-transform:uppercase; white-space:normal; line-height:1.05; }
+html.lay-5in.th-bridge #printer .tbar > #p-ctlbtn .ce { font-size:16px; }
+html.lay-5in.th-bridge #printer:not(:has(.btn-light)) .tbar > #p-ctlbtn { top:208px; }
+/* the Controls pop-up while a print runs: its parts are disabled by the Hub's rule; this line says so in words */
+.cs-lock.cs-printing { font-size:16px; font-weight:800; }
 </style>
 <script>
 const SEC = { d:null, err:'', msg:null, loading:false, pwBusy:false, newKey:null, dev:null, admin:null };   // admin: null | 'unset' | 'locked' | 'ok' (the admin password, see secAdminHtml)
@@ -6153,22 +6199,21 @@ function renderFleet(data){
       // the same per-state words as the 5-inch card, in the 10-inch card's own lines (no line is added, so every card keeps the same height)
       const k = cardKind(p), cp = cardParts(p, k, conn), prog = k === 'printing' || k === 'paused';
       const eta = k === 'printing' ? (cp.rem ? 'Done ' + finishAt(cp.rem) : cp.sub) : cp.sub;
-      const pctLine = prog ? esc(cp.pct) + '%' + (k === 'printing' ? (cp.rem ? ' \u00b7 ' + esc(cp.left) : '') + (cp.hasLy ? '<span class="tail"> \u00b7 ' + esc(cp.xtra) + '</span>' : '') : '') : esc(cp.xtra);       // a paused card's eta line already says "Paused"; nothing to cut off here
+      const pctLine = prog ? esc(cp.pct) + '%' + (k === 'printing' ? (cp.rem ? ' \u00b7 ' + esc(cp.left) : '') + (cp.xtra ? '<span class="tail"> \u00b7 ' + esc(cp.xtra) + '</span>' : '') : '') : esc(cp.xtra);       // a paused card's eta line already says "Paused"; nothing to cut off here
       const spag = spagCard(p, k === 'printing');
-      // a WARNING / FAILURE on a card: the word opens that printer's screen (a button, same as the card), and the Nozzle / Bed line gives way to a compact Pause / Cancel row
+      // a WARNING / FAILURE on a card: the BIG block stays (an inverted line + a heavy frame, the word opens that printer's screen) and a compact Pause / Cancel row joins it
       const spAttr = spag.k === 'alert' ? ' role="button" tabindex="0" data-act="openPrinter" data-name="' + esc(p.printer) + '" title="Open ' + esc(p.printer) + ' to check the camera"' : '';
-      const tmpLine = spag.k === 'alert' && (k === 'printing' || k === 'paused') ? spQuick(p.printer, p.state)
-        : `<div class="meta tmp">Nozzle ${tnum(p.nozzle_c)}${tdeg()} · Bed ${tnum(p.bed_c)}${tdeg()}</div>`;
+      const quick = spag.k === 'alert' && (k === 'printing' || k === 'paused') ? spQuick(p.printer, p.state) : '';
+      const spLine = spag.k === 'alert' ? `<div class="meta spg alert"${spAttr}>\u26a0 Spaghetti: <b>${esc(spag.word)}</b></div>` : '';
       return `<div class="pcard k-${k}${spag.k === 'alert' ? ' sp-alert' : ''}" data-act="openPrinter" data-name="${esc(p.printer)}" data-cam="${p.camera ? 1 : 0}">
         <div class="prow"><span class="pname" title="${esc(p.printer)}">${esc(p.printer)}</span>
           ${chipH}</div>
         <div class="job">${esc(cp.file)}</div>
         <div class="bar"><i style="width:${prog ? cp.pct : 0}%"></i></div>
         <div class="cslot" data-i="${i}"></div>
-        <div class="eta${k === 'printing' && cp.rem ? '' : ' q'}">${esc(eta)}</div>
+        <div class="erow"><div class="eta${k === 'printing' && cp.rem ? '' : ' q'}">${esc(eta)}</div>${k === 'error' || k === 'nc' ? '' : spBadge(spag)}</div>
         <div class="meta pct${exwCls(cp.xtra)}">${pctLine}</div>
-        ${tmpLine}
-        <div class="meta spg ${esc(spag.k)}"${spAttr}>${IC(SPAG_ICON[spag.k] || 'eye')}${spag.k === 'alert' ? '\u26a0 ' : ''}Spaghetti: <b>${esc(spag.word)}</b></div>
+        ${quick}${spLine}
       </div>`;
     }).join('');
   }
@@ -6202,6 +6247,14 @@ function spagInfo(o){
   return {k:'ready', word:'READY', sub:o.learn ? 'Learn-only \u00b7 watches prints' : 'Watches while printing'};
 }
 const SPAG_ICON = {nocamera:'camoff', off:'eyeoff'};
+// The small Spaghetti BADGE at the right end of a fleet card's "Done ~6:59 PM" row: a SHAPE (eye / eye with a slash / camera with a slash / warning triangle) + a WORD,
+// never colour alone. The tooltip / aria text keeps the full words: "Spaghetti: WATCHING".  OK = watching, WARN / FAIL = a warning (bold frame), OFF, NO CAM.
+const SPB = {on:['eye','OK'], ready:['eye','READY'], learn:['eye','LEARN'], off:['eyeoff','OFF'], nocamera:['camoff','NO CAM'], down:['warn','DOWN'], alert:['warn','WARN']};
+function spBadge(sp){
+  const [ic, w0] = SPB[sp.k] || ['eye', '\u2014'];
+  const w = sp.k === 'alert' && sp.word === 'FAILURE' ? 'FAIL' : w0, say = 'Spaghetti: ' + sp.word;
+  return '<span class="spb ' + esc(sp.k) + '" role="img" title="' + esc(say) + '" aria-label="' + esc(say) + '">' + IC(ic) + '<b>' + esc(w) + '</b></span>';
+}
 // the detector's answer for the cards (GET /api/detection, read-only): one per poll, the last good answer is kept when it fails
 const DET5 = {d:null};
 async function det5Fetch(){
@@ -6278,7 +6331,7 @@ function cardParts(p, k, conn){
     big = pct + '%';
     sub = k === 'paused' ? (rem ? 'Paused · ' + left : 'Paused') : (rem ? finishAt(rem) + ' · ' + left : (p.state === 'PREPARE' ? 'Starting' : 'Printing'));
     file = p.job || 'No job';
-    xtra = k === 'paused' ? 'Tap to resume or cancel' : (hasLy ? 'Layer ' + ly.replace('/', ' / ') : '');
+    xtra = k === 'paused' ? 'Tap to resume or cancel' : (hasLy ? 'Layer ' + ly.replace('/', ' / ') : jobMats(p).slice(0, 2).join(' + '));   // no layers reported: the job's material instead, when its file says (never guessed)
   } else if(k === 'idle'){
     big = 'IDLE'; sub = 'Ready to print'; file = p.job || 'No job yet';
     xtra = p.job ? (p.state === 'FINISH' ? 'Last job · finished' : p.state === 'FAILED' ? 'Last job · cancelled' : 'Last job') : '';
@@ -6311,7 +6364,7 @@ function l5Card(p, i){
       <div class="stat"><div class="big${bigCls}">${esc(big)}</div><div class="sub">${esc(sub)}</div>${fileXtra}</div></div>
     <div class="bar"><i style="width:${(k === 'printing' || k === 'paused') ? pct : 0}%"></i></div>
     <div class="r3"><div class="temps">${l5Tp('nozzle', 'Nozzle', up ? p.nozzle_c : null, p.nozzle_target_c)}${l5Tp('bed', 'Bed', up ? p.bed_c : null, p.bed_target_c)}</div>
-      <div class="spag ${spag.k}"${spAttr}>${IC(SPAG_ICON[spag.k] || 'eye')}${spag.k === 'alert' ? '\u26a0 ' : ''}Spaghetti: <b>${esc(spag.word)}</b></div></div>
+      ${spag.k === 'alert' ? `<div class="spag alert"${spAttr}>\u26a0 Spaghetti: <b>${esc(spag.word)}</b></div>` : `<div class="spag ${spag.k}">${spBadge(spag)}</div>`}</div>
   </div>`;
 }
 
@@ -6597,6 +6650,7 @@ const L5_SYMBOLS = '<svg width="0" height="0" style="position:absolute" aria-hid
   '<symbol id="i-bulb" viewBox="0 0 24 24"><path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-4 10.5c.7.6 1 1.3 1 2.5h6c0-1.2.3-1.9 1-2.5A6 6 0 0 0 12 3z"/></symbol>' +
   '<symbol id="i-flame" viewBox="0 0 24 24"><path d="M12 3c1 4 5 5 5 10a5 5 0 0 1-10 0c0-2 1-3 2-4 0 2 1 3 2 3 0-3-1-6 1-9z"/></symbol>' +
   '<symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 6h8M16 6h4M4 12h3M11 12h9M4 18h10M18 18h2M14 4v4M7 10v4M16 16v4"/></symbol>' +
+  '<symbol id="i-warn" viewBox="0 0 24 24"><path d="M12 3L22 20H2z"/><path d="M12 10v5M12 17.6v.2" stroke-width="2.4"/></symbol>' +
   '<symbol id="i-snow" viewBox="0 0 24 24"><path d="M12 2v20M2 12h20M5 5l14 14M19 5L5 19"/></symbol></svg>';
 const FR5 = '<div class="fr5" aria-hidden="true"><i class="elb"></i><b class="elt" data-fr="elbow"></b><i class="bara"></i><b class="lab" data-fr="lab"></b><i class="rfill"></i><i class="elbb"></i><i class="bbl"></i><i class="bbr"></i></div>';
 function filesOpen(){
@@ -6730,13 +6784,19 @@ function filesMore(){
       <button class="big" onclick="closeModal()">Close</button></div>`;
   $('modal').classList.add('on');
 }
-// The one-button sort (while printing, 10-inch layout): the same choices as the four buttons, as big words with a tick on the active one
+// The one-button sort (the 10-inch layout and any narrow window; always while printing on the 10-inch layout): the same choices as the four buttons, as big words with a
+// tick on the active one - and, below them, the Grid / List choice (that pair left the toolbar row to make room for the always-on Controls button)
 function sortOpen(){
   const keys = FS.fresh && FS.files.length > 1 ? filesKeys(FS.files).filter(k => k !== 'size') : [];
-  if(!keys.length) return;
+  if(!keys.length && !FS.files.length) return;
+  const cur = filesViewGet();
+  const pick = k => '<button class="big" data-act="sortPick" data-k="' + k + '" aria-pressed="' + (FS.key === k ? 'true' : 'false') + '"' + (FS.key === k ? ' style="border:2px solid var(--txt);font-weight:800"' : '') + '>' + (FS.key === k ? '\u2713 ' : '') + FKEYS[k] + '</button>';
+  const view = k => '<button class="big" data-act="fviewPick" data-v="' + k + '" aria-pressed="' + (cur === k ? 'true' : 'false') + '" style="flex:1' + (cur === k ? ';border:2px solid var(--txt);font-weight:800' : '') + '">' + (cur === k ? '\u2713 ' : '') + FVIEWS[k] + '</button>';
   $('mbody').innerHTML = `<h2>Sort the ${FS.files.length} files</h2>
     <div class="row" style="flex-direction:column;align-items:stretch;gap:8px">
-      ${keys.map(k => '<button class="big" data-act="sortPick" data-k="' + k + '" aria-pressed="' + (FS.key === k ? 'true' : 'false') + '"' + (FS.key === k ? ' style="border:2px solid var(--txt);font-weight:800"' : '') + '>' + (FS.key === k ? '\u2713 ' : '') + FKEYS[k] + '</button>').join('')}
+      ${keys.map(pick).join('')}
+      <h2 style="margin:6px 0 0;font-size:20px">Show the files as</h2>
+      <div class="row" style="gap:8px">${['grid', 'list'].map(view).join('')}</div>
       <button class="big" onclick="closeModal()">Close</button></div>`;
   $('modal').classList.add('on');
   const first = $('mbody').querySelector('button[aria-pressed="true"]') || $('mbody').querySelector('button'); if(first) first.focus();
@@ -6755,6 +6815,21 @@ function fileMats(f){
   else if(f && f.filament_type) m = [{t: String(f.filament_type), c: ''}];
   const seen = new Set();
   return m.map(x => ({t: x.t.toUpperCase(), c: x.c})).filter(x => x.t && !seen.has(x.t) && seen.add(x.t));
+}
+// The material of the job that is RUNNING right now, in words: ONLY what that job's own file says - the snapshot's `job_materials` (the Hub reads them from its
+// file cache) or, on the printer screen, the file list row of that job. [] = not known. It is NEVER worked out from a temperature (an MK4 printing PETG at 245 C
+// is not "ABS" because the ABS preset is 245 C).
+function jobMats(s){
+  if(!s || !s.job || !BUSY_STATES.includes(s.state)) return [];
+  const own = Array.isArray(s.job_materials) ? s.job_materials.map(x => String(x || '').trim().toUpperCase()).filter(Boolean) : [];
+  if(own.length) return [...new Set(own)];
+  try{
+    if(CUR === s.printer && FS && Array.isArray(FS.files)){
+      const f = FS.files.find(x => filesBase(s.job) === filesBase(fileShow(x)) || filesBase(s.job) === filesBase(x.name));
+      if(f) return fileMats(f).map(m => m.t);
+    }
+  }catch(e){}
+  return [];
 }
 // the material in words, before the Print button; unknown = no badge (never a guess)
 function badgeHtml(f){
@@ -6965,7 +7040,7 @@ function filesRender(){
     $('p-sort').setAttribute('aria-label', 'Sort the ' + files.length + ' files');
     $('p-sort').innerHTML = keys.map(k => '<button data-act="fsort" data-k="' + k + '" aria-pressed="' + (FS.key === k ? 'true' : 'false') + '">' + (FS.key === k ? '\u2713 ' : '') + FKEYS[k] + '</button>').join('');
     $('p-sort').hidden = !keys.length;
-    $('p-sortc').hidden = !keys.length; $('p-sortc').textContent = 'Sort: ' + (FKEYS[FS.key] || '') + ' \u25be'; $('p-sortc').setAttribute('aria-label', 'Sort the ' + files.length + ' files, now by ' + (FKEYS[FS.key] || '').toLowerCase());
+    $('p-sortc').hidden = !keys.length && !files.length; $('p-sortc').textContent = keys.length ? 'Sort: ' + (FKEYS[FS.key] || '') + ' \u25be' : 'View: ' + FVIEWS[filesViewGet()] + ' \u25be'; $('p-sortc').setAttribute('aria-label', keys.length ? 'Sort the ' + files.length + ' files, now by ' + (FKEYS[FS.key] || '').toLowerCase() : 'Show the ' + files.length + ' files as a grid or a list');
     $('p-view').innerHTML = filesViewBtns(); $('p-view').hidden = !files.length;     // Grid / List: a second small group in the same one toolbar row
   }
   filesStripSync(); filesLazy();
@@ -7536,16 +7611,11 @@ const BUSY_STATES = ['RUNNING', 'PREPARE', 'PAUSE'];
 function ctlRender(d){
   const c = d.controls || {}, det = c.detail || {}, acts = c.actions || [], box = $('p-controls');
   CTL.d = d;
-  // the Controls sheet button: in the toolbar next to Light (every layout but the 5-inch), in the 5-inch action strip, and always first under More (also while printing)
-  const csHot = BUSY_STATES.includes((d.snapshot || {}).state);
-  const csLab = L5 ? IC('sliders') + 'Controls' : 'Controls';        // the toolbar row has no room to spare: the word alone (the emoji sits on the More entry and the sheet)
-  const ctlsBtn = '<button data-ctl class="btn-ctls" onclick="csOpen()" title="Filament, nozzle and bed temperature, move, extrude and light in one sheet">' + csLab + '</button>';
+  // the Controls pop-up: ONE always-visible "Controls" button in the toolbar row (#p-ctlbtn, static HTML, every layout, idle and printing), and also first under More
   const ctlsMore = '<button data-ctl class="btn-ctls" onclick="' + (L5 ? 'pmoreClose();' : 'closeModal();') + 'csOpen()">' + '<span aria-hidden="true">\ud83c\udf9b\ufe0f</span> Controls</button>';
-  const csPhone = !L5 && PHONE_MQ.matches;       // phone: next to Light in the toolbar; 10-inch / desktop: in the control strip (the toolbar row is full there); 5-inch: its action strip
   if(!acts.length && !L5){
     CTL.sig = ''; CTL.deadline = null; CTL.rare = [ctlsMore];
-    $('p-light').innerHTML = (csHot || !csPhone) ? '' : ctlsBtn;
-    $('p-ctl-btns').innerHTML = (csHot || csPhone) ? '' : ctlsBtn; box.hidden = csHot || csPhone;
+    $('p-light').innerHTML = ''; $('p-ctl-btns').innerHTML = ''; box.hidden = true;
     if(CS.open) csRender(); return;
   }
   box.hidden = false;
@@ -7591,7 +7661,7 @@ function ctlRender(d){
   let strip = b, lights = [];
   CTL.rare = rare;
   if(!L5){          // the Light button goes into the toolbar row; Pre-heat / Cool down stay in the strip
-    lights = (busy || !csPhone ? [] : [ctlsBtn]).concat(b.filter(x => x.indexOf('btn-light') >= 0)); strip = b.filter(x => x.indexOf('btn-light') < 0).concat(busy || csPhone ? [] : [ctlsBtn]);
+    lights = b.filter(x => x.indexOf('btn-light') >= 0); strip = b.filter(x => x.indexOf('btn-light') < 0);
   }
   if(L5){   // the 5-inch action strip: Pause/Resume . Light . Cancel while printing; Pre-heat . Cool down . Light when idle. Files and More are fixed buttons after it.
     const st = s.state, up = !!s.connected && st !== 'DISCONNECTED' && st !== 'UNKNOWN';
@@ -7600,7 +7670,7 @@ function ctlRender(d){
     if(st === 'PAUSE') lead.push(btn(ic5('play') + 'Resume', "act('resume')"));
     if(connectable(s, d.can_connect)) lead.push('<button class="primary" onclick="doConnect()">Connect</button>');
     if(busy) tail.push('<button class="danger" onclick="askCancel()">' + IC('x') + 'Cancel&hellip;</button>');
-    strip = lead.concat(b.filter(x => x.indexOf('btn-light') < 0), b.filter(x => x.indexOf('btn-light') >= 0), busy ? [] : [ctlsBtn], tail);
+    strip = lead.concat(b.filter(x => x.indexOf('btn-light') < 0), b.filter(x => x.indexOf('btn-light') >= 0), tail);
   }
   let msg = '';
   if(CTL.msg){
@@ -7709,7 +7779,8 @@ const csFmt = c => (c == null || !isFinite(Number(c))) ? '—' : tnum(c) + tdeg(
 const csLive = (k, v) => '<span data-live="' + k + '">' + esc(v) + '</span>';          // text that changes with every poll: updated in place, so a tap is never swallowed
 const csStrip = s => String(s || '').replace(/^(FAILED|REFUSED|UNSUPPORTED|INVALID): /, '');
 const csSup = k => { const e = csDet()[k]; return !!(e && e.supported); };
-const csCan = k => { const e = csDet()[k]; return !!(e && e.supported && e.allowed_now); };
+const csPrinting = () => BUSY_STATES.includes(String(csSnap().state || '').toUpperCase());       // a print is running / starting / paused: everything but the light is locked (the Hub refuses it too)
+const csCan = k => { const e = csDet()[k]; return !!(e && e.supported && e.allowed_now) && !csPrinting(); };
 
 function csOpen(opts){
   if(document.body.classList.contains('viewonly')) return;            // a view-only sign-in never gets here (and the Hub refuses it too)
@@ -7790,7 +7861,7 @@ function csMain(){
   const nozOn = m => Math.abs(nt - temps[m]) < 1.5, bedOn = m => Number((presets[m] || {}).bed) > 0 && Math.abs(bt - Number(presets[m].bed)) < 1.5;
   const tcard = (key, icon, name, now, tgt, ref, chips, offBtn, bta) => {
     const cur = Number(now), pct = isFinite(cur) ? csClamp(Math.round((tgt > 0 ? cur / tgt : cur / (ref || 1)) * 100), 0, 100) : 0;
-    const lab = name === 'Nozzle' ? nozNames.find(nozOn) : bedNames.find(bedOn);
+    const lab = jobMats(s).join(' + ');          // the running job's own material (from its file), else no word at all - never guessed from the temperature
     return '<div class="cs-panel cs-tc"><div class="cs-lbl"><span aria-hidden="true">' + icon + '</span> ' + name + csBetaTag(bta) + '</div>' +
       '<div class="cs-top"><span class="cs-bigt">' + csLive(key, csFmt(now)) + '</span><span class="cs-tgt">' + csLive(key + 'tg', tgt > 0 ? '→ ' + tnum(tgt) + tdeg() + (lab ? ' ' + lab : '') : 'heater off') + '</span></div>' +
       '<div class="cs-meter" role="progressbar" aria-label="' + name + ' temperature" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + pct + '"><span data-lh="' + key + 'bar"><i style="width:' + pct + '%"></i></span></div>' +
@@ -7810,7 +7881,7 @@ function csMain(){
   const ex = E('extrude'), min = Number(mo.min_extrude_c) || 170;
   if(!ex.supported) note(ex.reason);
   bet('extrude', 'extrude');
-  const exOk = csCan('extrude'), cold = ex.supported && !exOk && !locked;
+  const exOk = csCan('extrude'), cold = ex.supported && !exOk && !locked && !csPrinting();
   const zb = (lab, sign) => csBtn(lab + ' <small>Z' + (sign < 0 ? '−' : '+') + ' ' + step + ' mm</small>', 'csJog', {axis:'Z', sign}, !mvOk, 'cs-vb', ' aria-label="Move Z ' + (sign < 0 ? 'minus' : 'plus') + ' ' + step + ' millimetres"');
   const eb = (lab, sub, mm) => csBtn(lab + ' <small>' + sub + '</small>', 'csExtrude', {mm}, !exOk, 'cs-vb');
   let pad;
@@ -7826,7 +7897,8 @@ function csMain(){
   }
   const cardMove = '<div class="cs-panel cs-move"><div class="cs-mrow"><div class="cs-lbl"><span aria-hidden="true">🕹️</span> Move' + csBetaTag(mv.verified === false || hm.verified === false || ex.verified === false) + '</div>' +
     '<div class="cs-seg" role="group" aria-label="Distance per tap">' + [1, 10].map(n => csBtn(n + ' mm', 'csStep', {mm:n}, false, step === n ? 'on' : '', ' aria-pressed="' + (step === n ? 'true' : 'false') + '"')).join('') + '</div></div>' + pad + '</div>';
-  const lock = locked ? '<div class="cs-lock" role="status"><b>Locked:</b> ' + esc(String(locked.blocked).replace(/^./, c => c.toUpperCase())) + '</div>' : '';
+  const lock = csPrinting() ? '<div class="cs-lock cs-printing" role="status"><span aria-hidden="true">🔒</span> Locked while printing</div>'
+    : locked ? '<div class="cs-lock" role="status"><b>Locked:</b> ' + esc(String(locked.blocked).replace(/^./, c => c.toUpperCase())) + '</div>' : '';
   const msg = CS.msg ? '<div class="cs-msg ' + (CS.msg.wait ? 'w' : CS.msg.ok ? 'ok' : 'bad') + '" role="status">' +
     (CS.msg.wait ? '<b>SENDING&hellip;</b> ' : CS.msg.ok ? '<b>&#10003; DONE</b> ' : '<b>&#10007; FAILED</b> ') + esc(CS.msg.text) + '</div>' : '';
   const foot = (beta.length ? '<div class="cs-note">beta (not yet tried on this printer): ' + esc(beta.join(', ')) + '. Watch the printer the first time.</div>' : '') +
@@ -8072,6 +8144,7 @@ const PT = {img:null, note:null, stat:null, token:0, shown:false};   // printer-
 const FC = {timer:null, items:{}};                                   // fleet cards, by printer name
 const BLANK = 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==';
 const camUrl = (kind, name) => '/api/printer/' + encodeURIComponent(name || CUR) + '/' + kind;
+const clockShort = () => new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit'});
 const clockNow = () => new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit',second:'2-digit'});
 const visible = () => document.visibilityState === 'visible';
 // OctoPrint webcams can be mirrored/flipped in OctoPrint's own settings; the server passes
@@ -8105,7 +8178,8 @@ function camLoad(T){
     if(token !== T.token) return;
     T.img.src = pre.src; T.img.classList.add('has');
     T.note.style.display = 'none'; T.shown = true;
-    T.stat.textContent = 'Updated ' + clockNow();
+    T.stat.textContent = T === PT ? 'Updated ' + clockNow() : clockShort();      // a fleet card: a small "9:19 AM" on the picture's corner (the tooltip has the seconds)
+    if(T !== PT) T.stat.title = 'Updated ' + clockNow();
   };
   pre.onerror = ()=>{ clearTimeout(guard); failed(); };
   pre.src = camUrl('snapshot', T.name) + '?t=' + Date.now();
@@ -8236,6 +8310,8 @@ function fcMake(name){
                  '<div class="camstat"></div>';
   const it = {name, el, img: el.querySelector('img'), note: el.querySelector('.camnote'),
               stat: el.querySelector('.camstat'), token:0, shown:false, due:0};
+  // the corner overlay is small: a longer message (camera trouble, paused) is cut with an ellipsis there and read whole in its tooltip
+  try{ new MutationObserver(() => { const t = it.stat.textContent; if(t.length > 9) it.stat.title = t; }).observe(it.stat, {childList:true, characterData:true, subtree:true}); }catch(e){}
   el.addEventListener('click', e => { if(L5) return; e.stopPropagation(); camOpenFull(name); });   // don't open the printer screen too (5-inch: a tap anywhere on the card opens the printer screen, which has the live view)
   return it;
 }
@@ -8431,6 +8507,7 @@ const ACT = {
   preheatPreset: b => ctlPreheatPreset(Number(b.dataset.i)),
   preheatGo: b => { if(b.dataset.p) ctlDo('preheat', {preset:b.dataset.p}); },          // the Hub looks the bed temperature up in its settings
   fview:     b => filesViewSet(b.dataset.v),
+  fviewPick: b => { closeModal(); filesViewSet(b.dataset.v); },
   sortOpen:  () => sortOpen(),
   sortPick:  b => { closeModal(); FS.key = b.dataset.k in FKEYS ? b.dataset.k : 'name'; filesRender(); filesScrollTop(); },
   fsort:     b => { FS.key = b.dataset.k in FKEYS ? b.dataset.k : 'name'; filesRender(); filesScrollTop(); },
@@ -8454,13 +8531,25 @@ document.addEventListener('click', e => {
 });
 
 // Desktop: a mouse can rest on a name - when it is cut short (an ellipsis, or a 2-line clamp) the whole text appears as a tooltip. Set on first hover only.
+// ONLY real truncated TEXT gets one: text-overflow:ellipsis or a line clamp, overflow hidden (never auto / scroll: those are scrolling lists and panes, whose
+// "text" is a whole page), a text leaf (at most two child elements, never a row / list / panel) and at most DT_MAX characters. Anything else gets nothing.
+const DT_MAX = 160;
+function cutTitleFor(el){
+  if(!el || el.nodeType !== 1 || el.title || el.tagName === 'BUTTON' && !el.classList.contains('tray5')) return '';
+  const cs = getComputedStyle(el);
+  const hid = v => v === 'hidden' || v === 'clip';
+  if(!hid(cs.overflowX) || !hid(cs.overflowY)) return '';                                   // a scroll container is never "cut short text"
+  const clamp = cs.webkitLineClamp && cs.webkitLineClamp !== 'none';
+  if(cs.textOverflow !== 'ellipsis' && !clamp) return '';
+  if(el.children.length > 2) return '';                                                      // a row / list / panel, not a text leaf
+  if(!(el.scrollWidth > el.clientWidth + 1 || el.scrollHeight > el.clientHeight + 1)) return '';
+  const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
+  return t && t.length <= DT_MAX ? t : '';
+}
 if(FVIEW.view === 'desktop') document.addEventListener('mouseover', e => {
   for(let el = e.target, n = 0; el && el.nodeType === 1 && el !== document.body && n < 4; el = el.parentElement, n++){
-    if(el.title || el.tagName === 'BUTTON' && !el.classList.contains('tray5')) continue;
-    if(el.scrollWidth > el.clientWidth + 1 || el.scrollHeight > el.clientHeight + 1){
-      const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
-      if(t && getComputedStyle(el).overflow !== 'visible'){ el.title = t; return; }
-    }
+    const t = cutTitleFor(el);
+    if(t){ el.title = t; return; }
   }
 });
 

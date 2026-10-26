@@ -588,8 +588,8 @@ class FleetTests(unittest.TestCase):
                 self.assertLessEqual(max(c["b"] for c in S["cards"]), S["vh"], name)             # (the 5-inch grid scrolls under a banner, as it always did)
             a = self.card(S, "Printer-A")
             if name == "kiosk":
-                self.assertEqual(a["tmp"], 0, name)                                                                                  # the Nozzle / Bed line gave way ...
-                self.assertEqual(self.card(S, "Printer-C")["tmp"], 1, name)                                                          # ... on this card only
+                self.assertEqual(a["tmp"], 0, name)                                                                                  # (no card has a Nozzle / Bed line any more: the fleet cards are slimmer) ...
+                self.assertEqual(self.card(S, "Printer-C")["tmp"], 0, name)                                                          # ... and the Pause / Cancel row now simply joins the warned card
             if name != "kiosk":
                 self.assertEqual(a["fileLine"] if name != "desktop" else 0, 0, name)                                                 # 5-inch: the file + layer lines gave way
 

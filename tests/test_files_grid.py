@@ -205,11 +205,15 @@ class GridBrowserTests(unittest.TestCase):
     def test_the_toggle_is_two_words_with_a_tick_on_the_active_one(self):
         for name, R, active in (("kiosk", self.kiosk(), "Grid"), ("five", self.five(), "Grid"), ("desk", self.desk(), "List"), ("phone", self.phone(), "List")):
             self.assertEqual(sorted(x.replace("✓ ", "").rstrip("*") for x in R["def"]["view_btns"]), ["Grid", "List"], name)
-            self.assertTrue(R["def"]["view_vis"], name)
+            if name in ("kiosk", "phone"):
+                self.assertFalse(R["def"]["view_vis"], name)         # the toolbar row's room goes to the always-on Controls button: Grid / List are in the sort chooser here
+            else:
+                self.assertTrue(R["def"]["view_vis"], name)
             ticked = [x for x in R["def"]["view_btns"] if x.startswith("✓")]
             self.assertEqual(len(ticked), 1, name)
             self.assertEqual(ticked[0], "✓ " + active + "*", name)
-            self.assertGreaterEqual(R["def"]["view_h"], 36 if name in ("five", "desk") else 44, name)         # a real touch target (a mouse: 36)
+            if name in ("five", "desk"):
+                self.assertGreaterEqual(R["def"]["view_h"], 36, name)         # a real touch target (a mouse: 36)
 
     def test_the_choice_is_remembered_and_survives_leaving_the_printer(self):
         for name, R in (("kiosk", self.kiosk()), ("five", self.five()), ("desk", self.desk()), ("phone", self.phone())):

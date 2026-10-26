@@ -8,6 +8,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- **A "Controls" button that is always on the printer screen.** The one button in the top toolbar row, idle **and** while printing, on the desktop, the 10-inch
+  touch / kiosk layout, the phone and the 5-inch screen (quiet theme: in the header right of the title; Bridge theme: a block in the left rail), opens the
+  Controls pop-up. While a print runs the pop-up opens with its parts locked and one line in words, "Locked while printing" (the Hub refuses those actions
+  as before; the light still works). Controls is also still the first entry under More. To keep the toolbar ONE row (also with the wide fallback font of
+  Linux machines) the four sort buttons and the Grid / List pair became ONE "Sort: Recent" button on the 10-inch layout and in narrow windows and on the phone;
+  its chooser holds the sort choices and, below them, Grid / List. The phone rows are now: title, Pause / Cancel (printing), Controls + Light, Sort + Refresh + More.
+- **Slimmer fleet cards.** The "Nozzle 220 / Bed 58" line and the "Spaghetti: WATCHING" line are gone (about 60-75 px shorter). A small Spaghetti badge sits
+  at the right end of the "Done ~6:59 PM" row: a shape and a word, never colour alone - eye + OK (watching), eye + READY / LEARN, eye with a slash + OFF,
+  camera with a slash + NO CAM, triangle + WARN / FAIL (bold frame), triangle + DOWN (detector down); its tooltip keeps the full words ("Spaghetti: WATCHING").
+  The camera's "Updated 9:19:03 AM" is now a small "9:19 AM" overlay on the picture's corner (the seconds are in the tooltip). The info line keeps
+  "7% - 9h 40m left - Layer 13 / 1150"; a printer that reports no layers shows the job's material instead ("19% - 4h 57m left - PETG") when its file says one.
+  A Spaghetti WARNING / FAILURE card keeps its big inverted block, heavy frame, the banner and the Pause / Cancel row. The Hub's `/api/fleet` and
+  `/api/printer/<name>` snapshots gained `job_materials` (only while a print runs, read from caches - never a request to a printer).
+
 - **Controls and Change filament are now pop-up cards.** Controls opens as a centred card over the dimmed printer screen (a bottom sheet with a grab
   handle on a phone, a near-full-screen card on the 5-inch screen, both themes): a **Move** panel (a round **jog ring** - Y+ back, X+ right, Y- front,
   X- left around **Home** - a **1 mm | 10 mm** switch, a **Z** column and a **Filament** Pull / Push column that says "Heat the nozzle to 170 first"),
@@ -79,6 +93,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   Phone / 5-inch wall / Automatic); `?view=` in the address wins over detection. Wall screens (`?kiosk=1`, `?layout=5in`) are unchanged.
 
 ### Fixed
+
+- **A material was guessed from the temperature.** In the Controls pop-up an MK4 printing PETG at 245 C showed "-> 245 ABS" because the ABS preset is 245 C.
+  The target line now names a material only from the running job's own file (`job_materials`, or the file's row on the printer screen); otherwise it says just
+  "-> 245". A preset chip may still carry a tick when its temperature matches, but the words never claim a material the file did not name.
+- **A huge tooltip on the desktop view.** Hovering the History page (and Analytics) could pop up a native tooltip holding the whole list's text: the "full name when
+  cut short" helper treated any scrolling pane as cut-short text. Now only real truncated text (an ellipsis or a line clamp, overflow hidden, a text leaf,
+  at most 160 characters) gets a tooltip; a scroll container, a row or a list never does.
 - **A multi-plate project's per-plate exports (OrcaSlicer: one `.gcode.3mf` per plate) are treated as the plate they hold, not plate 1.** The
   plate-4 file has `Metadata/plate_4.gcode` and `plate_4.png`; the Hub used to read `plate_1.png` (two different plates showed the same
   picture), count layers and parts from plate 1, and - safety-critical - tell the printer to print `Metadata/plate_1.gcode`, which is not in

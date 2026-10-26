@@ -397,7 +397,7 @@ class FiveInBrowserTests(unittest.TestCase):
         self.assertEqual(first["kinds"], ["printing", "paused", "idle", "error"])
         self.assertEqual(first["bigs"], ["42%", "63%", "IDLE", "OFFLINE"])
         self.assertEqual(first["barw"], ["42%", "63%", "0%", "0%"])
-        self.assertTrue(all(s.startswith("Spaghetti: ") for s in first["spags"]), first["spags"])
+        self.assertTrue(all(s in ("OK", "READY", "LEARN", "OFF", "NO CAM", "DOWN", "WARN", "FAIL") for s in first["spags"]), first["spags"])      # a small badge: a shape + a word
 
     def test_the_header_is_one_slim_row_and_the_pages_move_into_the_menu(self):
         R = self.result()
