@@ -1,6 +1,6 @@
 # Fabrica detector adapter (MIT). Stdlib only: no pip install, nothing to pin.
 # Multi-arch: builds natively on amd64 and arm64 (docker buildx --platform linux/amd64,linux/arm64).
-FROM python:3.14-slim
+FROM python:3.15-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
