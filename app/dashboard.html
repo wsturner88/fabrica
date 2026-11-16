@@ -7671,6 +7671,9 @@ function fitEta(){
     if(!L5 && el.scrollWidth > el.clientWidth){          // 12px is the floor and "Done tomorrow ~12:29 AM" still does not fit beside the badge: shorter words, the whole line stays in the tooltip
       el.title = el.title || el.textContent;
       for(const t of [el.textContent.replace('tomorrow', 'tmrw'), el.textContent.replace(/^Done /, '').replace('tomorrow', 'tmrw')]){ el.textContent = t; if(el.scrollWidth <= el.clientWidth) break; }
+      // Linux draws the wide fallback font a few px wider than a Mac does: a little more room, then the time alone
+      while(el.scrollWidth > el.clientWidth && size > 10){ size -= 1; el.style.fontSize = size + 'px'; }
+      if(el.scrollWidth > el.clientWidth){ const m = el.textContent.match(/~\s*\S+(\s*[AP]M)?/i); if(m) el.textContent = m[0]; }
     }
   }
 }
