@@ -9549,7 +9549,7 @@ const visible = () => document.visibilityState === 'visible';
 // those flags along and we apply them with CSS. (rotate90 is not applied.)
 const CAM_ORI = {};
 const camFlip = o => (o && (o.flip_h || o.flip_v)) ? `scale(${o.flip_h ? -1 : 1},${o.flip_v ? -1 : 1})` : '';
-const PAUSED_TXT = 'Paused — touch to resume';
+const PAUSED_TXT = 'Camera paused — tap to resume';
 
 // Load one still off-screen, then swap it into T.img: never a blank or broken frame.
 // T = {name, img, note, stat, token, shown}
