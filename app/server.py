@@ -450,6 +450,18 @@ def _apply_control_settings(_changed=None):
 
 
 _apply_control_settings()
+
+
+def _apply_library_settings(_changed=None):
+    """Push `library.send_while_printing` into the drivers (their upload guard reads it). Start-up + every settings change."""
+    try:
+        bambu.set_send_while_busy(bool(SETTINGS.get("library.send_while_printing")))
+    except Exception as e:
+        print(f"[settings] could not apply the library settings: {e}", flush=True)
+
+
+_apply_library_settings()
+SETTINGS.subscribe(_apply_library_settings)
 SETTINGS.subscribe(_apply_control_settings)
 controls.set_runtime(on_auto_off=lambda name, minutes: WATCHER.preheat_auto_off(name, minutes),
                      on_auto_off_failed=lambda name, why: WATCHER.preheat_auto_off_failed(name, why))
@@ -815,6 +827,21 @@ def _printer_is_idle(prn) -> bool:
     except Exception:
         return False
     return bool(s.get("connected", True)) and s.get("state") in controls.IDLE_STATES
+
+
+def _printer_can_receive(prn) -> bool:
+    """True when the Hub may put a file on this printer: connected, no print start just sent, a state it can read.
+    Printing and paused are fine (sending only adds a file to the list). With `library.send_while_printing` off this is
+    exactly _printer_is_idle. Unknown / offline never qualifies."""
+    try:
+        s = prn.snapshot()
+    except Exception:
+        return False
+    if not bool(s.get("connected", True)) or s.get("start_pending"):
+        return False
+    if not bambu.send_while_busy_enabled():
+        return s.get("state") in controls.IDLE_STATES
+    return s.get("state") not in bambu._NO_STATE
 
 
 METADATA_BUSY = "metadata unavailable while the printer is busy (printing, paused, preparing or not connected)"
@@ -2423,7 +2450,9 @@ async def _api_backup_download(request: Request):
 # ==== library ====
 # Global File Library: one file store on the Hub for the whole fleet (see library.py and docs/library.md).
 # Everything that touches a printer is here, and only through the guards the printer pages already use:
-#   * no FTPS session on a Bambu unless it is positively idle (_printer_is_idle + the driver's own _require_idle),
+#   * no FTPS session on a Bambu for anything but SENDING a file unless it is positively idle (_printer_is_idle + the driver's
+#     own _require_idle). Sending (and the name check before it) may also run on a printing or paused printer
+#     (_printer_can_receive; switch: library.send_while_printing), but never over a name the printer already has,
 #   * the printer's FTPS lock around every session,
 #   * sending a file NEVER starts a print - the print itself stays in suggest_mapping / start_print (ticket,
 #     bed-clear confirm, spool mapping). Nothing in this block calls start_print.
@@ -2477,7 +2506,7 @@ def _library_printers_info() -> list:
         except Exception:
             s, idle = {}, False
         out.append({"name": prn.name, "kind": getattr(prn, "kind", ""), "state": s.get("state"),
-                    "idle": bool(idle),
+                    "idle": bool(idle), "can_send_now": bool(_printer_can_receive(prn)),
                     "can_receive": (hasattr(prn, "upload") if _is_octo(prn) else hasattr(prn, "sd_upload")),   # ==== rename ==== (upload for HTTP printers is beta)
                     "beta": bool(_is_octo(prn)),
                     "model": modelcheck.check("", modelcheck.target_model_for(prn))["target_model"]})
@@ -2526,9 +2555,17 @@ def _library_seed_meta(prn, entry: dict):
         _cache_save(cache)
 
 
+def _cannot_receive_words(prn) -> str:
+    if not bambu.send_while_busy_enabled():
+        return f"{prn.name} is busy (printing, paused, preparing or not connected). Nothing was sent."
+    return (f"{prn.name} cannot take a file right now (not connected, a print was just started on it, or its state is unknown). "
+            "Nothing was sent.")
+
+
 def _library_send_one(entry: dict, prn, model_override: bool) -> dict:
-    """Upload one library file to one printer. Refuses (never forces) a printer that is not positively idle, a printer
-    type the Hub cannot upload to, a file sliced for another model (unless the human overrode), and a name that
+    """Upload one library file to one printer. Refuses (never forces) a printer that cannot take a file right now (not
+    connected, a print start just sent, offline / unknown; printing and paused are fine unless `library.send_while_printing`
+    is off, then only an idle printer), a printer type the Hub cannot upload to, a file sliced for another model (unless the human overrode), and a name that
     is already taken on the card by a different file. Returns a result row; never raises."""
     name = entry["name"]
     r = {"name": name, "printer": prn.name, "ok": False, "status": "refused", "code": "", "reason": ""}
@@ -2551,13 +2588,14 @@ def _library_send_one(entry: dict, prn, model_override: bool) -> dict:
         return refuse("model_mismatch", mc["model_warning"] + " It was not sent.")
     if mc["model_match"] == "unknown":
         r["note"] = (r.get("note", "") + " " + mc["model_warning"]).strip()
-    if not _printer_is_idle(prn):
-        return refuse("busy", f"{prn.name} is busy (printing, paused, preparing or not connected). Nothing was sent.")
+    if not _printer_can_receive(prn):
+        return refuse("busy", _cannot_receive_words(prn))
     try:
         path = LIB.file_path(name)
         with (_octo_lock(prn.name) if http_up else _ftps_lock(prn.name)):
-            if not _printer_is_idle(prn):               # a print may have started while we waited for the lock
-                return refuse("busy", f"{prn.name} became busy. Nothing was sent.")
+            if not _printer_can_receive(prn):           # things may have changed while we waited for the lock
+                return refuse("busy", f"{prn.name} became unavailable. Nothing was sent.")
+            printer_busy = not _printer_is_idle(prn)    # printing / paused: a send may add a file, never replace one
             if http_up:
                 # Never fall back to the cached listing before a write: OctoPrint / Klipper uploads REPLACE a file of the same
                 # name, so without a live listing we cannot know the name is free. (Bambu: the driver's own idle-only FTPS list.)
@@ -2567,12 +2605,17 @@ def _library_send_one(entry: dict, prn, model_override: bool) -> dict:
                     return refuse("list_failed", f"Could not read {prn.name}'s file list right now ({security.scrub_text(str(e))[:120]}), "
                                                  "so the Hub cannot tell whether the name is free. Nothing was sent.")
             else:
-                rows = [dict(f) for f in prn.sd_list()]                       # the driver refuses (no FTPS) if it is not idle
+                # a live listing, also while printing / paused (names + sizes only); the driver refuses if it cannot take a session
+                rows = [dict(f) for f in (prn.sd_list_for_send() if hasattr(prn, "sd_list_for_send") else prn.sd_list())]
             # Names are compared case-insensitively for EVERY driver: SD cards (FAT/exFAT) and USB sticks ignore case, so a
             # same-letters name in another case would be silently replaced.
             low = name.lower()
             same = [f for f in rows if str(f.get("name") or "").lower() == low]
             exact = next((f for f in same if f.get("name") == name), None)
+            if same and printer_busy:
+                return refuse("in_use", f"{prn.name} is busy and already has a file called '{same[0].get('name')}'. While a printer is "
+                                        "printing or paused the Hub never replaces a file it holds - that could be the one being "
+                                        "printed. Nothing was sent. Send it under another name, or wait until the printer is idle.")
             if exact is not None and len(same) == 1 and int(exact.get("size") or 0) == entry["size"]:
                 r.update(ok=True, status="already_there", reason=f"'{name}' is already on {prn.name}.")
                 return r
@@ -2582,7 +2625,7 @@ def _library_send_one(entry: dict, prn, model_override: bool) -> dict:
                                             "Delete or rename it on the printer's page first - the Hub never overwrites a file there.")
             with open(path, "rb") as fh:
                 data = fh.read()
-            (prn.upload if http_up else prn.sd_upload)(name, data)       # the driver checks "positively idle" again before it connects
+            (prn.upload if http_up else prn.sd_upload)(name, data)       # the driver checks again that it may take a file before it connects
     except PrinterBusy as e:
         return refuse("busy", str(e))
     except _library.LibraryError as e:
@@ -2801,8 +2844,10 @@ def library_file(name: str) -> str:
 @_tool
 def library_send(name: str, printers: list[str], model_override: bool = False) -> str:
     """UPLOAD a library file to one or more printers' storage. It does NOT start a print - after it, the normal flow
-    applies: suggest_mapping, the human's go-ahead and bed-clear statement, then start_print. Only idle printers accept
-    a file (a printing, paused or offline one is refused, per printer, and nothing is sent to it); Bambu LAN printers
+    applies: suggest_mapping, the human's go-ahead and bed-clear statement, then start_print. A printer that is idle,
+    printing or paused can be sent a file (one that is offline, not connected or just had a print started is refused, per printer,
+    and nothing is sent to it; if the Hub's "send while printing" setting is off, only idle printers accept a file). While a
+    printer is printing or paused, a file whose name the printer already has is never replaced (refused, code in_use). Bambu LAN printers
     take .3mf and, in beta, OctoPrint / PrusaLink / Klipper printers take .gcode / .bgcode; a file that was sliced for a different printer model is refused unless the
     human has read the warning and said it is safe - only then pass model_override=True (never on your own).
     A file already on the printer (names compared ignoring upper/lower case) is not overwritten. Returns one result per printer."""

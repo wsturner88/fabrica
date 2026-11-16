@@ -31,6 +31,16 @@ LISTING = ["-rw-r--r--   1 root  root   1000 Jan 01 12:00 part.gcode.3mf",
            "-rw-r--r--   1 root  root     10 Feb 02 08:30 notes.txt"]
 
 
+class _DataConn:
+    def settimeout(self, t): pass
+    def sendall(self, b): pass
+    def close(self): pass
+
+
+class _Sock:
+    def settimeout(self, t): pass
+
+
 class FakeFTP:
     made = []
 
@@ -166,8 +176,11 @@ class SdCacheCase(unittest.TestCase):
         prn = self.make()
         prn.sd_list()
         FakeFTP.delete = lambda self, n: None
-        FakeFTP.storbinary = lambda self, c, fh: None
-        self.addCleanup(lambda: [delattr(FakeFTP, a) for a in ("delete", "storbinary")])
+        FakeFTP.sock = _Sock()
+        FakeFTP.voidcmd = lambda self, c: None
+        FakeFTP.transfercmd = lambda self, c: _DataConn()          # sd_upload sends by hand (no storbinary / unwrap)
+        FakeFTP.voidresp = lambda self: "226 done"
+        self.addCleanup(lambda: [delattr(FakeFTP, a) for a in ("delete", "sock", "voidcmd", "transfercmd", "voidresp")])
         prn.sd_delete("other.3mf")
         self.state["state"] = "RUNNING"
         self.assertEqual([r["name"] for r in self.make().sd_list()], ["part.gcode.3mf"])

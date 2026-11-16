@@ -1334,8 +1334,9 @@ function lbSendRender(){
   const S = LB.send;
   const sub = S.names.length === 1 ? S.names[0] : S.names.length + ' files';
   const list = LB.printers.map(p => {
-    const why = !p.can_receive ? 'cannot receive files from the Hub yet' : (!p.idle ? 'busy: ' + (p.state || 'not connected') + ' — not sent to' : 'idle — ready');
-    const ok = p.can_receive && p.idle, on = S.pick.has(p.name);
+    const sendNow = p.can_send_now === undefined ? p.idle : p.can_send_now;
+    const why = !p.can_receive ? 'cannot receive files from the Hub yet' : (!sendNow ? 'not available: ' + (p.state || 'not connected') + ' — not sent to' : (p.idle ? 'idle — ready' : (p.state || 'busy').toLowerCase() + ' — ready (file is only added to its list)'));
+    const ok = p.can_receive && sendNow, on = S.pick.has(p.name);
     return `<button class="lbsend" data-act="lbPickPrinter" data-printer="${esc(p.name)}" aria-pressed="${on ? 'true' : 'false'}" ${ok ? '' : 'disabled'}>
       <b>${esc(p.name)}</b> <small>${esc(p.model || '')}${p.model ? ' · ' : ''}${esc(why)}</small></button>`;
   }).join('') || '<div class="note">No printers added yet.</div>';
@@ -1351,7 +1352,7 @@ function lbSendRender(){
     if(S.results.some(x => x.code === 'model_mismatch')) res += '<button class="big" data-act="lbOverride" style="width:100%;margin-top:6px">Send the ticked ones anyway</button>';
     res += '<div class="note">Sending does not start anything. To print, open the start-print confirm: it still asks for the spool and for you to confirm the bed is clear.</div>';
   }
-  $('mbody').innerHTML = `<h2>Send to printers</h2><div class="note" style="overflow-wrap:anywhere">${esc(sub)}. Only idle printers accept a file.</div>
+  $('mbody').innerHTML = `<h2>Send to printers</h2><div class="note" style="overflow-wrap:anywhere">${esc(sub)}. A printer that is printing or paused can take a file too; it is only added to its list, and a name it already has is never replaced.</div>
     <div class="lbpickbox">${list}</div>${res}
     <div class="row" style="margin-top:10px"><button class="big grow" onclick="closeModal()">Close</button>
       <button class="big grow primary" data-act="lbSendGo" ${S.busy ? 'disabled' : ''}>${S.busy ? 'Sending…' : 'Send'}</button></div>`;

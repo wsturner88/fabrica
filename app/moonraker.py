@@ -40,7 +40,7 @@ import urllib.request
 
 import http.client
 
-from bambu import (PrinterError, PrinterBusy, PrinterUnreachable, ConnectNeedsConfirm, make_opener, REDIRECT_MSG, strip_userinfo, scrub_text, _require_idle_for_delete,
+from bambu import (PrinterError, PrinterBusy, PrinterUnreachable, ConnectNeedsConfirm, make_opener, REDIRECT_MSG, strip_userinfo, scrub_text, _require_idle_for_delete, _require_can_receive,
                    read_capped, multipart_form, FILE_MAX_BYTES)   # read_capped, multipart_form, FILE_MAX_BYTES: rename
 import controls as _controls
 from controls import ControlUnsupported
@@ -660,8 +660,9 @@ class MoonrakerPrinter:
     def upload(self, filename: str, data, timeout: float = 300):
         """BETA - not yet verified on real hardware. Upload a file to the `gcodes` root:
         POST /server/files/upload (multipart: file, root=gcodes, path=<folder>). `print` is never sent, so the file
-        is only stored. Refused unless the printer is positively idle right now. The caller makes sure the name is free."""
-        _require_idle_for_delete(self, "uploaded")
+        is only stored. Allowed while the printer is printing or paused (it only needs to be connected with no print start
+        pending); a 409 / 423 from the printer itself comes back as a plain PrinterBusy. The caller makes sure the name is free."""
+        _require_can_receive(self, "uploaded")
         folder, _sep, base = filename.lstrip("/").rpartition("/")
         fields = {"root": "gcodes"}
         if folder:
@@ -681,6 +682,9 @@ class MoonrakerPrinter:
             try:
                 if e.code in (401, 403):
                     raise _perr("Moonraker requires authentication (HTTP %d)." % e.code, e.code) from e
+                if e.code in (409, 423):
+                    raise _perr("Moonraker refused the file because the printer is busy printing "
+                                f"({e.code}). Nothing was uploaded.", e.code, PrinterBusy) from e
                 raise _perr(f"Moonraker refused to upload the file ({_http_msg(e)}).", e.code) from e
             finally:
                 e.close()

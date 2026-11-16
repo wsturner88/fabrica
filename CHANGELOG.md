@@ -8,6 +8,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- **Send a file to a printer that is printing or paused.** The Library's Send to... (and `library_send`) now also accepts a printing or paused printer: the file only goes onto its list, nothing is started, and a file name the printer already has is never replaced while it is busy (refused as `in_use`). Offline, not-connected and just-started printers are still refused. Bambu uploads use a hand-made transfer that does not wait for a TLS goodbye the printer never answers mid-print. New setting **File library > Send files to printers that are printing or paused** (on by default); off = idle printers only, as before. Downloads, deletes, renames and backups stay idle-only.
 - **Spaghetti modes: OFF / WATCH / ACTIVE per printer, and saved pictures with Real / False alarm.**
   - **Three modes.** `○ OFF` (not watched - what "excluded" meant), `👁 WATCH` (today's behaviour: warning and alert, never touches the print) and
     `⏸ ACTIVE` (WATCH, plus the Hub **pauses** the print - never cancels - after a confirmation). Printers in the old "Do not watch" list are OFF, every

@@ -16,7 +16,7 @@ One place on the Hub for the print files of the whole fleet. Open it with the **
 
 | Rule | Why |
 |---|---|
-| Only a printer that is positively idle (connected and idle, finished or failed) gets a file; a printing, paused, preparing, offline or unknown one is refused, and the Hub opens no session on it. | One file transfer is enough to disturb a print on these printers. |
+| A printer that is connected and idle, finished, failed, **printing or paused** gets a file; an offline or unknown one, or one that was just told to start a print, is refused. While a printer is printing or paused the file only goes onto its file list, nothing is started, and a file name the printer already has is never replaced (it could be the one being printed). Settings > File library > "Send files to printers that are printing or paused" turns this off, and then only an idle printer gets a file. | Putting a file on the list does not disturb a print, but replacing the file being printed would. A Bambu is sent the file in a way that does not upset it mid-print. |
 | Bambu LAN printers receive `.3mf` files. OctoPrint, PrusaLink and Klipper printers receive `.gcode` / `.bgcode` files (**beta - not yet verified on real hardware**). | Each driver has its own upload call; the HTTP ones are new. |
 | A file sliced for a different printer model is refused, with the same warning the start-print confirm shows. You can send it anyway by ticking "I know this file is safe on ...". | The same crash risk the confirm guards against. |
 | A different file with the same name already on the card is never overwritten. | Your own files stay yours. |

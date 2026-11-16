@@ -123,6 +123,55 @@ def _require_idle_for_delete(prn, what="deleted"):
                       f"{', a print start was just sent' if s.get('start_pending') else ''}) - nothing was {what}.")
 
 
+# ---- sending files to a printer that is busy ----
+# Sending (uploading) a file only puts it on the printer's file list, so it may happen while the printer is printing
+# or paused. Everything else (download, delete, rename ...) stays idle-only. One switch, `library.send_while_printing`
+# (Settings > File library), turns it off again; the server pushes it in here at start-up and after every change.
+_SEND_WHILE_BUSY = [True]
+_NO_STATE = (None, "", "UNKNOWN", "OFFLINE", "DISCONNECTED")
+
+
+def set_send_while_busy(on) -> None:
+    _SEND_WHILE_BUSY[0] = bool(on)
+
+
+def send_while_busy_enabled() -> bool:
+    return bool(_SEND_WHILE_BUSY[0])
+
+
+def can_receive_state(s) -> bool:
+    """True when a snapshot shows a printer that may be sent a file: connected, no print start just sent, and a state we
+    can read (printing and paused are fine). With the switch off this is the old rule: positively idle only."""
+    state = s.get("state")
+    if not s.get("connected") or s.get("start_pending"):
+        return False
+    if not _SEND_WHILE_BUSY[0]:
+        return state in _controls.IDLE_STATES
+    return state not in _NO_STATE
+
+
+def _require_can_receive(prn, what="uploaded"):
+    """Driver-level guard for uploads: a FRESH reading must show the printer connected, with no print start just sent
+    and a readable state. Printing and paused are allowed (unless the switch is off: then positively idle, as before)."""
+    fn = getattr(prn, "fresh_snapshot", None) or prn.snapshot
+    s = fn()
+    if can_receive_state(s):
+        return
+    state = s.get("state")
+    raise PrinterBusy(f"printer is busy ({getattr(prn, 'name', '?')}: "
+                      f"{'state ' + str(state) if s.get('connected') else 'not connected'}"
+                      f"{': ' + scrub_text(s['error']) if s.get('error') else ''}"
+                      f"{', a print start was just sent' if s.get('start_pending') else ''}) - nothing was {what}.")
+
+
+def _upload_refused(e, who):
+    """An HTTP printer answered an upload with an error: 409 / 423 means it is busy printing -> a plain PrinterBusy."""
+    code = getattr(e, "code", None)
+    if code in (409, 423):
+        return PrinterBusy(f"{who} refused the file because it is busy printing ({code}). Nothing was uploaded.")
+    return None
+
+
 # ==== rename ====
 # Whole-file download with a size cap and multipart upload bodies, shared by the OctoPrint, PrusaLink and Moonraker
 # drivers (file renaming downloads a file and uploads it again under the new name; see app/renamer.py).
@@ -1214,8 +1263,23 @@ class BambuPrinter:
             why += ", a print start was just sent"
         raise PrinterBusy(f"printer is busy ({self.name}: {why}) - no FTPS session was opened.")
 
-    def _ftps(self) -> ImplicitFTPTLS:
-        self._require_idle()
+    def _require_can_receive(self):
+        """Like _require_idle, but for putting a file on the card: printing and paused are fine (see can_receive_state)."""
+        s = self.snapshot()
+        if can_receive_state(s):
+            return
+        why = (f"state {s.get('state')}" if s.get("connected") else "not connected")
+        if s.get("start_pending"):
+            why += ", a print start was just sent"
+        raise PrinterBusy(f"printer is busy ({self.name}: {why}) - no FTPS session was opened.")
+
+    def _ftps(self, allow_busy=False) -> ImplicitFTPTLS:
+        """Open an FTPS session. `allow_busy` is for uploads (and the name check before one) only: they may run while the
+        printer is printing or paused. Every other caller keeps the idle-only rule."""
+        if allow_busy:
+            self._require_can_receive()
+        else:
+            self._require_idle()
         f = ImplicitFTPTLS()
         try:
             f.connect(self.ip, 990, timeout=30)
@@ -1314,6 +1378,44 @@ class BambuPrinter:
         return [dict(r) for r in c[1]] if c else []
     # ==== end library ====
 
+    def sd_list_for_send(self) -> list:
+        """The `.3mf` files on the card, read LIVE (never the saved copy), for the name check before a send. Allowed while
+        printing or paused: then only the names and sizes are asked for (NLST + SIZE, which a printing printer answers
+        fine). Raises PrinterBusy when the printer cannot take a session (offline, a start just sent)."""
+        idle = self._idle_now()
+        f = self._ftps(allow_busy=True)
+        try:
+            if idle:
+                rows = []
+                f.retrlines("LIST", rows.append)
+                out = []
+                for r in rows:
+                    m = re.match(r"[-rwx]{10}\s+\d+\s+\S+\s+\S+\s+(\d+)\s+(\w+\s+\d+\s+[\d:]+)\s+(.+)$", r)
+                    if m and m.group(3).lower().endswith(".3mf"):
+                        out.append({"name": m.group(3), "size": int(m.group(1)), "modified": _list_modified(m.group(2))})
+                return out
+            names = f.nlst()
+            out = []
+            for n in names:
+                n = str(n).split("/")[-1]
+                if not n.lower().endswith(".3mf"):
+                    continue
+                try:
+                    size = int(f.size(n) or 0)
+                except Exception:
+                    size = -1                       # unknown size: never counts as "already there"
+                out.append({"name": n, "size": size, "modified": ""})
+            return out
+        finally:
+            _close_ftp(f)
+
+    def _idle_now(self) -> bool:
+        try:
+            s = self.snapshot()
+        except Exception:
+            return False
+        return bool(s.get("connected")) and s.get("state") in _controls.IDLE_STATES and not s.get("start_pending")
+
     def sd_list(self) -> list:
         """The `.3mf` files in the SD card root. While the printer is not positively idle no FTPS session is
         opened: the last listing taken while it WAS idle is returned, however old (nothing on the card can
@@ -1394,10 +1496,28 @@ class BambuPrinter:
             _close_ftp(f)
         return buf.getvalue()
 
+    UPLOAD_BLOCK = 64 * 1024
+    UPLOAD_DATA_TIMEOUT = 120          # seconds the data connection may stall on one block
+    UPLOAD_REPLY_TIMEOUT = 180         # seconds to wait for the final "226" (a printing printer takes ~15 s more)
+
     def sd_upload(self, filename: str, data: bytes):
-        f = self._ftps()
+        """Put a file on the card. Allowed while the printer is printing or paused (never a print start).
+        The transfer is done by hand instead of ftplib's storbinary: storbinary closes the TLS data connection
+        politely (unwrap), a printing Bambu never answers that, and the call hangs while the printer stops sending status.
+        So: send the blocks, close the data connection WITHOUT unwrap, then read the printer's final reply."""
+        f = self._ftps(allow_busy=True)
         try:
-            f.storbinary(f"STOR {filename}", io.BytesIO(data))
+            f.voidcmd("TYPE I")
+            conn = f.transfercmd(f"STOR {filename}")
+            try:
+                conn.settimeout(self.UPLOAD_DATA_TIMEOUT)
+                mv = memoryview(bytes(data))
+                for i in range(0, len(mv), self.UPLOAD_BLOCK):
+                    conn.sendall(mv[i:i + self.UPLOAD_BLOCK])
+            finally:
+                conn.close()                    # no unwrap
+            f.sock.settimeout(self.UPLOAD_REPLY_TIMEOUT)
+            f.voidresp()
         finally:
             _close_ftp(f)
         self._sd_cache = None
@@ -1812,8 +1932,9 @@ class OctoPrintPrinter:
     def upload(self, filename: str, data, timeout: float = 300):
         """BETA - not yet verified on real hardware. Upload a file to OctoPrint's local storage:
         POST /api/files/local (multipart: file, select=false, print=false, path=<folder>). Refused unless the printer
-        is positively idle right now. It never selects or prints the file. The caller makes sure the name is free."""
-        _require_idle_for_delete(self, "uploaded")
+        is connected and has no print start pending (it may be printing or paused). It never selects or prints the file.
+        The caller makes sure the name is free."""
+        _require_can_receive(self, "uploaded")
         folder, _sep, base = filename.rpartition("/")
         fields = {"select": "false", "print": "false"}
         if folder:
@@ -1826,6 +1947,9 @@ class OctoPrintPrinter:
             with self._open(req, timeout) as r:
                 r.read(65536)
         except urllib.error.HTTPError as e:
+            busy = _upload_refused(e, "OctoPrint")
+            if busy:
+                raise busy from e
             raise PrinterError(f"OctoPrint refused the upload ({e.code} {e.reason}).") from e
         except NET_ERRORS as e:
             raise PrinterError(f"Could not reach OctoPrint at {self.url}: {scrub_text(e)}") from e

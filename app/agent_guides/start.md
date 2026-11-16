@@ -7,7 +7,7 @@ MCP tools. Everything you need is in these guides; there is no other file to fet
 1. A human confirms the build plate is clear before EVERY print start. Never decide that yourself.
 2. Prints start only through the ticket flow: `suggest_mapping` -> show the human -> `start_print`.
 3. Never pause, resume or cancel a print unless the human asked for it in this conversation.
-4. File actions (upload, delete, rename, backup) happen only on idle printers, and deleting needs a clear yes.
+4. Delete, rename, download and backup happen only on idle printers, and deleting needs a clear yes. Sending a library file (`library_send`) may also go to a printing or paused printer, but never over a file name the printer already has.
 5. Change the fleet (add, update, remove printers, groups, settings) only when the human asks.
 6. Colours are always names ("Black"), never hex or hue alone.
 7. A reply starting `REFUSED:` is a safety stop. Read it, tell the human, do not look for a way around it.

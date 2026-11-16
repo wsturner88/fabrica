@@ -118,7 +118,7 @@ class Kit:
             "- A human confirms the build plate is clear before EVERY print start.",
             "- Start prints only through suggest_mapping (it returns a ticket) and then start_print.",
             "- Never pause or cancel a print unless the human asked you to.",
-            "- Upload, delete or rename files only on idle printers.",
+            "- Delete or rename files only on idle printers. library_send may also send to a printing or paused printer, but never over a file name it already has.",
             "- Add, change or remove printers and settings only when the human asks.",
             "- A reply starting REFUSED: is a safety stop. Tell the human; do not work around it.",
             f"Kit version: {self.version}.",
@@ -178,8 +178,8 @@ class Kit:
 PROMPT_TEXT = {
     "print_a_file": (
         "Print a file on a Fabrica printer. Follow fabrica_guide('printing').\n"
-        "1. Find the file: {file}. Use library_list or list_sd_files; if it is only in the library and the printer is "
-        "idle, library_send puts it on the printer.\n"
+        "1. Find the file: {file}. Use library_list or list_sd_files; if it is only in the library, library_send puts it on the "
+        "printer.\n"
         "2. Choose an idle printer ({printer}); list_printers shows which are idle.\n"
         "3. Call suggest_mapping and tell me the plan in plain words: spools by colour name, time, weight, any warning.\n"
         "4. Ask me whether the build plate is clear and whether to go ahead. Wait for my yes.\n"

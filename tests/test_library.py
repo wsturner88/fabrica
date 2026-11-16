@@ -33,6 +33,7 @@ os.environ.pop("FABRICA_LIBRARY_MAX_MB", None)
 import library  # noqa: E402
 import modelcheck  # noqa: E402
 import security  # noqa: E402
+import bambu  # noqa: E402
 from bambu import PrinterBusy, parse_3mf_meta  # noqa: E402
 
 try:
@@ -129,9 +130,11 @@ class FakeBambu:
         self.ftps_opens = 0
         self.uploads, self.downloads, self.started = [], [], []
 
+    start_pending = False
+
     def snapshot(self):
-        return {"printer": self.name, "connected": True, "state": self.state, "job": "", "percent": 0,
-                "remaining_min": None}
+        return {"printer": self.name, "connected": self.state != "DISCONNECTED", "state": self.state, "job": "", "percent": 0,
+                "remaining_min": None, "start_pending": self.start_pending}
 
     def refresh(self, wait=0):
         pass
@@ -139,8 +142,11 @@ class FakeBambu:
     def ams_trays(self):
         return []
 
-    def _ftps(self):                  # what the real driver does first: refuse unless positively idle
-        if self.state not in ("IDLE", "FINISH", "FAILED"):
+    def _ftps(self, allow_busy=False):   # what the real driver does first: idle only, except for sending a file
+        if allow_busy:
+            if not bambu.can_receive_state(self.snapshot()):
+                raise PrinterBusy(f"printer is busy ({self.name}: state {self.state}) - no FTPS session was opened.")
+        elif self.state not in ("IDLE", "FINISH", "FAILED"):
             raise PrinterBusy(f"printer is busy ({self.name}: state {self.state}) - no FTPS session was opened.")
         self.ftps_opens += 1
 
@@ -150,11 +156,15 @@ class FakeBambu:
         self.cached = rows
         return [dict(r) for r in rows]
 
+    def sd_list_for_send(self):          # live listing, allowed while printing / paused; never the saved copy
+        self._ftps(allow_busy=True)
+        return [{"name": n, "size": len(b), "modified": ""} for n, b in self.files.items()]
+
     def sd_listing_cached(self):
         return [dict(r) for r in self.cached]
 
     def sd_upload(self, filename, data):
-        self._ftps()
+        self._ftps(allow_busy=True)
         self.files[filename] = data
         self.uploads.append(filename)
 
@@ -698,33 +708,107 @@ class Hub(unittest.TestCase):
         self.assertEqual(again["status"], "already_there")
         self.assertEqual(len(self.p1s.uploads), 1)
 
-    def test_send_to_a_busy_printer_is_refused_and_no_session_is_opened(self):
+    def send(self, printers, name="Phone Stand v3.3mf"):
+        return self.c.post("/api/library/send", json={"name": name, "printers": printers}).json()
+
+    def test_a_printing_printer_receives_a_send(self):
         self.put("Phone%20Stand%20v3.3mf", make_3mf())
-        r = self.c.post("/api/library/send", json={"name": "Phone Stand v3.3mf", "printers": ["Busy", "P1S"]}).json()
+        r = self.send(["Busy", "P1S"])
+        by = {x["printer"]: x for x in r["results"]}
+        self.assertEqual((by["Busy"]["ok"], by["Busy"]["status"]), (True, "sent"))
+        self.assertTrue(by["P1S"]["ok"])
+        self.assertEqual(self.busy.uploads, ["Phone Stand v3.3mf"])
+        self.assertEqual((r["sent"], r["refused"]), (2, 0))
+        self.fake_start_forbidden()                                 # a send never starts anything
+
+    def test_a_paused_printer_receives_a_send(self):
+        self.put("Phone%20Stand%20v3.3mf", make_3mf())
+        for state in ("PAUSE", "PAUSED", "PREPARE"):
+            self.busy.state, self.busy.files, self.busy.uploads = state, {}, []
+            out = self.send(["Busy"])["results"][0]
+            self.assertTrue(out["ok"], state)
+            self.assertEqual(self.busy.uploads, ["Phone Stand v3.3mf"], state)
+
+    def test_an_offline_printer_is_refused_and_no_session_is_opened(self):
+        self.put("Phone%20Stand%20v3.3mf", make_3mf())
+        for state in ("UNKNOWN", "DISCONNECTED", "OFFLINE"):
+            self.busy.state = state
+            out = self.send(["Busy"])["results"][0]
+            self.assertEqual((out["ok"], out["code"]), (False, "busy"), state)
+        self.assertEqual((self.busy.ftps_opens, self.busy.uploads), (0, []))
+
+    def test_a_printer_with_a_print_start_pending_is_refused(self):
+        self.put("Phone%20Stand%20v3.3mf", make_3mf())
+        self.busy.start_pending = True
+        out = self.send(["Busy"])["results"][0]
+        self.assertEqual((out["ok"], out["code"]), (False, "busy"))
+        self.p1s.start_pending = True
+        self.assertEqual(self.send(["P1S"])["results"][0]["code"], "busy")
+        self.assertEqual((self.busy.ftps_opens, self.busy.uploads, self.p1s.uploads), (0, [], []))
+
+    def test_a_busy_printer_is_never_sent_a_name_it_already_has(self):
+        data = make_3mf()
+        self.put("Phone%20Stand%20v3.3mf", data)
+        self.busy.files["Phone Stand v3.3mf"] = b"the file being printed"
+        out = self.send(["Busy"])["results"][0]
+        self.assertEqual((out["ok"], out["status"], out["code"]), (False, "refused", "in_use"))
+        self.assertIn("never replaces", out["reason"])
+        self.assertEqual(self.busy.files["Phone Stand v3.3mf"], b"the file being printed")
+        self.assertEqual(self.busy.uploads, [])
+        # same letters, other case: still the same name on an SD card
+        self.busy.files = {"PHONE STAND V3.3MF": b"x"}
+        self.assertEqual(self.send(["Busy"])["results"][0]["code"], "in_use")
+        # the same name already there with the same size is refused as well while busy
+        self.busy.files = {"Phone Stand v3.3mf": data}
+        self.assertEqual(self.send(["Busy"])["results"][0]["code"], "in_use")
+        self.assertEqual(self.busy.uploads, [])
+
+    def test_an_idle_printer_keeps_the_old_rules_for_an_existing_name(self):
+        data = make_3mf()
+        self.put("Phone%20Stand%20v3.3mf", data)
+        self.p1s.files["Phone Stand v3.3mf"] = data
+        self.assertEqual(self.send(["P1S"])["results"][0]["status"], "already_there")
+        self.p1s.files["Phone Stand v3.3mf"] = b"different"
+        self.assertEqual(self.send(["P1S"])["results"][0]["code"], "name_taken")
+        self.assertEqual(self.p1s.uploads, [])
+
+    def test_with_the_setting_off_a_busy_printer_is_refused_again(self):
+        self.put("Phone%20Stand%20v3.3mf", make_3mf())
+        server.SETTINGS.update({"library.send_while_printing": False})
+        self.addCleanup(server.SETTINGS.update, {"library.send_while_printing": True})
+        self.assertFalse(bambu.send_while_busy_enabled())
+        r = self.send(["Busy", "P1S"])
         by = {x["printer"]: x for x in r["results"]}
         self.assertEqual((by["Busy"]["ok"], by["Busy"]["code"]), (False, "busy"))
         self.assertTrue(by["P1S"]["ok"])                       # per printer: one refusal does not stop the others
-        self.assertEqual(self.busy.ftps_opens, 0)
-        self.assertEqual(self.busy.uploads, [])
         self.assertEqual((r["sent"], r["refused"]), (1, 1))
         for state in ("PAUSE", "PREPARE", "UNKNOWN", "DISCONNECTED"):
             self.busy.state = state
-            out = self.c.post("/api/library/send", json={"name": "Phone Stand v3.3mf", "printers": ["Busy"]}).json()["results"][0]
-            self.assertFalse(out["ok"], state)
+            self.assertFalse(self.send(["Busy"])["results"][0]["ok"], state)
         self.assertEqual((self.busy.ftps_opens, self.busy.uploads), (0, []))
+        server.SETTINGS.update({"library.send_while_printing": True})      # back to the default: on
+        self.assertTrue(bambu.send_while_busy_enabled())
+        self.busy.state = "RUNNING"
+        self.assertTrue(self.send(["Busy"])["results"][0]["ok"])
 
-    def test_a_printer_that_becomes_busy_between_the_check_and_the_upload_is_stopped_by_its_driver(self):
+    def test_the_setting_is_in_the_schema_and_defaults_to_on(self):
+        sec = {x["id"]: x for x in server.SETTINGS.schema()["sections"]}["library"]
+        f = {x["name"]: x for x in sec["fields"]}["send_while_printing"]
+        self.assertEqual((f["type"], f["default"]), ("bool", True))
+        self.assertIs(server.SETTINGS.get("library.send_while_printing"), True)
+
+    def test_a_printer_that_goes_offline_between_the_check_and_the_upload_is_stopped_by_its_driver(self):
         self.put("Phone%20Stand%20v3.3mf", make_3mf())
-        real_idle = server._printer_is_idle
+        real = server._printer_can_receive
         calls = {"n": 0}
 
         def flip(prn):
             calls["n"] += 1
-            if calls["n"] >= 2:                   # idle for the first look, then a print starts (race)
-                prn.state = "RUNNING"
-            return real_idle(prn)
-        with mock.patch.object(server, "_printer_is_idle", side_effect=flip):
-            out = self.c.post("/api/library/send", json={"name": "Phone Stand v3.3mf", "printers": ["P1S"]}).json()["results"][0]
+            if calls["n"] >= 2:                   # fine for the first look, then it drops off the network (race)
+                prn.state = "DISCONNECTED"
+            return real(prn)
+        with mock.patch.object(server, "_printer_can_receive", side_effect=flip):
+            out = self.send(["P1S"])["results"][0]
         self.assertFalse(out["ok"])
         self.assertEqual(out["code"], "busy")
         self.assertEqual((self.p1s.ftps_opens, self.p1s.uploads), (0, []))
@@ -892,7 +976,7 @@ class Hub(unittest.TestCase):
         self.assertTrue(server.library_file("../x.3mf").startswith("REFUSED"))
         sent = json.loads(server.library_send("Phone Stand v3.3mf", ["P1S", "Busy", "A1"]))
         by = {x["printer"]: x for x in sent["results"]}
-        self.assertEqual((by["P1S"]["status"], by["Busy"]["code"], by["A1"]["code"]), ("sent", "busy", "model_mismatch"))
+        self.assertEqual((by["P1S"]["status"], by["Busy"]["status"], by["A1"]["code"]), ("sent", "sent", "model_mismatch"))
         self.assertIn("Nothing was started", sent["note"])
         self.assertEqual(self.a1.uploads, [])
         ov = json.loads(server.library_send("Phone Stand v3.3mf", ["A1"], model_override=True))

@@ -219,7 +219,7 @@ REST_SCOPES = [
     ("GET", "/api/library/files/{name}/download", "control"),  # the file itself = your design: same rule as backup downloads
     ("POST", "/api/library/delete", "control"),
     ("POST", "/api/library/save", "control"),                 # copy a printer's file into the library (downloads from the printer)
-    ("POST", "/api/library/send", "control"),                 # upload library files to idle printers (never starts a print)
+    ("POST", "/api/library/send", "control"),                 # upload library files to printers, also printing / paused ones (never starts a print, never replaces a file)
     ("POST", "/api/library/folder", "control"),               # create / delete / move
     ("POST", "/api/library/scan", "control"),                 # re-read what the printers hold (never an FTPS session on a busy one)
     # ==== end library ====
@@ -317,7 +317,7 @@ TOOL_SCOPES = {
     "discover_printers": "control",        # scans networks
     "score_snapshot": "control",           # sends a camera picture to the detector
     # ==== library ====
-    "library_send": "control",             # uploads a library file to idle printers; never starts a print
+    "library_send": "control",             # uploads a library file to printers, also printing / paused ones; never starts a print
     "library_save_from_printer": "control",  # downloads a file from a printer into the library
     # ==== rename ====
     "rename_preview": "control",           # validates a batch of renames, issues a single-use ticket; changes nothing

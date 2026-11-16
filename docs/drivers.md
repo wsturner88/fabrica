@@ -23,7 +23,7 @@ This page is the contract new drivers (and the code that wires them in) follow.
 | `download_head(filename, nbytes=1048576) -> bytes` | First bytes of a file (slicer thumbnail lives in the G-code header). Sends `Range`; works if the server ignores it. |
 | **`open_file(filename, timeout=30, headers=None)`** | **The full-download method for backup.** Returns the HTTP response (context manager, `.read(n)` in chunks) so 100 MB files stream to disk instead of into RAM. Raises `PrinterError`. |
 | `download(filename, max_bytes=500 MB) -> bytes` | The whole file, capped (used by renaming). Optional: a driver without it cannot be renamed on. |
-| `upload(filename, data)` | **Beta - not yet verified on real hardware.** Stores a file (renaming and the Library's Send to...). Must refuse unless the printer is positively idle (`_require_idle_for_delete(self, "uploaded")`), must never select or start the file, never follow a redirect. Optional. |
+| `upload(filename, data)` | **Beta - not yet verified on real hardware.** Stores a file (renaming and the Library's Send to...). May run while the printer is printing or paused, so it only checks that the printer is connected with no print start pending (`_require_can_receive(self, "uploaded")`, which follows the `library.send_while_printing` setting: off = positively idle as before); if the printer itself answers 409 / 423 because it is busy, raise `PrinterBusy`. Must never select or start the file, never follow a redirect. Optional. |
 | `start_print(filename, ams_mapping=None, origin="local")` | Starts an existing file (no upload). `ams_mapping` ignored. |
 | `stop()` `pause()` `resume()` | Cancel / pause / resume the current job. |
 | `sd_delete(filename, origin="local")` | Delete a file. |

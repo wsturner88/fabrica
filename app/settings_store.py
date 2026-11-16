@@ -311,6 +311,15 @@ SCHEMA = [
                 "Coming soon.", disabled=True),
      ]},
 
+    {"id": "library", "label": "File library", "group": "hub",
+     "description": "Sending library files to printers.",
+     "fields": [
+         _field("send_while_printing", "Send files to printers that are printing or paused", "bool", True,
+                "On: a file can be sent to a printer while it is printing or paused. It only goes onto the printer's "
+                "file list; nothing is started, and a file with a name the printer already has is never replaced while "
+                "the printer is busy. Off: files are only sent to printers that are sitting idle."),
+     ]},
+
     {"id": "camera", "label": "Camera", "group": "hub",
      "description": "Dashboard camera behaviour.",
      "fields": [
