@@ -5547,7 +5547,7 @@ html[data-view="desktop"] .tr.click { cursor:pointer; }
 html[data-view="desktop"] .tr.click:hover { background:#222831; }
 
 /* ---- narrower windows (a desktop window pulled in, an iPad that was switched to Desktop) ---- */
-@media (min-width:761px) and (max-width:1320px) {
+@media (min-width:761px) and (max-width:1520px) {        /* the one toolbar row: title, state, sort, view, Refresh, Controls, Light, More, Pause, Cancel - with a wide fallback font (Linux) that needs these tighter buttons up to 1520 px */
   html[data-view="desktop"] #printer .tbar { gap:5px; }
   html[data-view="desktop"] #printer .tbar button, html[data-view="desktop"] #printer .tbar #p-light button, html[data-view="desktop"] #printer .tbar #p-frefresh { padding:6px 9px; font-size:14px; }
   html[data-view="desktop"] #printer .tbar #p-sort button, html[data-view="desktop"] #printer .tbar #p-view button, html[data-view="desktop"] #printer .tbar .fmore-tb { padding:4px 8px; font-size:13px; }
@@ -5556,6 +5556,8 @@ html[data-view="desktop"] .tr.click:hover { background:#222831; }
   html[data-view="desktop"] #printer .tbar .chip { padding:5px 9px; }
   html[data-view="desktop"] #printer .tbar h1 { font-size:20px; min-width:0; }
   html[data-view="desktop"] #printer .tbar .gap { width:2px; }
+}
+@media (min-width:761px) and (max-width:1320px) {
   html[data-view="desktop"] #printer.on { padding-left:18px; padding-right:18px; }
 }
 @media (min-width:761px) and (max-width:1099px) {
@@ -7666,6 +7668,10 @@ function fitEta(){
     let size = parseFloat(getComputedStyle(el).fontSize);
     while(el.scrollWidth > el.clientWidth && size > (L5 ? 14 : 12)){ size -= 1; el.style.fontSize = size + 'px'; }
     if(L5 && el.scrollWidth > el.clientWidth && el.textContent.indexOf('Done ') === 0) el.textContent = el.textContent.slice(5);   // 14px is the floor: drop the word before cutting the time
+    if(!L5 && el.scrollWidth > el.clientWidth){          // 12px is the floor and "Done tomorrow ~12:29 AM" still does not fit beside the badge: shorter words, the whole line stays in the tooltip
+      el.title = el.title || el.textContent;
+      for(const t of [el.textContent.replace('tomorrow', 'tmrw'), el.textContent.replace(/^Done /, '').replace('tomorrow', 'tmrw')]){ el.textContent = t; if(el.scrollWidth <= el.clientWidth) break; }
+    }
   }
 }
 window.addEventListener('resize', fitEta);
