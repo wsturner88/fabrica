@@ -3,8 +3,8 @@
     python3 tests/test_send_while_printing.py          (needs: paho-mqtt)
 
 Everything is faked: no printer, no FTPS server, no network. What is pinned here:
-  * a Bambu upload is done by hand and NEVER calls unwrap() on the data connection (a printing Bambu never answers the TLS
-    goodbye), and it reads the printer's final reply with a long timeout;
+  * a Bambu upload is done by hand: it says the TLS goodbye (unwrap) with a SHORT wait (the H2D needs it, a printing
+    P1S/A1 never answers it), carries on when that times out, and reads the printer's final reply with a long timeout;
   * uploads (and the name check before one) may run on a printing / paused Bambu; delete, download and every other FTPS
     call still need a positively idle printer;
   * PrusaLink / Klipper / OctoPrint uploads need only "connected, no print start pending"; a 409 from the printer is a clean refusal;
@@ -34,12 +34,16 @@ from bambu import BambuPrinter, PrinterBusy, PrinterError  # noqa: E402
 
 class FakeConn:
     def __init__(self):
-        self.sent, self.closed, self.timeout, self.unwrapped = [], False, None, False
+        self.sent, self.closed, self.timeout, self.unwrapped, self.timeouts = [], False, None, False, []
+        self.unwrap_raises = None
 
-    def settimeout(self, t): self.timeout = t
+    def settimeout(self, t): self.timeout = t; self.timeouts.append(t)
     def sendall(self, b): self.sent.append(bytes(b))
     def close(self): self.closed = True
-    def unwrap(self): self.unwrapped = True; raise AssertionError("unwrap() must never be called on the data connection")
+    def unwrap(self):
+        self.unwrapped = True
+        assert self.timeout is not None and self.timeout <= 10, "the goodbye must use a SHORT wait"
+        if self.unwrap_raises: raise self.unwrap_raises
 
 
 class FakeSock:
@@ -103,20 +107,34 @@ class BambuUpload(unittest.TestCase):
         prn.snapshot = lambda: dict(self.snap)
         return prn
 
-    def test_upload_never_unwraps_and_reads_the_final_reply(self):
+    def test_upload_short_goodbye_then_reads_the_final_reply(self):
         prn = self.make()
         data = os.urandom(200 * 1024 + 5)
         prn.sd_upload("part.gcode.3mf", data)
         f = FakeFTP.made[0]
         self.assertEqual(f.cmds, ["TYPE I", "STOR part.gcode.3mf"])
-        self.assertFalse(f.conn.unwrapped)
+        self.assertTrue(f.conn.unwrapped)                               # H2D needs the goodbye
         self.assertTrue(f.conn.closed)
         self.assertTrue(f.reply_read)                                   # voidresp ran, after the close
         self.assertEqual(b"".join(f.conn.sent), data)
         self.assertTrue(all(len(b) <= 64 * 1024 for b in f.conn.sent))
-        self.assertGreaterEqual(f.conn.timeout, 120)
+        self.assertGreaterEqual(f.conn.timeouts[0], 120)                 # the blocks may stall a while
         self.assertGreaterEqual(max(f.sock.timeouts), 120)               # the wait for the final 226
         self.assertTrue(f.quit_called)
+
+    def test_upload_goodbye_timeout_still_reads_the_final_reply(self):
+        orig = FakeConn.__init__
+        def init(c):
+            orig(c); c.unwrap_raises = TimeoutError("The read operation timed out")   # a printing A1, as seen 2026-11-16
+        FakeConn.__init__ = init
+        try:
+            self.make().sd_upload("part.gcode.3mf", b"y" * 1000)
+        finally:
+            FakeConn.__init__ = orig
+        f = FakeFTP.made[0]
+        self.assertTrue(f.conn.unwrapped)
+        self.assertTrue(f.conn.closed)
+        self.assertTrue(f.reply_read)
 
     def test_upload_is_allowed_while_printing_and_paused(self):
         for state in ("RUNNING", "PAUSE", "PREPARE", "IDLE"):

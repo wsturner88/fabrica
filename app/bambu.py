@@ -1499,12 +1499,13 @@ class BambuPrinter:
     UPLOAD_BLOCK = 64 * 1024
     UPLOAD_DATA_TIMEOUT = 120          # seconds the data connection may stall on one block
     UPLOAD_REPLY_TIMEOUT = 180         # seconds to wait for the final "226" (a printing printer takes ~15 s more)
+    UPLOAD_UNWRAP_TIMEOUT = 5          # seconds to wait for the answer to the TLS goodbye (see sd_upload)
 
     def sd_upload(self, filename: str, data: bytes):
         """Put a file on the card. Allowed while the printer is printing or paused (never a print start).
-        The transfer is done by hand instead of ftplib's storbinary: storbinary closes the TLS data connection
-        politely (unwrap), a printing Bambu never answers that, and the call hangs while the printer stops sending status.
-        So: send the blocks, close the data connection WITHOUT unwrap, then read the printer's final reply."""
+        The transfer is done by hand instead of ftplib's storbinary: storbinary waits for the answer to the TLS goodbye
+        (unwrap), a printing P1S/A1 never answers it, and the call hangs while the printer stops sending status. The H2D
+        needs the goodbye. So: send the blocks, say goodbye with a short wait, close, then read the final reply."""
         f = self._ftps(allow_busy=True)
         try:
             f.voidcmd("TYPE I")
@@ -1514,8 +1515,18 @@ class BambuPrinter:
                 mv = memoryview(bytes(data))
                 for i in range(0, len(mv), self.UPLOAD_BLOCK):
                     conn.sendall(mv[i:i + self.UPLOAD_BLOCK])
+                # The TLS goodbye (unwrap): the H2D REQUIRES it (without it: "426 Failure reading network stream" and
+                # the file is thrown away); a PRINTING P1S/A1 never answers it. So say goodbye but wait only a few
+                # seconds for the answer, then close either way. Tested on real printers 2026-11-16.
+                unwrap = getattr(conn, "unwrap", None)
+                if unwrap is not None:
+                    try:
+                        conn.settimeout(self.UPLOAD_UNWRAP_TIMEOUT)
+                        unwrap()
+                    except (OSError, ValueError):
+                        pass
             finally:
-                conn.close()                    # no unwrap
+                conn.close()
             f.sock.settimeout(self.UPLOAD_REPLY_TIMEOUT)
             f.voidresp()
         finally:
