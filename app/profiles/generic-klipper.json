@@ -1,0 +1,21 @@
+{
+  "id": "generic-klipper",
+  "label": "Generic Klipper printer",
+  "maker": "Generic",
+  "types": [
+    "klipper"
+  ],
+  "matches": [],
+  "has": {
+    "light": null,
+    "nozzles": 1,
+    "nozzle_max_c": null,
+    "bed_mm": null,
+    "bed_max_c": null,
+    "chamber": null,
+    "filament": null,
+    "camera_builtin": null
+  },
+  "notes": "Klipper machines differ a lot: nothing is assumed. Sensors are found automatically.",
+  "verified": false
+}

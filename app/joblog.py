@@ -256,11 +256,14 @@ MIGRATIONS = [
     CREATE INDEX jobs_file_key ON jobs (file_key);
     CREATE INDEX jobs_open ON jobs (ended_at);
     """),
+    (2, """
+    ALTER TABLE jobs ADD COLUMN pause_reason TEXT;
+    """),
 ]
 
 _COLUMNS = ("id printer kind model file file_key plate started_at ended_at duration_s result percent "
             "est_seconds grams_est grams_used material colour filaments parts parts_source pauses error "
-            "ext_job_id source last_seen_at").split()
+            "ext_job_id source last_seen_at pause_reason").split()
 
 
 def _period_seconds(period):
@@ -707,6 +710,10 @@ class JobLog:
             return None
         r = rows[0]
         fields = {"pauses": (r["pauses"] or 0) + 1, "last_seen_at": ts}
+        why = " ".join(str(data.get("reason") or "").split())[:80]
+        if why:
+            old = r["pause_reason"] if "pause_reason" in r.keys() else None
+            fields["pause_reason"] = why if not old else (old if why in old else (old + "; " + why)[:160])
         pc = _costs._f(data.get("percent"))
         if pc is not None:
             fields["percent"] = pc

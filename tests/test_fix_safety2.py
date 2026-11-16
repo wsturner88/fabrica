@@ -319,6 +319,16 @@ class TestBootRestoreFailuresAreAnnounced(AutoOffBase):
 
 # ================================================================== N-12 / N-14 FTPS and delete guards
 
+class _DataConn:
+    def settimeout(self, t): pass
+    def sendall(self, b): pass
+    def close(self): pass
+
+
+class _Sock:
+    def settimeout(self, t): pass
+
+
 class FakeFTP:
     made = []
 
@@ -341,7 +351,10 @@ class FakeFTP:
         self.ops.append(cmd)
         cb(b"DATA")
 
-    def storbinary(self, cmd, fh): self.ops.append(cmd)
+    sock = _Sock()
+    def voidcmd(self, c): self.ops.append(c)
+    def transfercmd(self, cmd): self.ops.append(cmd); return _DataConn()      # sd_upload sends by hand (no storbinary / unwrap)
+    def voidresp(self): return "226 done"
     def delete(self, name): self.ops.append("DELE " + name)
     def cwd(self, d): self.ops.append("CWD " + d)
 
@@ -367,6 +380,8 @@ class TestFtpsGuards(unittest.TestCase):
         for state in ("RUNNING", "PREPARE", "PAUSE", "UNKNOWN"):
             prn = make_bambu(state)
             for label, fn in self.ops(prn).items():
+                if label == "upload" and state != "UNKNOWN":       # sending a file may run while printing / paused (see the next test)
+                    continue
                 with self.assertRaises(PrinterBusy, msg=f"{state}.{label}") as cm:
                     fn()
                 ok = ("The file list will appear when",) if label == "list" else ("printer is busy",)
@@ -380,6 +395,13 @@ class TestFtpsGuards(unittest.TestCase):
         with self.assertRaises(PrinterBusy):
             prn.sd_delete("x")
         self.assertEqual(FakeFTP.made, [], "an FTPS session was opened against a printer that is not idle")
+
+    def test_only_an_upload_may_open_a_session_on_a_printing_or_paused_printer(self):
+        for state in ("RUNNING", "PREPARE", "PAUSE"):
+            FakeFTP.made = []
+            make_bambu(state).sd_upload("x.3mf", b"1")
+            self.assertEqual(len(FakeFTP.made), 1, state)
+            self.assertEqual(FakeFTP.made[0].ops, ["TYPE I", "STOR x.3mf"], state)
 
     def test_idle_finish_failed_work(self):
         for state in ("IDLE", "FINISH", "FAILED"):

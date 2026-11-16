@@ -1,8 +1,8 @@
 # Fabrica detector (spaghetti detection add-on)
 
 An optional add-on that watches running prints through the Hub's chamber cameras and raises
-an **alert** when a print looks like it has turned into spaghetti. It never pauses or stops a
-print: you decide.
+an **alert** when a print looks like it has turned into spaghetti. The detector itself only scores
+pictures; what the Hub does with the score is up to you per printer (alert only, or also pause - never cancel).
 
 ```
 Hub (MIT) --POST /v1/score (JPEG bytes, Bearer token)--> adapter (MIT, ./adapter)

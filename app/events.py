@@ -20,7 +20,9 @@ Guard rails:
     print (or with a printer switched off) produces no events;
   * a state change must be seen on consecutive snapshots for `confirm_s` seconds before it
     counts, so a flapping state (RUNNING/PAUSE/RUNNING) is not reported;
-  * the offline notice waits `offline_grace_s`; "back online" is sent only if the offline
+  * the offline notice waits `offline_grace_s` if the printer was PRINTING when it dropped (default 5 min),
+    and `offline_grace_idle_min` if it was idle (default 60 min; 0 = never warn for an idle printer), so a
+    router update at night does not wake anyone; "back online" is sent only if the offline
     notice was, and only after the printer has stayed up for `confirm_s`;
   * transitions are evaluated against the last state seen while the printer was reachable,
     so a print that finishes while the Wi-Fi is down is still reported once it returns.
@@ -222,9 +224,10 @@ class _P:
 
 class EventWatcher:
     def __init__(self, sink, settings=None, snapshot_fetcher=None, clock=time.time,
-                 offline_grace_s=90, confirm_s=5, mono=None, baseline_offline_grace_s=900,
+                 offline_grace_s=90, confirm_s=5, mono=None, baseline_offline_grace_s=900, offline_grace_idle_s=None,
                  flap_hold_s=600, first_layer_hold_s=20, job_facts=None, state_path=None):
         self.sink = sink
+        self._pause_reasons = {}                 # printer -> (reason, time): set by note_pause_reason, taken by the PAUSED event
         self.job_facts = job_facts               # callable(printer, job) -> {"seconds", "filaments": [{"type","used_g"}]} (caches only)
         if state_path is None and settings is not None and getattr(settings, "dir", None):
             state_path = os.path.join(settings.dir, "print_runs.json")
@@ -239,6 +242,7 @@ class EventWatcher:
         self._mono_override = mono
         self._m = 0.0                            # monotonic "now" of the update in progress
         self._offline_grace = offline_grace_s
+        self._offline_grace_idle = offline_grace_idle_s   # None (no settings) = same as offline_grace_s
         self._baseline_grace = baseline_offline_grace_s   # a printer already off when the Hub started
         self._flap_hold = flap_hold_s            # after "back online", a new "offline" must last 3x longer
         self.confirm_s = confirm_s
@@ -261,6 +265,16 @@ class EventWatcher:
             except Exception:
                 pass
         return self._offline_grace
+
+    def _grace_idle(self):
+        """Seconds before an IDLE printer is reported offline; None = never."""
+        if self.settings is not None:
+            try:
+                m = float(self.settings.get("notifications.offline_grace_idle_min"))
+                return None if m <= 0 else m * 60.0
+            except Exception:
+                pass
+        return self._offline_grace if self._offline_grace_idle is None else self._offline_grace_idle
 
     def _unit(self) -> str:
         if self.settings is not None:
@@ -497,7 +511,10 @@ class EventWatcher:
         already off when the Hub started gets a longer wait (and is announced once, not never); one that
         came back from an outage within the last `flap_hold_s` needs 3x the normal wait, so a flapping
         Wi-Fi link does not produce an offline/online pair every few minutes."""
-        grace = self._grace()
+        printing = (p.last_state_before_outage in ACTIVE) or bool(getattr(p, "in_job", False))
+        grace = self._grace() if printing else self._grace_idle()
+        if grace is None:
+            return float("inf")                 # idle printer, idle warning turned off
         if p.baseline_offline:
             return max(grace, self._baseline_grace)
         if p.last_recovered is not None and self._m - p.last_recovered < self._flap_hold:
@@ -776,12 +793,13 @@ class EventWatcher:
         job = self._job_label(p, snap)
         pct = self._pct(p, snap)
         err = self._error_text(snap)
+        why = self._take_pause_reason(name, now)
         body = self._join(f"{job} is paused" + (f" at {pct}" if pct else "") + ".",
-                          f"Reason: {err}." if err else "No error reported - it may have been paused by hand or by a filament runout.",
+                          f"Reason: {why}." if why else (f"Reason: {err}." if err else "No error reported - it may have been paused by hand or by a filament runout."),
                           self._left(p, snap), self._temps(snap))
         return Event("print_paused", name, f"{name}: print PAUSED", body, ts=now,
-                     data={"job": job, "percent": p.percent, "error": err}, image_fn=self._img(name),
-                     dedupe_key=job)
+                     data={"job": job, "percent": p.percent, "error": err, **({"reason": why} if why else {})},
+                     image_fn=self._img(name), dedupe_key=job)
 
     def _offline_event(self, name, p, snap, now):
         down = fmt_duration(self._m - p.offline_since)
@@ -853,6 +871,53 @@ class EventWatcher:
                                       "link": link or None},
                                 image=image, image_fn=None if image else self._img(printer),
                                 dedupe_key=f"{job}|{'warning' if warning else 'failure'}", html=html))
+
+    PAUSE_REASON_TTL_S = 600.0
+
+    def note_pause_reason(self, printer, reason):
+        """The Hub itself is about to pause this printer (the spaghetti watch): the PAUSED event that follows carries the
+        reason, and the job log keeps it. Cleared with reason=None (the pause command failed)."""
+        with self._lock:
+            if reason:
+                self._pause_reasons[printer] = (str(reason), self.clock())
+            else:
+                self._pause_reasons.pop(printer, None)
+
+    def _take_pause_reason(self, printer, now):
+        with self._lock:
+            got = self._pause_reasons.pop(printer, None)
+        return got[0] if got and abs(now - got[1]) <= self.PAUSE_REASON_TTL_S else ""
+
+    def spaghetti_paused(self, printer, count, score=None, image=None) -> Event:
+        """An ACTIVE printer was paused because `count` pictures in a row were at the warning level."""
+        with self._lock:
+            p = self._p.get(printer)
+            job = p.job if p else ""
+        link = self._hub_link(printer)
+        head = f"\u23f8 Paused {printer} \u2014 spaghetti seen in {count} pictures in a row."
+        tail = "Check it, then Resume or Cancel in Fabrica."
+        title = f"{printer}: print PAUSED - spaghetti"
+        body = self._join(head, tail) + (f"\nOpen in Fabrica: {link}" if link else "")
+        html = None
+        if link:
+            esc = _html.escape
+            html = "\n".join([esc(head, quote=False), esc(tail, quote=False),
+                              f'\U0001F517 <a href="{esc(link, quote=True)}">Open in Fabrica</a>'])
+        return self._emit(Event("spaghetti_paused", printer, title, body, data={"score": score, "job": job, "count": count,
+                                "link": link or None}, image=image, image_fn=None if image else self._img(printer),
+                                dedupe_key=f"{job}|paused", html=html))
+
+    def spaghetti_pause_failed(self, printer, image=None) -> Event:
+        link = self._hub_link(printer)
+        head = f"\u26a0\ufe0f Could not pause {printer} \u2014 check it now."
+        body = head + (f"\nOpen in Fabrica: {link}" if link else "")
+        html = None
+        if link:
+            esc = _html.escape
+            html = "\n".join([esc(head, quote=False), f'\U0001F517 <a href="{esc(link, quote=True)}">Open in Fabrica</a>'])
+        return self._emit(Event("spaghetti_pause_failed", printer, f"{printer}: could NOT pause - check it now", body,
+                                data={"link": link or None}, image=image, image_fn=None if image else self._img(printer),
+                                dedupe_key="pause_failed", html=html))
 
     def detector_down(self, error="", failures=None) -> Event:
         """The failure detector has stopped answering: prints are NOT being watched. (Hub-level event, no

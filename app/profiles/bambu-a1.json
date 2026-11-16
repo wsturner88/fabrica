@@ -1,0 +1,29 @@
+{
+  "id": "bambu-a1",
+  "label": "Bambu Lab A1",
+  "maker": "Bambu Lab",
+  "types": [
+    "bambu"
+  ],
+  "matches": [
+    "a1"
+  ],
+  "has": {
+    "light": null,
+    "nozzles": 1,
+    "nozzle_max_c": 300,
+    "bed_mm": [
+      256,
+      256
+    ],
+    "bed_max_c": 100,
+    "chamber": "none",
+    "filament": {
+      "system": "ams_lite",
+      "slots": 4
+    },
+    "camera_builtin": true
+  },
+  "notes": "Open frame, no chamber. Light is unknown here: set it for this printer if yours has one.",
+  "verified": false
+}

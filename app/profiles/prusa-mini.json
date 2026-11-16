@@ -1,0 +1,30 @@
+{
+  "id": "prusa-mini",
+  "label": "Prusa MINI",
+  "maker": "Prusa",
+  "types": [
+    "prusalink",
+    "octoprint"
+  ],
+  "matches": [
+    "mini"
+  ],
+  "has": {
+    "light": false,
+    "nozzles": 1,
+    "nozzle_max_c": 280,
+    "bed_mm": [
+      180,
+      180
+    ],
+    "bed_max_c": 100,
+    "chamber": "none",
+    "filament": {
+      "system": "none",
+      "slots": 1
+    },
+    "camera_builtin": false
+  },
+  "notes": "Open frame, no light, no chamber.",
+  "verified": false
+}

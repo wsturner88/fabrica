@@ -788,11 +788,10 @@ R.kiosk = KIOSK;
 await openPrinters(); await wait(() => document.querySelector('.pmrow'));
 await pmEdit('Core One'); await wait(() => $('pm-save'));
 R.present = !!$('dw-field'); R.panelCount = document.querySelectorAll('#dw-panel, #dw-stage, #dw-cv').length;
-R.insideMore = !!(document.querySelector('#pm-more-body #dw-field'));
+R.insideCamera = !!(document.querySelector('#pm-camsec #dw-field'));
 if(R.present){
   R.state0 = $('dw-state').textContent; R.resetDisabled0 = $('dw-reset').disabled; R.save0 = $('pm-save').textContent;
   R.panelHidden0 = $('dw-panel').hidden;
-  if($('pm-more-body').hidden) pmMoreToggle();
   $('dw-open').click(); await wait(() => DW.loaded); R.loaded = DW.loaded; R.panelHidden1 = $('dw-panel').hidden;
   // the picture is drawn upright: the black quarter of an upside-down camera is at the BOTTOM-left
   const cv = $('dw-cv'), g = cv.getContext('2d');
@@ -821,7 +820,7 @@ if(R.present){
   prn.detect_area = {x: 25, y: 25, w: 50, h: 50};
   await openPrinters(); await wait(() => document.querySelector('.pmrow'));
   await pmEdit('Core One'); await wait(() => $('pm-save'));
-  R.moreOpenWithArea = !$('pm-more-body').hidden; R.state2 = $('dw-state').textContent;
+  R.state2 = $('dw-state').textContent;
   $('dw-reset').click(); R.afterReset = {state: $('dw-state').textContent, save: $('pm-save').textContent, area: DW.area};
   $('dw-reset').click();
 }
@@ -849,7 +848,7 @@ class EditorTests(unittest.TestCase):
         self.assertNotIn("error", R, R.get("error"))
         self.assertFalse(R["kiosk"])
         self.assertTrue(R["present"])
-        self.assertTrue(R["insideMore"], "it lives under More options")
+        self.assertTrue(R["insideCamera"], "it lives in the Camera & spaghetti watch card of the Edit pop-up")
         self.assertEqual(R["state0"], "Watching the whole picture")
         self.assertTrue(R["resetDisabled0"])
         self.assertEqual(R["save0"], "No changes")
@@ -877,7 +876,6 @@ class EditorTests(unittest.TestCase):
         self.assertIn("past the edge", R["pastEdge"]["msg"])
         self.assertAlmostEqual(R["typed"]["w"], 40, delta=0.01)
         self.assertAlmostEqual(R["put"]["w"], 40, delta=0.01)
-        self.assertTrue(R["moreOpenWithArea"], "More options opens by itself when an area is set")
         self.assertIn("Watching 50% wide and 50% high", R["state2"])
         self.assertEqual(R["afterReset"], {"state": "Watching the whole picture", "save": "Save changes", "area": None})
 
@@ -896,7 +894,7 @@ class EditorTests(unittest.TestCase):
         self.assertTrue(R["kiosk"])
         self.assertFalse(R["present"])
         self.assertEqual(R["panelCount"], 0)
-        self.assertFalse(R["insideMore"])
+        self.assertFalse(R["insideCamera"])
 
     def test_the_5in_layout_is_a_kiosk_too(self):
         R = _run_page(self, self.driver(), query="?layout=5in")

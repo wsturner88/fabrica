@@ -1,0 +1,23 @@
+{
+  "id": "voron-2.4",
+  "label": "Voron 2.4",
+  "maker": "Voron",
+  "types": [
+    "klipper"
+  ],
+  "matches": [
+    "voron"
+  ],
+  "has": {
+    "light": null,
+    "nozzles": 1,
+    "nozzle_max_c": null,
+    "bed_mm": null,
+    "bed_max_c": null,
+    "chamber": null,
+    "filament": null,
+    "camera_builtin": null
+  },
+  "notes": "Enclosed Klipper machine. Sizes and lights vary per build, so they are left unknown; the chamber card appears when Klipper reports a chamber sensor.",
+  "verified": false
+}

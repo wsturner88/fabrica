@@ -1,0 +1,32 @@
+{
+  "id": "prusa-xl",
+  "label": "Prusa XL",
+  "maker": "Prusa",
+  "types": [
+    "prusalink",
+    "octoprint"
+  ],
+  "matches": [
+    "prusa xl",
+    "prusa-xl",
+    "xl"
+  ],
+  "has": {
+    "light": false,
+    "nozzles": null,
+    "nozzle_max_c": 290,
+    "bed_mm": [
+      360,
+      360
+    ],
+    "bed_max_c": 120,
+    "chamber": "none",
+    "filament": {
+      "system": "toolchanger",
+      "slots": 5
+    },
+    "camera_builtin": false
+  },
+  "notes": "Tool changer: 1 to 5 independently heated nozzles depending on the build, so the nozzle count is left unknown here.",
+  "verified": false
+}

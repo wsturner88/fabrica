@@ -30,9 +30,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
-from ftplib import FTP_TLS, error_perm
+from ftplib import FTP, FTP_TLS, error_perm
 
-from camera import CameraStream, PollingCameraStream, fetch_jpeg
+from camera import CameraStream, PollingCameraStream, fetch_jpeg, make_camera_stream
 import controls as _controls
 from controls import ControlUnsupported
 
@@ -123,6 +123,55 @@ def _require_idle_for_delete(prn, what="deleted"):
                       f"{', a print start was just sent' if s.get('start_pending') else ''}) - nothing was {what}.")
 
 
+# ---- sending files to a printer that is busy ----
+# Sending (uploading) a file only puts it on the printer's file list, so it may happen while the printer is printing
+# or paused. Everything else (download, delete, rename ...) stays idle-only. One switch, `library.send_while_printing`
+# (Settings > File library), turns it off again; the server pushes it in here at start-up and after every change.
+_SEND_WHILE_BUSY = [True]
+_NO_STATE = (None, "", "UNKNOWN", "OFFLINE", "DISCONNECTED")
+
+
+def set_send_while_busy(on) -> None:
+    _SEND_WHILE_BUSY[0] = bool(on)
+
+
+def send_while_busy_enabled() -> bool:
+    return bool(_SEND_WHILE_BUSY[0])
+
+
+def can_receive_state(s) -> bool:
+    """True when a snapshot shows a printer that may be sent a file: connected, no print start just sent, and a state we
+    can read (printing and paused are fine). With the switch off this is the old rule: positively idle only."""
+    state = s.get("state")
+    if not s.get("connected") or s.get("start_pending"):
+        return False
+    if not _SEND_WHILE_BUSY[0]:
+        return state in _controls.IDLE_STATES
+    return state not in _NO_STATE
+
+
+def _require_can_receive(prn, what="uploaded"):
+    """Driver-level guard for uploads: a FRESH reading must show the printer connected, with no print start just sent
+    and a readable state. Printing and paused are allowed (unless the switch is off: then positively idle, as before)."""
+    fn = getattr(prn, "fresh_snapshot", None) or prn.snapshot
+    s = fn()
+    if can_receive_state(s):
+        return
+    state = s.get("state")
+    raise PrinterBusy(f"printer is busy ({getattr(prn, 'name', '?')}: "
+                      f"{'state ' + str(state) if s.get('connected') else 'not connected'}"
+                      f"{': ' + scrub_text(s['error']) if s.get('error') else ''}"
+                      f"{', a print start was just sent' if s.get('start_pending') else ''}) - nothing was {what}.")
+
+
+def _upload_refused(e, who):
+    """An HTTP printer answered an upload with an error: 409 / 423 means it is busy printing -> a plain PrinterBusy."""
+    code = getattr(e, "code", None)
+    if code in (409, 423):
+        return PrinterBusy(f"{who} refused the file because it is busy printing ({code}). Nothing was uploaded.")
+    return None
+
+
 # ==== rename ====
 # Whole-file download with a size cap and multipart upload bodies, shared by the OctoPrint, PrusaLink and Moonraker
 # drivers (file renaming downloads a file and uploads it again under the new name; see app/renamer.py).
@@ -208,6 +257,14 @@ class ImplicitFTPTLS(FTP_TLS):
         self.file = self.sock.makefile("r", encoding=self.encoding)
         self.welcome = self.getresp()
         return self.welcome
+
+    def ntransfercmd(self, cmd, rest=None):
+        """The data connection reuses the control connection's TLS session. The H2D (and X1-class) file server
+        refuses a fresh one: `522 SSL connection failed: session reuse required`. P1/A1 accept either."""
+        conn, size = FTP.ntransfercmd(self, cmd, rest)
+        if self._prot_p:
+            conn = self.sock.context.wrap_socket(conn, server_hostname=self.host, session=self.sock.session)
+        return conn, size
 
 
 # ---------------------------------------------------------------- helpers
@@ -639,19 +696,54 @@ class BambuPrinter:
 
     # ---- camera --------------------------------------------------------
 
+    # X1 / H2 series stream their built-in chamber camera as RTSPS on :322 (LAN-only "Liveview" on);
+    # P1 / A1 series speak the TLS :6000 JPEG protocol. Both log in with user bblp + the access code.
+    RTSP_CAMERA_PREFIXES = ("X1", "H2")
+    RTSP_CAMERA_PORT = 322
+
+    # ---- storage words ------------------------------------------------
+    # The H2 series file server (FTPS :990) shows the external USB drive only. Jobs sent from a slicer are kept in the
+    # printer's internal storage, which that server does not expose - so the list here can look short. P1/A1/X1 = SD card.
+    USB_STORAGE_PREFIXES = ("H2",)
+
+    def _model_code(self) -> str:
+        return (self.model or "").upper().replace("BAMBU LAB", "").strip()
+
+    @property
+    def storage_name(self) -> str:
+        return "USB drive" if self._model_code().startswith(self.USB_STORAGE_PREFIXES) else "SD card"
+
+    @property
+    def storage_note(self) -> str:
+        if self._model_code().startswith(self.USB_STORAGE_PREFIXES):
+            return ("USB drive only. Jobs sent from the slicer are kept in the printer's internal storage, "
+                    "which Fabrica cannot read.")
+        return ""
+
+    @property
+    def uses_rtsp_camera(self) -> bool:
+        return (self.model or "").upper().replace("BAMBU LAB", "").strip().startswith(self.RTSP_CAMERA_PREFIXES)
+
+    def builtin_camera_url(self) -> str:
+        """rtsps:// address of an X1/H2 printer's own camera (contains the access code: never log or show it)."""
+        return "rtsps://bblp:%s@%s:%d/streaming/live/1" % (
+            urllib.parse.quote(self.access_code or "", safe=""), self.ip, self.RTSP_CAMERA_PORT)
+
     @property
     def has_camera(self) -> bool:
-        """True for printers whose chamber camera speaks the TLS :6000 JPEG
-        protocol (P1 / A1 series). X1- and H2-series printers stream RTSP
-        instead, which this server does not read, so they report no camera."""
-        return not (self.model or "").upper().replace("BAMBU LAB", "").strip().startswith(("X1", "H2"))
+        """Every Bambu has a built-in camera: P1/A1 over TLS :6000 JPEG, X1/H2 over RTSPS :322 (read with
+        ffmpeg, like any rtsp camera). A camera address typed in the printer form still wins (camera.py)."""
+        return True
 
-    def camera(self) -> CameraStream:
+    def camera(self):
         """The printer's single shared camera connection (created lazily; the
         socket itself only opens when somebody asks for a frame)."""
         with self._camera_guard:
             if self._camera is None:
-                self._camera = CameraStream(self.ip, self.access_code, label=self.name)
+                if self.uses_rtsp_camera:
+                    self._camera = make_camera_stream(self.builtin_camera_url(), label=self.name)
+                else:
+                    self._camera = CameraStream(self.ip, self.access_code, label=self.name)
             return self._camera
 
     # ---- MQTT ----------------------------------------------------------
@@ -863,6 +955,18 @@ class BambuPrinter:
         if state != raw_state:
             out["state_raw"] = raw_state      # a state the Hub does not know: shown, never trusted
         return out
+
+    def temp_readings(self) -> dict:
+        """Chamber temperature for the fleet cards (temps.py). The printer sends `chamber_temper` for EVERY model,
+        sensor or not, so temps.py believes it only when the printer's profile says there is a chamber sensor.
+        TODO(H2D): the second nozzle is not read - the H2D's per-nozzle report (a `device.extruder.info` list in
+        the community protocol notes) is not confirmed against a real printer, so only the main nozzle shows."""
+        with self._lock:
+            p = dict(self.state.get("print", {}))
+        c = p.get("chamber_temper")
+        if isinstance(c, (int, float)) and not isinstance(c, bool):
+            return {"chamber": {"c": c, "target": None}}
+        return {}
 
     @staticmethod
     def global_tray_id(unit_id, tray_id) -> int:
@@ -1159,8 +1263,23 @@ class BambuPrinter:
             why += ", a print start was just sent"
         raise PrinterBusy(f"printer is busy ({self.name}: {why}) - no FTPS session was opened.")
 
-    def _ftps(self) -> ImplicitFTPTLS:
-        self._require_idle()
+    def _require_can_receive(self):
+        """Like _require_idle, but for putting a file on the card: printing and paused are fine (see can_receive_state)."""
+        s = self.snapshot()
+        if can_receive_state(s):
+            return
+        why = (f"state {s.get('state')}" if s.get("connected") else "not connected")
+        if s.get("start_pending"):
+            why += ", a print start was just sent"
+        raise PrinterBusy(f"printer is busy ({self.name}: {why}) - no FTPS session was opened.")
+
+    def _ftps(self, allow_busy=False) -> ImplicitFTPTLS:
+        """Open an FTPS session. `allow_busy` is for uploads (and the name check before one) only: they may run while the
+        printer is printing or paused. Every other caller keeps the idle-only rule."""
+        if allow_busy:
+            self._require_can_receive()
+        else:
+            self._require_idle()
         f = ImplicitFTPTLS()
         try:
             f.connect(self.ip, 990, timeout=30)
@@ -1259,6 +1378,44 @@ class BambuPrinter:
         return [dict(r) for r in c[1]] if c else []
     # ==== end library ====
 
+    def sd_list_for_send(self) -> list:
+        """The `.3mf` files on the card, read LIVE (never the saved copy), for the name check before a send. Allowed while
+        printing or paused: then only the names and sizes are asked for (NLST + SIZE, which a printing printer answers
+        fine). Raises PrinterBusy when the printer cannot take a session (offline, a start just sent)."""
+        idle = self._idle_now()
+        f = self._ftps(allow_busy=True)
+        try:
+            if idle:
+                rows = []
+                f.retrlines("LIST", rows.append)
+                out = []
+                for r in rows:
+                    m = re.match(r"[-rwx]{10}\s+\d+\s+\S+\s+\S+\s+(\d+)\s+(\w+\s+\d+\s+[\d:]+)\s+(.+)$", r)
+                    if m and m.group(3).lower().endswith(".3mf"):
+                        out.append({"name": m.group(3), "size": int(m.group(1)), "modified": _list_modified(m.group(2))})
+                return out
+            names = f.nlst()
+            out = []
+            for n in names:
+                n = str(n).split("/")[-1]
+                if not n.lower().endswith(".3mf"):
+                    continue
+                try:
+                    size = int(f.size(n) or 0)
+                except Exception:
+                    size = -1                       # unknown size: never counts as "already there"
+                out.append({"name": n, "size": size, "modified": ""})
+            return out
+        finally:
+            _close_ftp(f)
+
+    def _idle_now(self) -> bool:
+        try:
+            s = self.snapshot()
+        except Exception:
+            return False
+        return bool(s.get("connected")) and s.get("state") in _controls.IDLE_STATES and not s.get("start_pending")
+
     def sd_list(self) -> list:
         """The `.3mf` files in the SD card root. While the printer is not positively idle no FTPS session is
         opened: the last listing taken while it WAS idle is returned, however old (nothing on the card can
@@ -1339,10 +1496,39 @@ class BambuPrinter:
             _close_ftp(f)
         return buf.getvalue()
 
+    UPLOAD_BLOCK = 64 * 1024
+    UPLOAD_DATA_TIMEOUT = 120          # seconds the data connection may stall on one block
+    UPLOAD_REPLY_TIMEOUT = 180         # seconds to wait for the final "226" (a printing printer takes ~15 s more)
+    UPLOAD_UNWRAP_TIMEOUT = 5          # seconds to wait for the answer to the TLS goodbye (see sd_upload)
+
     def sd_upload(self, filename: str, data: bytes):
-        f = self._ftps()
+        """Put a file on the card. Allowed while the printer is printing or paused (never a print start).
+        The transfer is done by hand instead of ftplib's storbinary: storbinary waits for the answer to the TLS goodbye
+        (unwrap), a printing P1S/A1 never answers it, and the call hangs while the printer stops sending status. The H2D
+        needs the goodbye. So: send the blocks, say goodbye with a short wait, close, then read the final reply."""
+        f = self._ftps(allow_busy=True)
         try:
-            f.storbinary(f"STOR {filename}", io.BytesIO(data))
+            f.voidcmd("TYPE I")
+            conn = f.transfercmd(f"STOR {filename}")
+            try:
+                conn.settimeout(self.UPLOAD_DATA_TIMEOUT)
+                mv = memoryview(bytes(data))
+                for i in range(0, len(mv), self.UPLOAD_BLOCK):
+                    conn.sendall(mv[i:i + self.UPLOAD_BLOCK])
+                # The TLS goodbye (unwrap): the H2D REQUIRES it (without it: "426 Failure reading network stream" and
+                # the file is thrown away); a PRINTING P1S/A1 never answers it. So say goodbye but wait only a few
+                # seconds for the answer, then close either way. Tested on real printers 2026-11-16.
+                unwrap = getattr(conn, "unwrap", None)
+                if unwrap is not None:
+                    try:
+                        conn.settimeout(self.UPLOAD_UNWRAP_TIMEOUT)
+                        unwrap()
+                    except (OSError, ValueError):
+                        pass
+            finally:
+                conn.close()
+            f.sock.settimeout(self.UPLOAD_REPLY_TIMEOUT)
+            f.voidresp()
         finally:
             _close_ftp(f)
         self._sd_cache = None
@@ -1654,6 +1840,24 @@ class OctoPrintPrinter:
             "kind": "octoprint",
         }
 
+    def temp_readings(self) -> dict:
+        """Every tool, the bed and the chamber OctoPrint reported at its last poll (temps.py). No network."""
+        last = self._last if self._ok else None
+        if not isinstance(last, tuple):
+            return {}
+        temps = (last[0] or {}).get("temperature") if isinstance(last[0], dict) else None
+        if not isinstance(temps, dict):
+            return {}
+        tools = []
+        for key in sorted((k for k in temps if re.fullmatch(r"tool\d+", str(k))), key=lambda k: int(k[4:])):
+            t = temps[key] if isinstance(temps[key], dict) else {}
+            tools.append({"c": t.get("actual"), "target": t.get("target")})
+        out = {"nozzles": tools} if tools else {}
+        ch = temps.get("chamber")
+        if isinstance(ch, dict) and isinstance(ch.get("actual"), (int, float)):
+            out["chamber"] = {"c": ch["actual"], "target": None}
+        return out
+
     def fresh_snapshot(self) -> dict:
         """snapshot() that skips the 3 s cache: safety decisions (the pre-heat auto-off) must not act on a
         reading older than the last few seconds."""
@@ -1739,8 +1943,9 @@ class OctoPrintPrinter:
     def upload(self, filename: str, data, timeout: float = 300):
         """BETA - not yet verified on real hardware. Upload a file to OctoPrint's local storage:
         POST /api/files/local (multipart: file, select=false, print=false, path=<folder>). Refused unless the printer
-        is positively idle right now. It never selects or prints the file. The caller makes sure the name is free."""
-        _require_idle_for_delete(self, "uploaded")
+        is connected and has no print start pending (it may be printing or paused). It never selects or prints the file.
+        The caller makes sure the name is free."""
+        _require_can_receive(self, "uploaded")
         folder, _sep, base = filename.rpartition("/")
         fields = {"select": "false", "print": "false"}
         if folder:
@@ -1753,6 +1958,9 @@ class OctoPrintPrinter:
             with self._open(req, timeout) as r:
                 r.read(65536)
         except urllib.error.HTTPError as e:
+            busy = _upload_refused(e, "OctoPrint")
+            if busy:
+                raise busy from e
             raise PrinterError(f"OctoPrint refused the upload ({e.code} {e.reason}).") from e
         except NET_ERRORS as e:
             raise PrinterError(f"Could not reach OctoPrint at {self.url}: {scrub_text(e)}") from e

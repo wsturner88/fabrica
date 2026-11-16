@@ -153,7 +153,7 @@ class PageTests(unittest.TestCase):
     def test_phone(self):
         R = self.go("phone", "?group=Home", (390, 800))
         self.check(R, "phone")
-        self.assertLessEqual(R["open"]["tbarRows"], 3)                        # a phone: title row, the sort buttons, then Grid / List + Refresh + More (a wrap, never a clipped button)
+        self.assertLessEqual(R["open"]["tbarRows"], 4)                        # a phone: title row, (Pause / Cancel while printing), Controls + Light, then Sort + Refresh + More (a wrap, never a clipped button)
 
     def test_five_inch_files_sheet(self):
         self.check(self.go("l5", "?group=Home&layout=5in", (800, 480)), "5in")
@@ -226,13 +226,12 @@ class ServerPolitenessTests(unittest.TestCase):
         self.assertEqual([f["name"] for f in r.json()], ["a.gcode"])
         self.assertEqual(len(self.listed()), 1)
 
-    def test_a_background_look_is_skipped_while_heating(self):
+    def test_a_background_look_still_lists_while_heating(self):               # owner decision, 2026-11-15: "do not pause"
         self.routes(bed_target=80.0)
         r = self.client.get(f"/api/printer/{self.NAME}/files?refresh=1&bg=1")
         self.assertEqual(r.status_code, 200)
-        self.assertTrue(r.json()["skipped"])
-        self.assertIn("heating", r.json()["why"])
-        self.assertEqual(self.listed(), [])                                    # not even the file list was read
+        self.assertEqual([f["name"] for f in r.json()], ["a.gcode"])
+        self.assertEqual(len(self.listed()), 1)
 
     def test_a_background_look_is_skipped_right_after_a_control_action(self):
         self.routes()

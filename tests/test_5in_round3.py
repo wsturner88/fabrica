@@ -126,14 +126,16 @@ class TestThemeSelection(unittest.TestCase):
         # the mockups' rule: the state is always a word (plus a shape), never colour alone - the chips carry their <i> shape and the words
         fn = js_function("l5Card")
         self.assertIn('<i></i>${esc(word)}', fn)
-        self.assertIn("Spaghetti: <b>${esc(spag.word)}</b>", fn)
+        self.assertIn("spBig(spag)", fn)                                                         # the warning / pause block's words
+        self.assertIn("Spaghetti: <b>", js_const("spBig"))
+        self.assertIn("PAUSED", js_const("spBig") + js_function("spagInfo"))
         self.assertIn("NOT CONNECTED", js_const("CONN_HTML5"))
 
 
 @unittest.skipUnless(HAVE_NODE, "node not installed")
 class TestSpaghetti(unittest.TestCase):
     def info(self, o):
-        return node(js_function("spagInfo") + "\nconsole.log(JSON.stringify(spagInfo(%s)))" % json.dumps(o))
+        return node(js_const("SP_GATE") + "\n" + js_function("spagInfo") + "\nconsole.log(JSON.stringify(spagInfo(%s)))" % json.dumps(o))
 
     def test_words(self):
         base = {"cam": True, "enabled": True, "excluded": False, "down": False, "learn": False, "running": True}
@@ -147,29 +149,49 @@ class TestSpaghetti(unittest.TestCase):
         self.assertEqual(self.info(dict(base, level="warning"))["word"], "WARNING")
         self.assertEqual(self.info(dict(base, level="failure"))["word"], "FAILURE")
 
+    def test_the_three_modes_in_words(self):
+        base = {"cam": True, "enabled": True, "excluded": False, "down": False, "learn": False, "running": True}
+        a = self.info(dict(base, mode="active", needed=3, count=0))
+        self.assertEqual((a["k"], a["word"], a["mode"]), ("on", "ACTIVE", "active"))
+        self.assertIn("Pauses after 3", a["sub"])
+        self.assertEqual(self.info(dict(base, mode="watch"))["sub"], "Alert only \u00b7 never pauses")
+        self.assertEqual(self.info(dict(base, mode="off"))["word"], "OFF")
+        # an ACTIVE printer that cannot act yet says why, and reads as the WATCHING it really is
+        l = self.info(dict(base, mode="active", gate="learning", bf=204, lf=360))
+        self.assertEqual((l["word"], l["sub"]), ("WATCHING", "Active once learned (204/360)"))
+        self.assertEqual(self.info(dict(base, mode="active", gate="resumed"))["sub"], "Watching \u2014 you resumed this print")
+        # the confirmation: WARNING 2/3, then PAUSED - spaghetti
+        w = self.info(dict(base, mode="active", level="warning", count=2, needed=3))
+        self.assertEqual((w["k"], w["word"], w["prog"]), ("alert", "WARNING", "2/3"))
+        self.assertIn("2 of 3 pictures", w["sub"])
+        self.assertEqual(self.info(dict(base, mode="watch", level="warning"))["prog"], "")                  # WATCH: no count, it never pauses
+        self.assertEqual(self.info(dict(base, mode="active", level="warning", gate="learning", count=0))["prog"], "")
+        p = self.info(dict(base, mode="active", autoPaused=True, level="warning"))
+        self.assertEqual((p["k"], p["word"]), ("paused", "PAUSED \u2014 spaghetti"))
+
     def test_precedence_no_camera_beats_everything_and_off_beats_watching(self):
         self.assertEqual(self.info({"cam": False, "enabled": False, "excluded": True})["k"], "nocamera")
         self.assertEqual(self.info({"cam": True, "enabled": True, "excluded": True, "running": True, "level": "failure"})["k"], "off")
 
-    def test_toggle_adds_and_removes_from_the_excluded_list_case_insensitively(self):
-        src = js_function("spagNextList") + """
-        console.log(JSON.stringify([spagNextList(['Printer-B'], 'Printer-A', false), spagNextList(['Printer-B', 'printer-a'], 'Printer-A', true),
-          spagNextList(['Printer-B'], 'Printer-A', true), spagNextList(null, 'Printer-A', false), spagNextList(['Printer-A', 'Printer-A'], 'printer-a', true)]))
-        """
-        self.assertEqual(node(src), [["Printer-B", "Printer-A"], ["Printer-B"], ["Printer-B"], ["Printer-A"], []])
+    def test_the_mode_control_writes_through_the_existing_settings_route(self):
+        fn = js_function("spagSetModes")
+        self.assertIn("api('/api/settings', {method:'PUT'", fn)                       # the same route (and scope) the old on / off switch used
+        self.assertIn("'detection.printer_modes'", fn)
+        self.assertIn("'detection.excluded_printers'", fn)                            # the older list stays in step: OFF = listed
+        self.assertIn("det5Fetch()", fn)                                              # it starts from the Hub's own current answer
+        self.assertNotIn("/api/printer", fn)                                          # nothing else is written, no printer is touched
+        self.assertIn('data-ctl', HTML[HTML.index('id="sp-mode"'):HTML.index('id="sp-mode"') + 80])     # a view-only sign-in does not see it
+        self.assertIn('role="radiogroup"', js_function("spModeSeg"))
 
-    def test_switch_writes_through_the_existing_settings_route(self):
-        fn = js_function("spagToggle")
-        self.assertIn("api('/api/settings')", fn)
-        self.assertIn("method:'PUT'", fn)
-        self.assertIn("'detection.excluded_printers'", fn)
-        self.assertIn("spagNextList(cur, me, !watching)", fn)
-        self.assertNotIn("/api/detection", fn)                      # no new route, nothing else is written
-        self.assertIn('data-ctl', re.search(r'<button id="sp-tog"[^>]*>', HTML).group(0))     # a view-only sign-in does not see a switch it cannot use
-        self.assertIn('role="switch"', HTML)
+    def test_mode_choices_write_the_right_pairs(self):
+        src = "const esc = s => String(s);\n" + js_const("SPM") + js_function("spModeSeg") + "\nconsole.log(JSON.stringify(spModeSeg('P-1', 'active', false)))"
+        html = node(src)
+        self.assertEqual([html.count('data-mode="%s"' % m) for m in ("off", "watch", "active")], [1, 1, 1])
+        self.assertRegex(html, r'aria-checked="true" data-act="spagMode" data-name="P-1" data-mode="active"')
+        self.assertIn('data-name="P-1"', html)
 
-    def test_switch_is_disabled_without_a_camera_or_while_detection_is_off(self):
-        self.assertIn("$('sp-tog').disabled = !hasDet || info.k === 'nocamera' || (x && x.state === 'off')", js_function("l5Detail"))
+    def test_the_control_is_disabled_without_a_camera_or_while_detection_is_off(self):
+        self.assertIn("const segOff = !hasDet || info.k === 'nocamera' || (x && x.state === 'off');", js_function("l5Detail"))
 
     def test_fleet_cards_read_the_detector_status_read_only(self):
         self.assertIn("pollJson('/api/detection', 4000)", js_function("det5Fetch"))
@@ -186,7 +208,8 @@ class TestSpaghetti(unittest.TestCase):
           ['Printer-E', 'Printer-F', 'Printer-G', 'Printer-H'].map(n => det5For(n).level)]))
         """
         r = node(src)
-        self.assertEqual(r[0], {"enabled": True, "learn": True, "down": False, "level": "", "relearn": False, "excluded": False})
+        self.assertEqual(r[0], {"enabled": True, "learn": True, "down": False, "level": "", "relearn": False, "excluded": False, "mode": "watch", "gate": "",
+                                "count": 0, "needed": 3, "autoPaused": False, "resumed": False, "flagId": "", "bf": 0, "lf": 0})
         self.assertEqual(r[1:4], [True, True, False])
         self.assertEqual(r[4], ["warning", "failure", "", ""])                              # the fleet card finally knows about a WARNING / FAILURE
 
@@ -204,15 +227,16 @@ class TestPresetsAndControlRow(unittest.TestCase):
         self.assertEqual(node(src), [[["PLA", 55], ["PETG", 80], ["ABS", 90]], [], []])
         self.assertNotRegex(js_function("l5Presets") + js_function("ctlPreheatPreset") + js_function("ctlPreheat"), r"\b(215|240|250|255)\b")
 
-    def test_a_preset_is_sent_by_name_after_a_confirmation_and_never_carries_a_nozzle(self):
-        self.assertIn("preheatGo: b => { if(b.dataset.p) ctlDo('preheat', {preset:b.dataset.p}); }", HTML)    # the Hub looks the bed temperature up
+    def test_a_preset_is_sent_by_name_on_the_tap_and_never_carries_a_nozzle(self):
+        # nav review 2026-10-31: the 5-inch tile fires on the tap like the 10-inch chooser's buttons (bed only, the Hub switches it off by itself) - no extra confirm page
+        self.assertNotIn("preheatGo", HTML)
         self.assertNotIn("nozzle:pr[1]", HTML)
-        self.assertIn('data-act="preheatGo"', js_function("ctlPreheatPreset"))
-        self.assertIn("Pre-heat ${pmEsc(CUR)} for ${pmEsc(pr[0])}?", js_function("ctlPreheatPreset"))      # a tap on a cell asks first
-        self.assertIn("The nozzle stays off.", js_function("ctlPreheatPreset"))
+        self.assertIn("ctlDo('preheat', {preset:pr[0]});", js_function("ctlPreheatPreset"))                # the Hub looks the bed temperature up
+        self.assertNotIn("$('mbody').innerHTML", js_function("ctlPreheatPreset"))                         # no dialog in between
+        self.assertIn("toast('Pre-heat on ' + CUR", js_function("ctlDo"))                                  # the toast says it, and "the nozzle stays off"
+        self.assertIn("the nozzle stays off", js_function("ctlDo"))
         self.assertIn('data-act="preheatPreset"', js_function("l5Detail"))
         self.assertIn('<span class="l">${esc(p[0])} bed</span>', js_function("l5Detail"))                  # words: "PLA bed 60°"
-        self.assertNotRegex(js_function("ctlPreheatPreset"), r"onclick=\"[^\"]*\$\{")             # no values spliced into an inline handler
         self.assertNotIn("Nozzle ${", js_function("ctlPreheat"))                                          # the 10-inch two-tap sheet shows the bed only
 
     def test_preset_cells_follow_what_the_printer_can_do(self):
@@ -345,7 +369,7 @@ class TestOtherLayoutsAreUntouched(unittest.TestCase):
         self.assertIn("on ? '&#10003; ' : ''", HTML)                               # the group chip has a tick on the active one on EVERY layout (colorblind rule)
         self.assertNotIn("on && !L5 ? '&#10003; '", HTML)
         self.assertIn("const filesHead = extra => L5\n", HTML)
-        self.assertIn(": '<div class=\"fhead\">Jobs on SD card' + (extra ? '<small>' + extra + '</small>' : '') +", HTML)    # the old header, now with its "More" button (back up / refresh) in the same row
+        self.assertIn(": '<div class=\"fhead\">Jobs on ' + esc(filesStore().name || 'SD card') + (extra ? '<small>' + extra + '</small>' : '') +", HTML)    # the old header, now with its "More" button (back up / refresh) in the same row
 
 
 if __name__ == "__main__":

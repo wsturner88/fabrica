@@ -159,8 +159,8 @@ class TestFilesOverlayAndSheet(unittest.TestCase):
     def test_one_print_button_per_row_rename_delete_behind_the_name(self):
         self.assertIn("display:none", rule("html.lay-5in .frow .fdelete"))
         self.assertIn('data-act="fileMenu"', HTML)
-        for act in ("fmPrint", "fmRename", "fmDelete"):
-            self.assertIn(act, HTML)
+        for act in ("fmPrint", "fmRename", "fmDelete"):           # (the old bottom-sheet file menu was dead code: removed 2026-10-31; the tap opens the start pop-up / detail sheet)
+            self.assertNotIn(act, HTML)
         self.assertIn("height:53px", rule("html.lay-5in .frow {"))
 
     def test_rare_actions_live_in_the_more_sheet(self):

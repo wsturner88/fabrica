@@ -18,7 +18,7 @@ An agent needs only the MCP address (and a key). Everything else it needs comes 
 
 - **Server instructions**, sent to every client on connect: what Fabrica is, the safety rules (a human confirms the
   plate is clear before every print, prints start only through `suggest_mapping` then `start_print`, no
-  pause/cancel unless asked, file actions only on idle printers), and the current kit version.
+  pause/cancel unless asked, delete / rename only on idle printers, and sending a library file never over a name the printer already has), and the current kit version.
 - **`fabrica_guide(topic, since)`** (read scope): short guides for `start`, `printing`, `library`, `history`,
   `renaming` and `changes`. Each reply begins with `Fabrica kit <version> · build <revision>`. The same text is
   available as the resource template `fabrica://guide/{topic}`. The guides are files in `app/agent_guides/`.

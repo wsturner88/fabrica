@@ -1,0 +1,7 @@
+{"objects": ["gcode", "webhooks", "configfile", "mcu", "canbus_stats EBBCan", "mcu EBBCan", "mcu eddy", "heaters",
+  "temperature_sensor EBB_NTC", "stepper_enable", "tmc2209 extruder", "fan", "heater_fan hotend_fan", "neopixel btt_mini12864",
+  "gcode_move", "print_stats", "virtual_sdcard", "pause_resume", "display_status", "gcode_macro PRINT_START", "gcode_macro LOAD_FILAMENT",
+  "gcode_macro UNLOAD_FILAMENT", "filament_switch_sensor switch_sensor", "temperature_sensor btt_eddy_mcu", "probe",
+  "probe_eddy_current btt_eddy", "temperature_probe btt_eddy", "bed_mesh", "exclude_object", "heater_bed",
+  "controller_fan controller_fan", "heater_fan exhaust_fan", "output_pin caselight", "temperature_host Pi", "temperature_sensor Pi",
+  "idle_timeout", "quad_gantry_level", "toolhead", "extruder"]}

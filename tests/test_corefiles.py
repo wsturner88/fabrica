@@ -651,7 +651,7 @@ class TestPage(unittest.TestCase):
         self.assertIn('aria-label="Material: ', badge)             # the colour word, if any, is in the label too
 
     def test_tapping_a_row_opens_the_detail_sheet_on_every_layout(self):
-        self.assertIn("fileMenu:  b => fileDetail(b.dataset.f),", HTML)       # no `if(L5)` any more
+        self.assertIn(": fileDetail(b.dataset.f),", HTML)       # no `if(L5)` any more (a wall screen's file TILE opens the start pop-up instead: tests/test_nav_popups.py)
         self.assertGreaterEqual(HTML.count('data-act="fileMenu"'), 3)       # name block, picture, placeholder
         self.assertIn('.frow .grow[data-act="fileMenu"]', HTML)         # Enter on the row opens it too
 
@@ -701,7 +701,7 @@ class TestPage(unittest.TestCase):
         the file list's own header is a plain one-line title, and no empty progress-bar band shows while nothing prints."""
         self.assertIn('class="fmore-tb" data-act="filesMore"', HTML)
         head = HTML[HTML.index("const filesHead = extra => L5"):HTML.index("// ---- files: names, pictures")]
-        self.assertNotIn("<button", head.split(": '<div class=\"fhead\">Jobs on SD card'")[1].split("function filesMore")[0])
+        self.assertNotIn("<button", head.split(": '<div class=\"fhead\">Jobs on ' + esc(filesStore().name || 'SD card')")[1].split("function filesMore")[0])
         self.assertIn("function filesMore(){", HTML)
         self.assertIn("Back up files", HTML[HTML.index("function filesMore(){"):HTML.index("function filesMore(){") + 900])
         self.assertIn('html:not(.lay-5in) #printer .tbar > button[onclick^="bkStart"]', HTML)      # the two old title-bar buttons

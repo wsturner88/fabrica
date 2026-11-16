@@ -1,0 +1,7 @@
+{"extruder": {"temperature": 24.65, "target": 0.0, "power": 0.0, "can_extrude": false},
+ "heater_bed": {"temperature": 24.6, "target": 0.0, "power": 0.0},
+ "temperature_sensor EBB_NTC": {"temperature": 34.76, "measured_min_temp": 27.08, "measured_max_temp": 67.84},
+ "temperature_sensor btt_eddy_mcu": {"temperature": 35.88, "measured_min_temp": 27.62, "measured_max_temp": 62.63},
+ "temperature_probe btt_eddy": {"temperature": 37.597790964650244, "measured_min_temp": 29.64, "measured_max_temp": 68.97, "in_calibration": false},
+ "temperature_host Pi": {"temperature": 54.53},
+ "temperature_sensor Pi": {"temperature": 54.53, "measured_min_temp": 35.54, "measured_max_temp": 58.43}}

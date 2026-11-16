@@ -165,6 +165,7 @@ REST_SCOPES = [
     ("GET", "/api/fleet", "read"),
     ("GET", "/api/printers", "read"),
     ("GET", "/api/printer-types", "read"),
+    ("GET", "/api/profiles", "read"),
     ("GET", "/api/groups", "read"),                           # printer groups and their members
     ("GET", "/api/agent-kit", "read"),                        # ==== agent kit ==== kit version, topics, workflows
     ("GET", "/api/printer/{name}", "read"),
@@ -196,6 +197,8 @@ REST_SCOPES = [
     ("GET", "/api/analytics", "read"),                        # ==== analytics ==== the summary over the job log (like /api/stats)
     ("GET", "/api/costs/file", "read"),
     ("GET", "/api/detection", "read"),                        # detector state and per-printer verdicts
+    ("GET", "/api/detection/flags", "read"),                  # the flagged pictures (list)
+    ("GET", "/api/detection/flags/{fid}/image", "read"),
     ("GET", "/api/discover/suggestions", "read"),             # the networks the Hub would offer to scan
     ("GET", "/api/discover/{id}", "read"),                    # the progress / result of a scan that was started with control
     ("GET", "/api/auth/me", "read"),                          # who am I (role, view-only?) - lets the page hide buttons
@@ -216,7 +219,7 @@ REST_SCOPES = [
     ("GET", "/api/library/files/{name}/download", "control"),  # the file itself = your design: same rule as backup downloads
     ("POST", "/api/library/delete", "control"),
     ("POST", "/api/library/save", "control"),                 # copy a printer's file into the library (downloads from the printer)
-    ("POST", "/api/library/send", "control"),                 # upload library files to idle printers (never starts a print)
+    ("POST", "/api/library/send", "control"),                 # upload library files to printers, also printing / paused ones (never starts a print, never replaces a file)
     ("POST", "/api/library/folder", "control"),               # create / delete / move
     ("POST", "/api/library/scan", "control"),                 # re-read what the printers hold (never an FTPS session on a busy one)
     # ==== end library ====
@@ -226,6 +229,7 @@ REST_SCOPES = [
     # ==== end rename ====
     ("GET", "/api/backups/{printer}/{filename}", "control"),  # downloading a backup = all your files
     ("POST", "/api/printers/test", "control"),                # makes the Hub contact an address
+    ("POST", "/api/camera/test", "control"),                  # "Test camera" on the printer form: fetches one picture from an address
     ("POST", "/api/printers", "control"),
     ("PUT", "/api/printers/{name}", "control"),
     ("DELETE", "/api/printers/{name}", "control"),
@@ -239,6 +243,7 @@ REST_SCOPES = [
     ("GET", "/api/jobs.csv", "control"),                      # a data export: job names can carry order or customer info
     ("POST", "/api/discover", "control"),                     # starts a network scan
     ("DELETE", "/api/discover/{id}", "control"),
+    ("POST", "/api/detection/flags/{fid}/label", "control"),  # a verdict that changes what the detector learns (false alarm -> baseline)
     ("POST", "/api/detection/test", "control"),               # makes the Hub contact an address
     ("POST", "/api/printer/{name}/detection/score", "control"),   # sends a camera picture to the detector
     # --- admin: who may get in and what the keys may do - a signed-in DASHBOARD browser only, never an API key
@@ -312,7 +317,7 @@ TOOL_SCOPES = {
     "discover_printers": "control",        # scans networks
     "score_snapshot": "control",           # sends a camera picture to the detector
     # ==== library ====
-    "library_send": "control",             # uploads a library file to idle printers; never starts a print
+    "library_send": "control",             # uploads a library file to printers, also printing / paused ones; never starts a print
     "library_save_from_printer": "control",  # downloads a file from a printer into the library
     # ==== rename ====
     "rename_preview": "control",           # validates a batch of renames, issues a single-use ticket; changes nothing

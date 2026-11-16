@@ -517,16 +517,16 @@ class TestPrewarmPoliteness(ServerCase):
         server._prewarm(self.NAME)
         self.assertEqual(self.metas, list(self.FILES))
 
-    def test_prewarm_skips_while_the_bed_is_heating(self):
+    # owner decision, 2026-11-15 ("do not pause"): a pre-heated printer still gets its pictures - the user picks the job by them
+    def test_prewarm_runs_while_the_bed_is_heating(self):
         self.routes(klippy="ready", files=self.FILES, bed_target=80.0)
         server._prewarm(self.NAME)
-        self.assertEqual(self.metas, [])
-        self.assertEqual(self.file_reads(), [], "not even the file list may be read while it is heating")
+        self.assertEqual(self.metas, list(self.FILES))
 
-    def test_prewarm_skips_while_the_nozzle_is_heating(self):
+    def test_prewarm_runs_while_the_nozzle_is_heating(self):
         self.routes(klippy="ready", files=self.FILES, nozzle_target=210.0)
         server._prewarm(self.NAME)
-        self.assertEqual((self.metas, self.file_reads()), ([], []))
+        self.assertEqual(self.metas, list(self.FILES))
 
     def test_prewarm_skips_for_two_minutes_after_a_control_action(self):
         self.routes(klippy="ready", files=self.FILES)
@@ -621,6 +621,7 @@ const papi = (n, p) => '/api/printer/' + n + (p || '');
 const esc = x => String(x);
 const errorCard = (t, m) => cards.push([t, m]);
 const closeModal = () => {}; const pview = () => {}; const fleet = () => {};
+const dpWait = (t, say, note) => '<wait ' + t + '>'; const toasts = []; const toast = (t) => toasts.push(t);       // (the waiting pop-up and the toast)
 const chipFor = st => ['idle', st];
 let apiImpl = null;
 const api = async (url, opts) => { calls.push(JSON.parse((opts && opts.body) || '{}')); return apiImpl(); };
@@ -653,9 +654,11 @@ console.log(JSON.stringify({calls}));""")
         out = self.run_js(r"""
 apiImpl = async () => ({result: 'Klip is already connected (Klipper is ready); nothing was sent.'});
 await doConnect('Klip');
-console.log(JSON.stringify({body: els.mbody.innerHTML}));""")
-        self.assertIn("Nothing to do", out["body"])
-        self.assertIn("nothing was sent", out["body"])
+console.log(JSON.stringify({toasts}));""")
+        self.assertEqual(len(out["toasts"]), 1)                       # a toast, no card to dismiss
+        self.assertIn("Nothing to do", out["toasts"][0])
+        self.assertIn("already connected", out["toasts"][0])
+        self.assertIn("nothing was sent", out["toasts"][0])
 
     def test_unreachable_is_said_in_words(self):
         out = self.run_js(r"""

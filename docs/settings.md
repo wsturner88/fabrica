@@ -170,7 +170,8 @@ Used by the History page, `recent_jobs`, `job_stats` and `cost_per_part` (see [j
 
 ### Detection (`detection`)
 
-Spaghetti detection (see [detection.md](detection.md)). There is no auto-pause setting, on purpose.
+Spaghetti detection (see [detection.md](detection.md)). Each printer is OFF, WATCH (alert only) or ACTIVE (alert, and **pause** the print after a
+confirmation); nothing here ever cancels a print.
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
@@ -181,7 +182,9 @@ Spaghetti detection (see [detection.md](detection.md)). There is no auto-pause s
 | `detection.sensitivity` | enum | `medium` | `low`, `medium`, `high` |
 | `detection.learn_only` | bool | `True` | score and log, send no alert |
 | `detection.cooldown_min` | int | `10` | 1-120 |
-| `detection.excluded_printers` | list | `[]` | printer names |
+| `detection.printer_modes` | map | `{}` | `{"Printer-A": "active", ...}`, each `off` / `watch` / `active`; no entry = WATCH. Set from Settings > Spaghetti |
+| `detection.confirm_pictures` | enum | `3` | `2`, `3`, `4`, `6`: pictures in a row at the warning level before an ACTIVE printer is paused |
+| `detection.excluded_printers` | list | `[]` | older setting, still read: listed = OFF unless the printer has its own mode |
 
 ### Security (`security`)
 

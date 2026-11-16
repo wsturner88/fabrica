@@ -631,12 +631,12 @@ class BambuTests(unittest.TestCase):
         self.assertEqual(res["guide_step"], "network")
         self.assertIn("same network", res["hint"])
 
-    def test_probe_x1_has_no_camera(self):
+    def test_probe_x1_has_builtin_camera(self):
         res = self.mgr.test("bambu", self.vals(model="Bambu Lab X1 Carbon"))
         self.assertTrue(res["ok"])
         self.assertIn("Bambu Lab P1S", res["message"])      # serial prefix wins for the model name
         self.assertTrue(fleet_store._bambu_has_camera("Bambu Lab P1S"))
-        self.assertFalse(fleet_store._bambu_has_camera("Bambu Lab X1 Carbon"))
+        self.assertTrue(fleet_store._bambu_has_camera("Bambu Lab X1 Carbon"))   # RTSPS :322 since h2dcam
 
     def test_add_connects_one_client_and_remove_leaves_none(self):
         res = self.mgr.add("bambu", self.vals())

@@ -608,12 +608,12 @@ class DetectionWiring(Base):
         r = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=90)
         self.assertIn("@@ True True []", r.stdout, r.stdout + r.stderr)
 
-    def test_settings_shape_and_no_auto_pause(self):
+    def test_settings_shape_and_never_an_auto_cancel(self):
         sec = next(s for s in self.c.get("/api/settings").json()["sections"] if s["id"] == "detection")
         names = [f["name"] for f in sec["fields"]]
         self.assertEqual(names, ["mode", "url", "token", "interval_s", "sensitivity", "learn_only", "cooldown_min",
-                                 "excluded_printers"])
-        self.assertFalse([n for n in names if "pause" in n or "stop" in n or "cancel" in n])
+                                 "printer_modes", "confirm_pictures", "excluded_printers"])
+        self.assertFalse([n for n in names if "stop" in n or "cancel" in n])           # a pause can be automatic (ACTIVE mode, after a confirmation); a cancel never is
         self.assertEqual(next(f for f in sec["fields"] if f["name"] == "token")["secret"], True)
 
     def test_the_token_is_write_only(self):
@@ -792,9 +792,9 @@ class DetectionWiring(Base):
         server.PRINTERS["plain"] = FakePrinter("Plain")
         self.assertIn("No camera", server._detection_line("Plain")["text"])
 
-    def test_per_printer_spaghetti_switch_uses_the_settings_route(self):
-        """The 5-inch board's per-printer Spaghetti switch = add / remove the printer from detection.excluded_printers through the
-        existing PUT /api/settings (no new route). The loop, /api/detection and the printer line all follow."""
+    def test_the_older_excluded_list_still_switches_a_printer_off_and_on(self):
+        """Back-compat: the per-printer switch of older dashboards wrote detection.excluded_printers through PUT /api/settings; that list still
+        means OFF for a printer with no mode of its own (the mode control of this build writes printer_modes AND keeps this list in step)."""
         prn = CamPrinter()
         server.PRINTERS["fake"] = prn
         self.enable()

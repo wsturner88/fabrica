@@ -105,8 +105,8 @@ prints from anywhere on earth without exposing anything to the internet.
   (works from Docker) and pre-fills the Add form; tool `discover_printers`.
   [docs/discovery.md](discovery.md)
 - 🍝 **Spaghetti detection (optional add-on)** — watches every running print through its camera and
-  alerts you; starts in learn-only mode and never pauses or stops a print. Tools: `detection_status`,
-  `score_snapshot`. Setup: Settings → Detection, [docs/detection.md](detection.md)
+  alerts you; starts in learn-only mode. Per printer: OFF, WATCH (alert only) or ACTIVE (also pauses the print after a
+  confirmation; never cancels). Tools: `detection_status`, `score_snapshot`. Setup: Settings → Spaghetti, [docs/detection.md](detection.md)
 - 🗂️ **File library** — one library on the Hub for every print file across the fleet: folders, search,
   grid or list, plate previews and full details; send a file to any idle printer, then print it through the
   normal confirm. Tools: `library_list`, `library_file`, `library_send`, `library_save_from_printer`.

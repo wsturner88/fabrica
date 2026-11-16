@@ -29,14 +29,15 @@ FIT = ("kiosk10", "five", "land", "desktop")
 class ConfirmStaticTests(unittest.TestCase):
     def test_the_footer_is_outside_the_scrolling_part_and_carries_the_tick(self):
         dlg = HTML[HTML.index('$(\'mbody\').innerHTML = `<div class="cfdlg'):]
-        dlg = dlg[:dlg.index("if(s.camera) cfStart();")]
+        dlg = dlg[:dlg.index("if(s.camera) cfStart(PN);")]
         self.assertLess(dlg.index('class="cfscroll"'), dlg.index('class="cfactions"'))
         foot = dlg[dlg.index('class="cfactions"'):]
-        for needle in ("${plateHtml}", 'onclick="closeModal()">Back</button>', 'id="startbtn"', 'data-act="start"'):
+        for needle in ("${plateHtml}", 'id="startbtn"', 'data-act="start"'):
             self.assertIn(needle, foot, needle)
+        self.assertIn('class="cs-x dlgx" data-act="dlgX"', dlg[:dlg.index('class="cfscroll"')])         # the X in the corner took the place of the Back button
         self.assertNotIn('id="plateok"', dlg[:dlg.index('class="cfactions"')])                  # one tick, in the footer, for every kind of job
         self.assertIn('id="plateok" onchange="armStart()">', HTML)
-        self.assertIn("CONFIRM: THE PRINT BED IS CLEAR", HTML)
+        self.assertIn('<label for="plateok">Bed is clear</label>', HTML)
         css = HTML[HTML.index("/* ==== start-print confirm"):HTML.index("/* phones: the page is a fixed")]
         self.assertNotIn("position:sticky", css)                                                  # no sticky-footer padding hacks any more
 
@@ -78,7 +79,8 @@ class ConfirmBrowserTests(unittest.TestCase):
         return ConfirmBrowserTests.R[k]
 
     # ---------------------------------------------------------------- fits, without scrolling
-    def check_fits(self, scenario, key, wide):
+    def check_fits(self, scenario, key, wide, inner_scroll=False):
+        """inner_scroll: the middle part may scroll (Start, the tick and the X are outside it and stay on screen)"""
         R = self.run_it(scenario, key, wide)
         label = f"{scenario}@{key}{' wide-font' if wide else ''}"
         for stage in ("open", "pre", "after"):
@@ -88,7 +90,8 @@ class ConfirmBrowserTests(unittest.TestCase):
             self.assertLessEqual(M["docW"], M["vw"], (label, stage, "page is wider than the screen"))
             self.assertFalse(M["hscroll"], (label, stage, "the dialog scrolls sideways"))
             cs = M["cscroll"]
-            self.assertLessEqual(cs[0], cs[1], (label, stage, "the dialog has to scroll: content %d px in %d px" % tuple(cs)))
+            if not inner_scroll:
+                self.assertLessEqual(cs[0], cs[1], (label, stage, "the dialog has to scroll: content %d px in %d px" % tuple(cs)))
             self.assertEqual(M["clipped"], [], (label, stage))
             for k in ("startVis", "plateVis", "labelVis", "backVis"):
                 self.assertTrue(M[k], (label, stage, k))
@@ -110,7 +113,7 @@ class ConfirmBrowserTests(unittest.TestCase):
         self.check_fits("no-ams", "five", True)
         self.check_phone("no-ams", False)
         R = self.run_it("no-ams", "five")
-        self.assertIn("the loaded filament (no AMS on this printer)", R["pre"]["text"])
+        self.assertNotIn("the loaded filament (no AMS on this printer)", R["pre"]["text"])            # (the note below says the same: one line less on a short screen)
         self.assertIn("This printer prints with whatever filament is physically loaded", R["pre"]["text"])
         self.assertIn("No camera on this printer", R["pre"]["text"])
         self.assertEqual(R["started"][0]["ams_mapping"], [])
@@ -172,8 +175,8 @@ class ConfirmBrowserTests(unittest.TestCase):
             self.assertIn("Swapped: Filament 1 now uses Slot 1.", txt, key)
             self.assertIn("Same spools as your last print of this file (Oct 13)", txt, key)            # nothing was dropped: every note is still there
             self.assertIn("filament 2 is sliced for PLA but slot 2 holds PETG (your choice last time)", txt, key)
-            for part in ("Live view of Printer-A", "check the bed is clear", "Bambu A1", "2h 5m", "44 g", "Filament 1", "main", "file colour GREEN", "38 g",
-                         "5.6 g", "suggested", "START A PRINT ON Printer-A?"):
+            for part in ("Check the bed is empty", "Bambu A1", "2h 5m", "44 g", "Filament 1", "main", "file colour GREEN", "38 g",
+                         "5.6 g", "suggested", "Print on Printer-A"):
                 self.assertIn(part, txt.replace(" ?", "?"), (key, part))
 
     def test_the_model_mismatch_warning_and_its_tick_are_still_required(self):
@@ -217,7 +220,7 @@ class ConfirmBrowserTests(unittest.TestCase):
         R = self.run_it("two", "five")
         self.assertTrue(R["disabledBefore"])                                # nothing starts without the human's tick
         self.assertFalse(R["armed"]["disabled"])
-        self.assertEqual(R["armed"]["text"], "START PRINT ON Printer-A")
+        self.assertEqual(R["armed"]["text"], "START ON Printer-A")
         self.assertEqual(len(R["started"]), 1)
 
 

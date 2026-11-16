@@ -1,0 +1,31 @@
+{
+  "id": "prusa-mk3s-mmu3",
+  "label": "Prusa MK3S with MMU3",
+  "maker": "Prusa",
+  "types": [
+    "prusalink",
+    "octoprint"
+  ],
+  "matches": [
+    "mk3s",
+    "mk3"
+  ],
+  "has": {
+    "light": false,
+    "nozzles": 1,
+    "nozzle_max_c": 280,
+    "bed_mm": [
+      250,
+      210
+    ],
+    "bed_max_c": 120,
+    "chamber": "none",
+    "filament": {
+      "system": "mmu3",
+      "slots": 5
+    },
+    "camera_builtin": false
+  },
+  "notes": "Open frame with the 5-slot MMU3 filament changer. Remove the MMU3 override if yours has none.",
+  "verified": false
+}

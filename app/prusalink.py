@@ -45,7 +45,7 @@ import urllib.request
 import http.client
 
 from bambu import (PrinterError, PrinterBusy, make_opener, is_redirect, REDIRECT_MSG, strip_userinfo, scrub_text,
-                   _require_idle_for_delete, read_capped, FILE_MAX_BYTES)   # read_capped, FILE_MAX_BYTES: rename
+                   _require_idle_for_delete, _require_can_receive, read_capped, FILE_MAX_BYTES)   # read_capped, FILE_MAX_BYTES: rename
 import controls as _controls
 from controls import ControlUnsupported
 from camera import PollingCameraStream, _Done
@@ -327,7 +327,9 @@ class PrusaLinkPrinter:
                 if e.code in (401, 403):
                     raise PrinterError("PrusaLink rejected the credentials (HTTP %d) — check the "
                                        "password." % e.code) from e
-                raise PrinterError(f"PrusaLink refused to {what} ({_http_msg(e)}).") from e
+                err = PrinterError(f"PrusaLink refused to {what} ({_http_msg(e)}).")
+                err.status = e.code
+                raise err from e
             finally:
                 e.close()
         except (urllib.error.URLError, socket.timeout, OSError, http.client.HTTPException) as e:
@@ -812,12 +814,20 @@ class PrusaLinkPrinter:
         PUT /api/v1/files/<storage>/<path>, the file's bytes as the body (application/octet-stream), with
         `Overwrite: ?0` (an existing file is NEVER replaced; the older spelling `Overwrite-File: ?0` is sent as well)
         and `Print-After-Upload: ?0` (it never starts a print). Same Digest / API-key authentication as every other call.
-        Refused unless the printer is positively idle right now. The caller makes sure the name is free."""
-        _require_idle_for_delete(self, "uploaded")
+        Allowed while the printer is printing or paused (it only needs to be connected with no print start pending);
+        if the printer itself answers 409 / 423 because it is busy, that comes back as a plain PrinterBusy.
+        The caller makes sure the name is free."""
+        _require_can_receive(self, "uploaded")
         body = bytes(data)
-        self._call("PUT", self._file_path(filename), body=body, timeout=timeout, what="upload the file",
-                   headers={"Content-Type": "application/octet-stream", "Overwrite": "?0", "Overwrite-File": "?0",
-                            "Print-After-Upload": "?0", "Content-Length": str(len(body))})
+        try:
+            self._call("PUT", self._file_path(filename), body=body, timeout=timeout, what="upload the file",
+                       headers={"Content-Type": "application/octet-stream", "Overwrite": "?0", "Overwrite-File": "?0",
+                                "Print-After-Upload": "?0", "Content-Length": str(len(body))})
+        except PrinterError as e:
+            if getattr(e, "status", None) in (409, 423) and not isinstance(e, PrinterBusy):
+                raise PrinterBusy("PrusaLink refused the file because the printer is busy printing "
+                                  f"({e.status}). Nothing was uploaded.") from e
+            raise
     # ==== end rename ====
 
     # ---- job control --------------------------------------------------------

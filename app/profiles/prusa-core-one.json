@@ -1,0 +1,32 @@
+{
+  "id": "prusa-core-one",
+  "label": "Prusa Core One",
+  "maker": "Prusa",
+  "types": [
+    "prusalink",
+    "octoprint"
+  ],
+  "matches": [
+    "core one",
+    "coreone",
+    "core1"
+  ],
+  "has": {
+    "light": true,
+    "nozzles": 1,
+    "nozzle_max_c": 290,
+    "bed_mm": [
+      250,
+      220
+    ],
+    "bed_max_c": 120,
+    "chamber": "sensor",
+    "filament": {
+      "system": "none",
+      "slots": 1
+    },
+    "camera_builtin": false
+  },
+  "notes": "Enclosed with a chamber light. PrusaLink does not let Fabrica switch the light or read the chamber temperature, so use the printer's own screen.",
+  "verified": false
+}

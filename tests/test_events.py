@@ -361,9 +361,13 @@ class OfflineTests(Watch):
         d = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, d, True)
         st = ss.SettingsStore(d, env={})
-        st.update({"notifications.offline_grace_s": 20})
+        st.update({"notifications.offline_grace_s": 20, "notifications.offline_grace_idle_min": 1})   # idle printer -> the idle wait
         w = events.EventWatcher(self.out.append, settings=st, clock=lambda: self.t, confirm_s=0)
         for s, dt in ((snap("IDLE"), 0), (offline(), 5), (offline(), 25)):
+            self.t += dt
+            w.update({"P1S": s})
+        self.assertEqual(self.kinds(), [])                      # 25 s < 1 min idle wait (20 s is the printing wait)
+        for s, dt in ((offline(), 40),):
             self.t += dt
             w.update({"P1S": s})
         self.assertEqual(self.kinds(), ["printer_offline"])

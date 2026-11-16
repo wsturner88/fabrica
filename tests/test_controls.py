@@ -369,7 +369,8 @@ class TestOctoPrint(unittest.TestCase):
     def test_light_unsupported(self):
         with self.assertRaises(controls.ControlUnsupported) as cm:
             controls.perform(self.prn, "light_on")
-        self.assertIn("no standard light API", str(cm.exception))
+        # a printer named like a known model gets its profile's words when server.py is loaded in the same process
+        self.assertTrue("no standard light API" in str(cm.exception) or "This printer has no light." in str(cm.exception), str(cm.exception))
         self.assertEqual(self.fake.posts(), [])
         d = controls.describe(self.prn)
         self.assertFalse(d["light"]["supported"])
@@ -525,6 +526,8 @@ class TestPrusaLink(unittest.TestCase):
         self.assertEqual(d["actions"], [])
         for k in ("light", "preheat", "cooldown", "unload", "load"):
             self.assertFalse(d[k]["supported"], k)
+            if k == "light" and "no light." in d[k]["reason"]:
+                continue          # "MK4" matches a profile that says the machine has no light: the profile's words (profiles API tests cover them)
             self.assertIn("no light, temperature, G-code or filament endpoint", d[k]["reason"])
         for act, kw in (("light_on", {}), ("preheat", {"preset": "PLA"}), ("cooldown", {}),
                         ("unload", {}), ("load", {})):
@@ -698,7 +701,7 @@ class TestServer(unittest.TestCase):
         # unsupported -> 422 + reason
         r = self.post("mk4", action="light_on")
         self.assertEqual(r.status_code, 422)
-        self.assertIn("no standard light API", r.json()["reason"])
+        self.assertTrue("no standard light API" in r.json()["reason"] or r.json()["reason"] == "This printer has no light.", r.json()["reason"])   # "mk4" matches a no-light profile
         self.assertTrue(r.json()["error"].startswith("UNSUPPORTED"))
         r = self.post("prusa", action="preheat", preset="PLA")
         self.assertEqual(r.status_code, 422)

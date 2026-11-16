@@ -317,6 +317,7 @@ class _Opener:
 
 IDLE = lambda: {"connected": True, "state": "IDLE"}        # noqa: E731
 BUSY = lambda: {"connected": True, "state": "RUNNING"}     # noqa: E731
+OFFLINE = lambda: {"connected": False, "state": "UNKNOWN"}  # noqa: E731
 
 
 class TestDriverUploads(unittest.TestCase):
@@ -346,10 +347,14 @@ class TestDriverUploads(unittest.TestCase):
         self.assertIn(self.DATA, body)
         self.assertNotIn(b"true", body.split(self.DATA)[0])               # nothing that selects or prints
 
-    def test_octoprint_upload_refuses_a_busy_printer_and_never_follows_a_redirect(self):
+    def test_octoprint_upload_refuses_an_unreachable_printer_and_never_follows_a_redirect(self):
         op = _Opener()
         p = self.octo(op)
-        p.fresh_snapshot = BUSY
+        p.fresh_snapshot = OFFLINE
+        with self.assertRaises(PrinterBusy):
+            p.upload("a.gcode", self.DATA)
+        self.assertEqual(op.reqs, [])
+        p.fresh_snapshot = lambda: {"connected": True, "state": "IDLE", "start_pending": True}
         with self.assertRaises(PrinterBusy):
             p.upload("a.gcode", self.DATA)
         self.assertEqual(op.reqs, [])
@@ -379,12 +384,12 @@ class TestDriverUploads(unittest.TestCase):
         self.assertEqual(r["body"], self.DATA)
         self.assertNotIn("?1", "".join(h.values()))
 
-    def test_prusalink_upload_refuses_a_busy_printer(self):
+    def test_prusalink_upload_refuses_an_unreachable_printer(self):
         op = _Opener()
         mock.patch.object(prusalink, "_OPENER", op).start()
         self.addCleanup(mock.patch.stopall)
         p = prusalink.PrusaLinkPrinter("Link", "http://link.invalid", {"api_key": "K9"})
-        p.fresh_snapshot = BUSY
+        p.fresh_snapshot = OFFLINE
         with self.assertRaises(PrinterBusy):
             p.upload("a.gcode", self.DATA)
         self.assertEqual(op.reqs, [])
@@ -406,17 +411,17 @@ class TestDriverUploads(unittest.TestCase):
         self.assertNotIn(b'name="print"', body)                            # never started
         self.assertIn(self.DATA, body)
 
-    def test_moonraker_upload_refuses_busy_and_reports_a_refusal(self):
+    def test_moonraker_upload_refuses_an_unreachable_printer_and_reports_a_refusal(self):
         op = _Opener()
         mock.patch.object(moonraker, "_OPENER", op).start()
         self.addCleanup(mock.patch.stopall)
         p = moonraker.MoonrakerPrinter("Klip", "http://klip.invalid")
-        p.fresh_snapshot = BUSY
+        p.fresh_snapshot = OFFLINE
         with self.assertRaises(PrinterBusy):
             p.upload("a.gcode", self.DATA)
         self.assertEqual(op.reqs, [])
         p.fresh_snapshot = IDLE
-        op.error = urllib.error.HTTPError("http://klip.invalid/server/files/upload", 409, "Conflict", {}, io.BytesIO(b"{}"))
+        op.error = urllib.error.HTTPError("http://klip.invalid/server/files/upload", 500, "Server Error", {}, io.BytesIO(b"{}"))
         with self.assertRaises(PrinterError):
             p.upload("a.gcode", self.DATA)
 
@@ -961,11 +966,29 @@ class TestLibrarySendToHttpPrinters(HubBase):
         self.assertEqual(again["status"], "already_there")
         self.klip.files_map["Bracket.gcode"] = b"a different file"
         self.assertEqual(server._library_send(["Bracket.gcode"], ["Klip"])[0]["code"], "name_taken")
+        # printing: a send goes through (it only adds a file) ...
         self.klip.state = "RUNNING"
         self.klip.files_map.clear()
         self.klip.ops.clear()
+        res = server._library_send(["Bracket.gcode"], ["Klip"])[0]
+        self.assertEqual((res["status"], res["ok"]), ("sent", True))
+        self.assertEqual(self.klip.ops, ["upload"])
+        # ... but never over a name the printer already has
+        self.klip.ops.clear()
+        busy_again = server._library_send(["Bracket.gcode"], ["Klip"])[0]
+        self.assertEqual((busy_again["ok"], busy_again["code"]), (False, "in_use"))
+        self.assertEqual(self.klip.ops, [])
+        # not reachable: refused, nothing sent
+        self.klip.state, self.klip.files_map = "DISCONNECTED", {}
         self.assertEqual(server._library_send(["Bracket.gcode"], ["Klip"])[0]["code"], "busy")
         self.assertEqual(self.klip.ops, [])
+        # the setting off: the old idle-only rule
+        self.klip.state = "RUNNING"
+        server.SETTINGS.update({"library.send_while_printing": False})
+        self.addCleanup(server.SETTINGS.update, {"library.send_while_printing": True})
+        self.assertEqual(server._library_send(["Bracket.gcode"], ["Klip"])[0]["code"], "busy")
+        self.assertEqual(self.klip.ops, [])
+        server.SETTINGS.update({"library.send_while_printing": True})
         self.klip.state = "IDLE"
         server.LIB.add_bytes("Stand.3mf", make_3mf())
         self.assertEqual(server._library_send(["Stand.3mf"], ["Klip"])[0]["code"], "wrong_type")

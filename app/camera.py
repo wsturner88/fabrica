@@ -37,6 +37,7 @@ import struct
 import subprocess
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -613,6 +614,103 @@ def check_camera(url, timeout=8.0):
         return False, _ffmpeg_reason(redact_text(r.stderr.decode("utf-8", "replace"), url), url)
     except Exception as e:
         return False, redact_text(e, url)
+
+
+# ---------------------------------------------------------------- "Test camera" (the Add / Edit printer form)
+# One frame, in plain words, with the reason as a code the form can show. Nothing here returns or logs the
+# login: messages use plain_url() and every free text goes through redact_text().
+
+TEST_SCHEMES = ("rtsp", "rtsps", "http", "https")
+MAX_PREVIEW_BYTES = 3 * 1024 * 1024
+TEST_MESSAGES = {
+    "no_ffmpeg": "RTSP needs the full Hub image (it includes ffmpeg). This Hub does not have it, so it cannot read an rtsp:// address.",
+    "wrong_login": "Wrong login: the camera refused the user name or password.",
+    "unreachable": "Nothing answered at that address. Check the camera's IP address and port, and that it is switched on.",
+    "no_picture": "Camera answered but sent no picture.",
+    "not_found": "The camera answered, but nothing is at that path. Check the end of the address.",
+    "too_big": "The camera's picture is too large to preview.",
+}
+
+
+class _HttpOnlyRedirect(urllib.request.HTTPRedirectHandler):
+    """A snapshot URL may redirect, but only to http(s) - never to ftp: or file: - and a login in the
+    original address is never carried to a different host."""
+    max_redirections = 3
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        old, new = urllib.parse.urlsplit(req.full_url), urllib.parse.urlsplit(newurl)
+        if new.scheme.lower() not in ("http", "https"):
+            raise urllib.error.HTTPError(req.full_url, code, "redirect to a non-http address refused", headers, fp)
+        nr = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if nr is not None and (new.hostname, new.port) != (old.hostname, old.port):
+            nr.headers.pop("Authorization", None)
+            nr.unredirected_hdrs.pop("Authorization", None)
+        return nr
+
+
+def _failure(code, url, detail=""):
+    return {"ok": False, "reason": code, "message": TEST_MESSAGES[code], "where": plain_url(url), "jpeg": None}
+
+
+def _grab_http(url, timeout):
+    req = urllib.request.Request(plain_url(url), headers={"User-Agent": "fabrica-camera", **_basic_header(url)})
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _HttpOnlyRedirect())
+    try:
+        with opener.open(req, timeout=timeout) as r:
+            data = r.read(MAX_PREVIEW_BYTES + 1)
+    except urllib.error.HTTPError as e:
+        e.close()
+        return _failure("wrong_login" if e.code in (401, 403) else "not_found" if e.code in (404, 410) else "no_picture", url)
+    except Exception:
+        return _failure("unreachable", url)
+    if len(data) > MAX_PREVIEW_BYTES:
+        return _failure("too_big", url)
+    if data[:2] != b"\xff\xd8":
+        return _failure("no_picture", url)
+    return {"ok": True, "reason": "ok", "message": "Camera picture received.", "where": plain_url(url), "jpeg": data}
+
+
+_UNREACHABLE_WORDS = ("connection refused", "timed out", "network is unreachable", "no route to host", "host is down",
+                      "name or service not known", "failed to resolve", "could not resolve", "temporary failure in name",
+                      "nodename nor servname", "connection reset")
+
+
+def _ffmpeg_failure(stderr_text, url):
+    low = (stderr_text or "").lower()
+    if "401" in low or "unauthorized" in low or "authorization" in low or "forbidden" in low or "403" in low:
+        return _failure("wrong_login", url)
+    if any(w in low for w in _UNREACHABLE_WORDS):
+        return _failure("unreachable", url)
+    if "404" in low or "not found" in low:
+        return _failure("not_found", url)
+    return _failure("no_picture", url)
+
+
+def grab_frame(url, timeout=8.0):
+    """Fetch ONE frame from a camera address. -> {ok, reason, message, where, jpeg}. `reason` is one of
+    ok | no_ffmpeg | wrong_login | unreachable | no_picture | not_found | too_big. Never raises, and nothing in
+    the answer carries the login (`where` is the address without it)."""
+    try:
+        scheme = urllib.parse.urlsplit(url).scheme.lower()
+        if scheme not in TEST_SCHEMES:
+            return _failure("no_picture", url)
+        if scheme in ("http", "https"):
+            return _grab_http(url, timeout)
+        exe = find_ffmpeg()
+        if not exe:
+            return _failure("no_ffmpeg", url)
+        try:
+            r = subprocess.run(_ffmpeg_cmd(exe, url, one_frame=True), stdin=subprocess.DEVNULL,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return _failure("unreachable", url)
+        if r.stdout[:2] == b"\xff\xd8":
+            if len(r.stdout) > MAX_PREVIEW_BYTES:
+                return _failure("too_big", url)
+            return {"ok": True, "reason": "ok", "message": "Camera picture received.", "where": plain_url(url), "jpeg": r.stdout}
+        return _ffmpeg_failure(redact_text(r.stderr.decode("utf-8", "replace"), url), url)
+    except Exception:
+        return _failure("no_picture", url)
 
 
 class CameraOverrideMixin:

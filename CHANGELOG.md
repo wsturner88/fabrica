@@ -8,6 +8,76 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- **Send a file to a printer that is printing or paused.** The Library's Send to... (and `library_send`) now also accepts a printing or paused printer: the file only goes onto its list, nothing is started, and a file name the printer already has is never replaced while it is busy (refused as `in_use`). Offline, not-connected and just-started printers are still refused. Bambu uploads use a hand-made transfer that does not wait for a TLS goodbye the printer never answers mid-print. New setting **File library > Send files to printers that are printing or paused** (on by default); off = idle printers only, as before. Downloads, deletes, renames and backups stay idle-only.
+- **Spaghetti modes: OFF / WATCH / ACTIVE per printer, and saved pictures with Real / False alarm.**
+  - **Three modes.** `○ OFF` (not watched - what "excluded" meant), `👁 WATCH` (today's behaviour: warning and alert, never touches the print) and
+    `⏸ ACTIVE` (WATCH, plus the Hub **pauses** the print - never cancels - after a confirmation). Printers in the old "Do not watch" list are OFF, every
+    other printer is WATCH, a new printer is WATCH; the old setting is still read. A 3-way control replaces the Spaghetti on/off switch on every printer
+    screen, and Settings -> Spaghetti has one compact row per printer (with "learned" / "learning 204/360"), a *Set all* row and **Confirm before pausing**.
+  - **Confirmation.** ACTIVE pauses only after 2, 3 (default), 4 or 6 consecutive pictures at the warning level (3 = about 30 s); one OK picture starts the
+    count again. It acts like WATCH, and the screens say why ("Active once learned"), during the warm-up, while the printer is still learning, in learn-only
+    mode, with the detector or camera down, and when the print is not running. One pause per warning episode, through the same code path as a human's Pause
+    (Bambu, Klipper, OctoPrint, PrusaLink). If a human resumes, that printer is WATCH for the rest of that print.
+  - **After a pause:** a Telegram / ntfy message with the picture ("⏸ Paused <printer> - spaghetti seen in 3 pictures in a row. Check it, then Resume or Cancel in
+    Fabrica."), or "⚠️ Could not pause <printer> - check it now."; the job log records the pause with the reason `spaghetti (auto)`; the fleet badge reads
+    `PAUSED - spaghetti`, and while confirming `WARN 2/3`. New event kinds `spaghetti_paused` and `spaghetti_pause_failed` (Settings -> Notifications).
+  - **Flagged pictures.** Every warning keeps its pictures (up to 6 per episode, newest ~300 pictures / 300 MB kept) with a small JSON under
+    `data/detection/flags/`. The spaghetti pop-up and the printer screen's warning block get **✓ Real spaghetti** / **✗ False alarm**: a false alarm clears
+    that print's warning and teaches that printer's baseline the picture; real keeps it as an example. In the Cancel confirm an optional **🍝 It was spaghetti**
+    tick keeps the current picture as a *missed* example (Cancel itself is unchanged). A **Flagged pictures** gallery (Settings -> Spaghetti) lists them with a
+    printer / label filter and relabel by tap. New routes `GET /api/detection/flags`, `.../{id}/image`, `POST .../{id}/label`.
+  - `/api/detection` reports `mode`, `gate` and the confirmation progress per printer and `auto_pause` (true when any printer is ACTIVE); `setup.printer_modes`
+    lists every printer's mode. The job log gains a `pause_reason` column (migration 2).
+
+- **Pop-ups instead of back-steps.** Nothing that worked leaves a page behind any more: the dialog closes and one **toast** (a tick or a cross plus words, about 3
+  seconds, in the top bar so it never covers the printer card it is about) says what happened. A problem stays in its pop-up, with its reason, until it is read.
+  - **Starting a print** shows a spinner in the pop-up while the Hub waits, then closes the dialog and the Files screen, lands on the **fleet** and toasts
+    "Printer-A started - file - printing". The "Print started / Done" card and the two Back taps after it are gone (the 5-inch screen: 9 taps from card to
+    running print became 5). The start call now waits **40 seconds** (a Klipper printer can take 20+ s to answer), so a print that started no longer shows
+    "No answer"; a timeout says the print may still have started.
+  - **The 5-inch screen's dialogs are centred pop-ups over the dimmed screen** (like the 10-inch), not full-screen pages. Every dialog has the same close: an X in its
+    top-right corner (56 px on the 5-inch screen) and a tap outside it (the Add / Edit printer form with typing in it still closes only with its X or Cancel).
+  - **Wall screens (5-inch and 10-inch kiosk): a file tile opens the start pop-up directly**: the picture, print time, material and grams, the live bed camera
+    ("Check the bed is empty"), the **Bed is clear** tick and START ON <printer>; Delete file is a small button in its header (it keeps its confirm). START stays off
+    until the tick, the model-mismatch tick and the single-use start ticket are unchanged. A file that is printing, or a busy printer, still opens the detail sheet;
+    the phone and desktop keep the detail sheet. A job with spool rows or a model mismatch keeps the old two-column shape so it still fits 800x480 without scrolling.
+  - **The spaghetti banner and a warned fleet card open a pop-up with the live camera, PAUSE (RESUME while paused) and CANCEL PRINT** right on the fleet, not the
+    printer page; Cancel keeps its one confirm.
+  - **Connect**: "Connecting" is a spinner; "Connected" and "Nothing to do" are toasts; a failure stays an error card; "Restart Klipper?" keeps its confirm.
+  - **AMS slot**: material and colour chips on ONE pop-up (the slot's own material is pre-chosen, so a colour fix is one tap); it sends as soon as both are chosen
+    and toasts "Slot 2 is now GREEN PLA"; a failure stays with Try again.
+  - **Load / Unload**: the warning, the slot chips and the confirm share one pop-up (Load stays off until a slot is picked; the confirm still heats the nozzle).
+  - **The 5-inch pre-heat tiles fire on the tap** like the 10-inch chooser (bed only, the Hub switches it off by itself); the strip and a toast say so.
+  - **Find printers** and **Rename / Delete group** are pop-ups over the Printers list instead of page swaps.
+  - `tools/screenshots/navshots.py` takes the pop-up screenshots (demo printers, stubbed requests); `tests/test_nav_popups.py` covers all of the above.
+
+- **A visible Camera section on the Add / Edit printer form, with Test camera.** Every printer type (Bambu, OctoPrint, PrusaLink, Klipper) now shows
+  a "Camera" section right after its connection fields - no longer buried at the bottom of "More options": the **Camera address** box (a stored login still
+  shows as `rtsp://***@host/path`; sending that back keeps the login, blank removes the camera), a short help line, three tap-to-fill examples
+  (**Tapo / Reolink** `rtsp://user:password@<camera IP>:554/stream1`, **Prusa Buddy3D** `rtsp://<camera IP>/live`, **JPEG URL** `http://<camera IP>/snapshot.jpg`;
+  the part to replace is selected) and a **Test camera** button that shows one live picture, or says in words what is wrong: "Wrong login", "Nothing
+  answered at that address", "Camera answered but sent no picture", "RTSP needs the full Hub image". The new `POST /api/camera/test` ({url, printer?}) needs a
+  full-access key or sign-in, takes only rtsp / rtsps / http / https, grabs one frame with a short time limit, refuses a redirect to ftp: or file: (and never
+  hands a login to another host), allows two tests at once, tests the stored login when the box shows the hidden form of the edited printer's own address,
+  and never logs or returns a login. Saving a camera address still needs no printer test, and changes nothing else (it never turns the spaghetti watch on).
+- **Paste guard for camera addresses.** An `rtsp://` address, or a web address with `user:password@` in it, typed or pasted into a printer address box (the
+  Klipper web page address, the printer's address) shows "This looks like a camera address." with a one-tap **Move it to Camera** button that moves the text to
+  the Camera box and puts the wrong box back to what it was. The Hub still refuses such an address in a printer address box.
+
+- **A "Controls" button that is always on the printer screen.** The one button in the top toolbar row, idle **and** while printing, on the desktop, the 10-inch
+  touch / kiosk layout, the phone and the 5-inch screen (quiet theme: in the header right of the title; Bridge theme: a block in the left rail), opens the
+  Controls pop-up. While a print runs the pop-up opens with its parts locked and one line in words, "Locked while printing" (the Hub refuses those actions
+  as before; the light still works). Controls is also still the first entry under More. To keep the toolbar ONE row (also with the wide fallback font of
+  Linux machines) the four sort buttons and the Grid / List pair became ONE "Sort: Recent" button on the 10-inch layout and in narrow windows and on the phone;
+  its chooser holds the sort choices and, below them, Grid / List. The phone rows are now: title, Pause / Cancel (printing), Controls + Light, Sort + Refresh + More.
+- **Slimmer fleet cards.** The "Nozzle 220 / Bed 58" line and the "Spaghetti: WATCHING" line are gone (about 60-75 px shorter). A small Spaghetti badge sits
+  at the right end of the "Done ~6:59 PM" row: a shape and a word, never colour alone - eye + OK (watching), eye + READY / LEARN, eye with a slash + OFF,
+  camera with a slash + NO CAM, triangle + WARN / FAIL (bold frame), triangle + DOWN (detector down); its tooltip keeps the full words ("Spaghetti: WATCHING").
+  The camera's "Updated 9:19:03 AM" is now a small "9:19 AM" overlay on the picture's corner (the seconds are in the tooltip). The info line keeps
+  "7% - 9h 40m left - Layer 13 / 1150"; a printer that reports no layers shows the job's material instead ("19% - 4h 57m left - PETG") when its file says one.
+  A Spaghetti WARNING / FAILURE card keeps its big inverted block, heavy frame, the banner and the Pause / Cancel row. The Hub's `/api/fleet` and
+  `/api/printer/<name>` snapshots gained `job_materials` (only while a print runs, read from caches - never a request to a printer).
+
 - **Controls and Change filament are now pop-up cards.** Controls opens as a centred card over the dimmed printer screen (a bottom sheet with a grab
   handle on a phone, a near-full-screen card on the 5-inch screen, both themes): a **Move** panel (a round **jog ring** - Y+ back, X+ right, Y- front,
   X- left around **Home** - a **1 mm | 10 mm** switch, a **Z** column and a **Filament** Pull / Push column that says "Heat the nozzle to 170 first"),
@@ -78,7 +148,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   gets the 10-inch touch layout scaled to fill its screen. More > Switch view overrides the choice per browser (Desktop / 10-inch touch /
   Phone / 5-inch wall / Automatic); `?view=` in the address wins over detection. Wall screens (`?kiosk=1`, `?layout=5in`) are unchanged.
 
+### Changed
+
+- **Klipper's "Web UI / camera base address" is now "Klipper web page address"** (same stored field), with the help "Only needed when Mainsail / Fluidd isn't on
+  port 80 of the printer's address. Not for cameras - use Camera above." A camera template that still has its `<camera IP>` part is caught in words before
+  saving. The setup guides point to the Camera section instead of "More options".
+
 ### Fixed
+
+- **Closing the Change-filament pop-up left the nozzle hot.** A tap outside or the X during the guided change now switches the heater it started off (what Cancel always did).
+- **"No answer" for a print that had started** (a Klipper printer can take more than the old 20 s to answer the start): the start call now waits 40 s.
+- **A material was guessed from the temperature.** In the Controls pop-up an MK4 printing PETG at 245 C showed "-> 245 ABS" because the ABS preset is 245 C.
+  The target line now names a material only from the running job's own file (`job_materials`, or the file's row on the printer screen); otherwise it says just
+  "-> 245". A preset chip may still carry a tick when its temperature matches, but the words never claim a material the file did not name.
+- **A huge tooltip on the desktop view.** Hovering the History page (and Analytics) could pop up a native tooltip holding the whole list's text: the "full name when
+  cut short" helper treated any scrolling pane as cut-short text. Now only real truncated text (an ellipsis or a line clamp, overflow hidden, a text leaf,
+  at most 160 characters) gets a tooltip; a scroll container, a row or a list never does.
 - **A multi-plate project's per-plate exports (OrcaSlicer: one `.gcode.3mf` per plate) are treated as the plate they hold, not plate 1.** The
   plate-4 file has `Metadata/plate_4.gcode` and `plate_4.png`; the Hub used to read `plate_1.png` (two different plates showed the same
   picture), count layers and parts from plate 1, and - safety-critical - tell the printer to print `Metadata/plate_1.gcode`, which is not in
@@ -217,6 +302,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - **PrusaLink setup has one secret: Password.** An API key pasted there works too (the Hub tries digest login first, then the key).
   Username, storage, model and camera address are "advanced" fields. Saved printers are migrated (old `snapshot_url` becomes the
   camera address, an old API key becomes the password). Address fields say that `http://` is added for you.
+
+### Removed
+
+- The dead 5-inch file bottom-sheet (`filesMenu`) and its `fmPrint` / `fmRename` / `fmDelete` handlers.
 
 ## [1.0.0] - 2026-10-13
 

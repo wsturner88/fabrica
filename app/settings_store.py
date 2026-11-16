@@ -71,6 +71,8 @@ EVENT_KINDS = {
     "backup_done":        ("Backup finished",                        "info",    False, False),
     "backup_failed":      ("Backup failed",                          "failure", True,  True),
     "spaghetti_suspected": ("Possible spaghetti / failed print",     "failure", True,  True),
+    "spaghetti_paused":   ("Print paused by the spaghetti watch",    "failure", True,  True),
+    "spaghetti_pause_failed": ("Spaghetti watch could not pause",    "failure", True,  True),
     "preheat_auto_off":   ("Pre-heat auto-off fired",                "info",    True,  False),
     "preheat_auto_off_failed": ("Heaters could not be switched off", "failure", True, True),
     "detector_down":      ("Failure detector unreachable",           "warning", True,  False),
@@ -91,6 +93,8 @@ EVENT_HELP = {
     "backup_done": "A file backup finished successfully.",
     "backup_failed": "A file backup failed.",
     "spaghetti_suspected": "The failure detector (Settings > Detection) thinks a print has gone wrong. Includes a camera picture when enabled. Never sent while Detection is in learn-only mode.",
+    "spaghetti_paused": "A printer in ACTIVE mode was PAUSED because the spaghetti watch saw the warning level in several pictures in a row. Includes the picture. The print is never cancelled for you.",
+    "spaghetti_pause_failed": "A printer in ACTIVE mode should have been paused for spaghetti but the pause command failed. Go and look at it now.",
     "preheat_auto_off": "A pre-heated printer was switched off again because no print was started in time.",
     "preheat_auto_off_failed": "The pre-heat auto-off could not switch a printer's heaters off (printer unreachable, or still busy after many tries). Go and check it.",
     "detector_down": "The failure detector stopped answering, so running prints are NOT being watched for spaghetti.",
@@ -173,9 +177,12 @@ SCHEMA = [
          _field("duplicate_window_min", "Suppress repeats for (minutes)", "int", 5,
                 "The same event for the same printer (and job) is sent at most once in this window. "
                 "0 = never suppress.", min=0, max=240, unit="min"),
-         _field("offline_grace_s", "Offline grace period (seconds)", "int", 90,
-                "A printer must be unreachable this long before it is reported offline, so a "
-                "Wi-Fi blip or reboot does not ping you.", min=10, max=3600, unit="s"),
+         _field("offline_grace_s", "Offline warning while printing (seconds)", "int", 300,
+                "A printer that drops off the network DURING a print must stay unreachable this long "
+                "before you are warned, so a Wi-Fi blip does not ping you.", min=10, max=3600, unit="s"),
+         _field("offline_grace_idle_min", "Offline warning when idle (minutes)", "int", 60,
+                "A printer that is NOT printing must stay unreachable this long before you are warned "
+                "(covers router / Wi-Fi updates at night). 0 = never warn for an idle printer.", min=0, max=1440, unit="min"),
          _field("first_layer_fallback_min", "First-layer alert timer (minutes)", "int", 8,
                 "For printers that report neither layers nor nozzle height (OctoPrint): send the "
                 "'First layer done' alert this long after the print starts. 0 = off for those printers.",
@@ -304,6 +311,15 @@ SCHEMA = [
                 "Coming soon.", disabled=True),
      ]},
 
+    {"id": "library", "label": "File library", "group": "hub",
+     "description": "Sending library files to printers.",
+     "fields": [
+         _field("send_while_printing", "Send files to printers that are printing or paused", "bool", True,
+                "On: a file can be sent to a printer while it is printing or paused. It only goes onto the printer's "
+                "file list; nothing is started, and a file with a name the printer already has is never replaced while "
+                "the printer is busy. Off: files are only sent to printers that are sitting idle."),
+     ]},
+
     {"id": "camera", "label": "Camera", "group": "hub",
      "description": "Dashboard camera behaviour.",
      "fields": [
@@ -351,8 +367,8 @@ SCHEMA = [
                 min=1, max=500, unit="attempts"),
      ]},
 
-    {"id": "detection", "label": "Detection", "group": "hub",
-     "description": "Spaghetti detection: watches the camera of every running print and alerts you when it looks like the print has gone wrong. It never pauses or stops a print on its own.",
+    {"id": "detection", "label": "Spaghetti", "group": "hub",
+     "description": "Spaghetti detection: watches the camera of every running print and alerts you when it looks like the print has gone wrong. Each printer is OFF, WATCH (alert only) or ACTIVE (alert, and PAUSE the print after a confirmation). It never cancels a print.",
      "help": ("Needs the detector add-on (see docs/detection.md). 'This machine' = the detector runs next to the Hub in Docker; "
               "'Another machine' = it runs elsewhere (or in its own compose project) and you give its address. "
               "Leave 'learn-only' on for your first prints: pictures are scored and logged (data/detection/scores.jsonl) "
@@ -378,9 +394,19 @@ SCHEMA = [
          _field("cooldown_min", "Repeat an alert at most every", "int", 10,
                 "Within one print, the same or a lower alert level is repeated only after this long. A worse level is sent at once.",
                 min=1, max=120, unit="min"),
-         _field("excluded_printers", "Do not watch these printers", "list_str", [],
-                "For example a printer whose camera is poor. Names exactly as in the fleet list.",
-                item_source="printers"),
+         _field("printer_modes", "Mode per printer", "map_enum", {},
+                "One of off / watch / active for each printer, set from the Spaghetti page (a printer with no entry is WATCH, "
+                "or OFF when it is in the old list below).",
+                options=_opts(("off", "OFF"), ("watch", "WATCH"), ("active", "ACTIVE")), hidden=True),
+         _field("confirm_pictures", "Confirm before pausing", "enum", "3",
+                "An ACTIVE printer is paused only after this many pictures IN A ROW at the warning level (one picture every "
+                "10 seconds, so 3 = about 30 seconds). One normal picture starts the count again.",
+                options=_opts(("2", "2 pictures (about 20 s)"), ("3", "3 pictures (about 30 s)"),
+                              ("4", "4 pictures (about 40 s)"), ("6", "6 pictures (about 60 s)"))),
+         _field("excluded_printers", "Do not watch these printers (older setting)", "list_str", [],
+                "Kept so an older setup keeps working: a printer listed here is OFF unless it has its own mode. "
+                "Use the per-printer OFF / WATCH / ACTIVE control instead.",
+                item_source="printers", hidden=True),
      ]},
 
     {"id": "security", "label": "Security", "group": "security",
@@ -589,6 +615,22 @@ def coerce(field: dict, v):
             if i.lower() not in seen:
                 seen.add(i.lower())
                 out.append(i)
+        return out
+    if t == "map_enum":
+        if not isinstance(v, dict):
+            raise ValueError("must be an object like {\"Printer-A\": \"active\"}")
+        if len(v) > 200:
+            raise ValueError("at most 200 entries")
+        allowed = [o["value"] for o in field["options"]]
+        out = {}
+        for k, x in v.items():
+            k = str(k).strip()
+            if not k or len(k) > 64:
+                raise ValueError("printer names must be 1-64 characters")
+            x = str(x).strip().lower()
+            if x not in allowed:
+                raise ValueError(f"'{k}' must be one of: " + ", ".join(allowed))
+            out[k] = x
         return out
     if t == "presets":
         if not isinstance(v, dict):

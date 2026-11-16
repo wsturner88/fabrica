@@ -467,8 +467,8 @@ class TestDashboardWiring(unittest.TestCase):
             cls.html = fh.read()
 
     def test_title_and_button_carry_the_printer_name(self):
-        self.assertIn("START A PRINT ON <span class=\"cfprn\">${CUR}</span>?", self.html)
-        self.assertIn(">START PRINT ON ${CUR}</button>", self.html)
+        self.assertIn("Print on <span class=\"cfprn\">${CUR}</span>", self.html)
+        self.assertIn(">${IC('play')}START ON ${CUR}</button>", self.html)
         self.assertNotIn("ARE YOU SURE YOU WANT TO START A PRINT", self.html)
 
     def test_override_checkbox_and_confirm_binding(self):
@@ -477,7 +477,7 @@ class TestDashboardWiring(unittest.TestCase):
         self.assertIn("model_override:override", self.html)
 
     def test_camera_still_wiring(self):
-        for needle in ("No camera on this printer", "Live view of ${CUR} &mdash; check the bed is clear",
+        for needle in ("No camera on this printer", "Check the bed is empty",
                        "const CF_MS = 3000", "function cfStop", "cfStop();"):
             self.assertIn(needle, self.html)
 
