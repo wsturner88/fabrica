@@ -150,7 +150,9 @@ TBAR_BLOCK = block('<div class="row tbar">', '<div class="hubdown"')
 class MarkupTests(unittest.TestCase):
     def test_the_warning_block_holds_pause_and_cancel_print_wired_to_the_existing_actions(self):
         act = block('<div id="sp-act"', '</div></div>')
-        self.assertEqual(len(re.findall(r"<button\b", act)), 2)
+        self.assertEqual(len(re.findall(r"<button\b", act)), 4)          # Real spaghetti / False alarm (the owner's verdict) + Pause + Cancel print
+        self.assertIn('data-act="spagLabel" data-label="real"', act)
+        self.assertIn('data-act="spagLabel" data-label="false"', act)
         self.assertIn('<button type="button" id="sp-pause" data-ctl onclick="act(\'pause\')">', act)           # the toolbar's own Pause call
         self.assertIn('<button type="button" id="sp-cancel" data-ctl class="danger" onclick="askCancel()">', act)   # the toolbar's own Cancel call: the ONE confirm
         self.assertRegex(act, r"</svg>Pause</button>")
@@ -186,7 +188,7 @@ class MarkupTests(unittest.TestCase):
         self.assertIn("$('stk-pause').style.display = (s.state==='RUNNING')", HTML)
         self.assertRegex(block("function spQuick(", "\n}\n"), r"state === 'RUNNING' \? '<button type=\"button\" class=\"spq-p\"")
         self.assertIn("cardPause:  b => act('pause', b.dataset.name)", HTML)
-        self.assertIn("const spAct = info.k === 'alert' && BUSY_STATES.includes(st);", HTML)       # no buttons for an idle printer
+        self.assertIn("const spAct = (info.k === 'alert' || info.k === 'paused') && BUSY_STATES.includes(st);", HTML)       # no buttons for an idle printer
         self.assertNotIn("auto_pause: True", HTML)
 
     def test_nothing_pauses_or_cancels_without_a_tap(self):
@@ -197,10 +199,10 @@ class MarkupTests(unittest.TestCase):
         self.assertNotIn("setInterval(() => act(", HTML)
 
     def test_the_fleet_banner_and_card_markup(self):
-        self.assertIn("el.setAttribute('data-act', 'openPrinter'); el.setAttribute('data-name', first)", HTML)
-        self.assertIn('data-act="openPrinter" data-name="\' + esc(p.printer) + \'" title="Open', HTML)         # the word on the card
-        self.assertEqual(HTML.count("const quick = spag.k === 'alert' && (k === 'printing' || k === 'paused');"), 1)
-        self.assertIn("spag.k === 'alert' && (k === 'printing' || k === 'paused') ? spQuick(p.printer, p.state)", HTML)
+        self.assertIn("el.setAttribute('data-act', 'spagOpen'); el.setAttribute('data-name', first)", HTML)
+        self.assertIn('data-act="spagOpen" data-name="\' + esc(p.printer) + \'" title="Look at', HTML)         # the word on the card opens the camera pop-up
+        self.assertEqual(HTML.count("const quick = spAttn(spag) && (k === 'printing' || k === 'paused');"), 1)
+        self.assertIn("spAttn(spag) && (k === 'printing' || k === 'paused') ? spQuick(p.printer, p.state)", HTML)
         self.assertIn('data-ctl role="group" aria-label="Pause or cancel the print on', block("function spQuick(", "\n}\n"))
 
     def test_the_5in_strip_cancel_has_a_heavy_frame_and_the_word(self):
@@ -229,7 +231,7 @@ const posts = () => window.__calls.filter(c => /^POST \/api\/printer\/[^/]+\/act
 const cut = e => e.scrollWidth > e.clientWidth + 1 || e.scrollHeight > e.clientHeight + 1;
 const mo = () => document.getElementById('modal').classList.contains('on');
 const dlg = () => ({open: mo(), title: (document.querySelector('#mbody h2') || {textContent: ''}).textContent, text: document.getElementById('mbody').textContent.replace(/\s+/g, ' ').trim(),
-  btns: [...document.querySelectorAll('#mbody button')].map(b => b.textContent.trim())});
+  btns: [...document.querySelectorAll('#mbody button:not([data-act="dlgX"])')].map(b => b.textContent.trim())});       // (the X in the corner is every dialog's own close)
 const clickBtn = re => { const b = [...document.querySelectorAll('#mbody button')].find(x => re.test(x.textContent)); b.click(); };
 const WARN = {state: 'warning', text: 'WARNING - possible spaghetti · score 0.71', score: 0.71, learn: false, alerts: 1};
 const warnSnap = () => {
@@ -309,7 +311,7 @@ class WarningBlockTests(unittest.TestCase):
     def test_nothing_grows_when_nothing_is_wrong(self):
         for name, query, size in self.LAYOUTS:
             R = self.go(name, query, size)
-            self.assertLessEqual(R["run"]["blk"]["h"], 80, name)                                       # the old one-row block (a phone's is 64, the desktop view's 76)
+            self.assertLessEqual(R["run"]["blk"]["h"], 112, name)                                      # the calm block: words + the 3-way OFF / WATCH / ACTIVE control (it was a 64-80 px one-row block before the modes)
             self.assertEqual(R["cleared"]["blk"]["h"], R["run"]["blk"]["h"], name)                      # and it goes back when the warning clears
             self.assertFalse(R["cleared"]["act"], name)
             self.assertGreater(R["warn"]["blk"]["h"], R["run"]["blk"]["h"], name)
@@ -332,7 +334,7 @@ class WarningBlockTests(unittest.TestCase):
             c = R["confirm"]
             self.assertTrue(c["open"], name)
             self.assertEqual(c["title"], "Cancel the print on Printer-A?", name)
-            self.assertEqual(c["btns"], ["Keep printing", "CANCEL PRINT"], name)
+            self.assertEqual(c["btns"][-2:], ["Keep printing", "CANCEL PRINT"], name)                 # (+ the optional "It was spaghetti" tick before them)
             self.assertIn("Bracket x12 for the workshop shelf.gcode.3mf", c["text"], name)
             self.assertEqual((R["dialogs"], R["confirmCalls"]), (1, 0), name)                           # one dialog; nothing sent by opening it
             self.assertEqual(R["keep"], {"open": False, "calls": 0}, name)                              # "Keep printing" sends nothing
@@ -479,7 +481,7 @@ class StickyBarTests(unittest.TestCase):
         R = self.phone()
         self.assertEqual(R["pause"], {"calls": ['POST /api/printer/Printer-A/action {"action":"pause"}'], "modal": False})
         self.assertEqual(R["cancel"]["calls"], 0)
-        self.assertEqual(R["cancel"]["dlg"]["btns"], ["Keep printing", "CANCEL PRINT"])
+        self.assertEqual(R["cancel"]["dlg"]["btns"][-2:], ["Keep printing", "CANCEL PRINT"])           # (+ the optional "It was spaghetti" tick before them)
         self.assertEqual(R["keep"], {"calls": 0, "open": False})
         self.assertEqual(R["sent"], ['POST /api/printer/Printer-A/action {"action":"cancel"}'])
 
@@ -524,18 +526,18 @@ qa(cardOf('Printer-B'), '.spq-c')[0].click(); await sleep(100); clickBtn(/CANCEL
 R.cardSent = {calls: posts(), home: document.getElementById('home').classList.contains('on'), open: mo()};
 // the card's word opens the printer
 qa(cardOf('Printer-A'), '.spg.alert, .spag.alert')[0].click(); await sleep(500);
-R.wordOpen = {cur: CUR, on: document.getElementById('printer').classList.contains('on')};
+R.wordOpen = {dlg: !!document.querySelector('.sgd'), cur: CUR, home: document.getElementById('home').classList.contains('on'), pause: !!document.querySelector('.sgd [data-act=spagPause]'), cancel: !!document.querySelector('.sgd [data-act=spagCancel]')}; closeModal();      // (a tap opens the camera pop-up on the fleet, not the printer page)
 show('home'); await sleep(300);
 // the banner: with two warned printers each name is a button
 qa(document.getElementById('sp-alert'), '.spn').find(b => b.dataset.name === 'Printer-A').click(); await sleep(500);
-R.nameOpen = {cur: CUR, on: document.getElementById('printer').classList.contains('on')};
+R.nameOpen = {dlg: !!document.querySelector('.sgd'), cur: CUR, home: document.getElementById('home').classList.contains('on'), pause: !!document.querySelector('.sgd [data-act=spagPause]'), cancel: !!document.querySelector('.sgd [data-act=spagCancel]')}; closeModal();      // (a tap opens the camera pop-up on the fleet, not the printer page)
 show('home'); await sleep(300);
 CUR = null;
 // one warned printer: the banner itself opens it
 DET.printers['Printer-B'] = {watching: true, excluded: false, verdict: {level: 'ok', score: 0.1, warmup: false}, alerts: [0]}; await fleet(); await sleep(150);
 R.one = fsnap();
 document.getElementById('sp-alert').click(); await sleep(500);
-R.bannerOpen = {cur: CUR, on: document.getElementById('printer').classList.contains('on')};
+R.bannerOpen = {dlg: !!document.querySelector('.sgd'), cur: CUR, home: document.getElementById('home').classList.contains('on'), pause: !!document.querySelector('.sgd [data-act=spagPause]'), cancel: !!document.querySelector('.sgd [data-act=spagCancel]')}; closeModal();      // (a tap opens the camera pop-up on the fleet, not the printer page)
 show('home'); await sleep(300);
 // view-only: no Pause / Cancel on the card
 DET.printers['Printer-A'] = verdict('warning'); await fleet(); await sleep(150);
@@ -588,8 +590,8 @@ class FleetTests(unittest.TestCase):
                 self.assertLessEqual(max(c["b"] for c in S["cards"]), S["vh"], name)             # (the 5-inch grid scrolls under a banner, as it always did)
             a = self.card(S, "Printer-A")
             if name == "kiosk":
-                self.assertEqual(a["tmp"], 0, name)                                                                                  # the Nozzle / Bed line gave way ...
-                self.assertEqual(self.card(S, "Printer-C")["tmp"], 1, name)                                                          # ... on this card only
+                self.assertEqual(a["tmp"], 0, name)                                                                                  # (no card has a Nozzle / Bed line any more: the fleet cards are slimmer) ...
+                self.assertEqual(self.card(S, "Printer-C")["tmp"], 0, name)                                                          # ... and the Pause / Cancel row now simply joins the warned card
             if name != "kiosk":
                 self.assertEqual(a["fileLine"] if name != "desktop" else 0, 0, name)                                                 # 5-inch: the file + layer lines gave way
 
@@ -613,21 +615,24 @@ class FleetTests(unittest.TestCase):
             self.assertIn("SPAGHETTI FAILURE: Printer-B", b["text"], name)
             self.assertIn("WARNING: Printer-A", b["text"], name)
             self.assertIn("tap to open", b["text"], name)
-            self.assertEqual((b["act"], b["name"], b["role"]), ("openPrinter", "Printer-B", "button"), name)                         # the first (FAILURE leads)
+            self.assertEqual((b["act"], b["name"], b["role"]), ("spagOpen", "Printer-B", "button"), name)                         # the first (FAILURE leads)
             self.assertEqual(b["names"], ["Printer-B:Printer-B", "Printer-A:Printer-A"], name)                                       # each name its own button
             self.assertFalse(b["cut"], name)
             self.assertLessEqual(b["br"]["r"], R["both"]["vw"], name)
             o = R["one"]["banner"]
-            self.assertEqual((o["act"], o["name"], o["names"]), ("openPrinter", "Printer-A", []), name)                              # one printer: the banner itself is the button
-            self.assertEqual(R["bannerOpen"], {"cur": "Printer-A", "on": True}, name)
-            self.assertEqual(R["nameOpen"], {"cur": "Printer-A", "on": True}, name)
+            self.assertEqual((o["act"], o["name"], o["names"]), ("spagOpen", "Printer-A", []), name)                              # one printer: the banner itself is the button
+            for k in ("bannerOpen", "nameOpen"):
+                self.assertTrue(R[k]["dlg"] and R[k]["home"] and R[k]["cancel"], (name, k))             # the camera pop-up (live picture, Pause, Cancel print) on the fleet
+                self.assertIsNone(R[k]["cur"], (name, k))
 
     def test_the_warning_word_on_a_card_is_a_button_that_opens_the_printer(self):
         for name, query, size in self.LAYOUTS:
             R = self.go(name, query, size)
             a = self.card(R["both"], "Printer-A")
-            self.assertEqual(a["word"], [["openPrinter", "Printer-A", "button"]], name)
-            self.assertEqual(R["wordOpen"], {"cur": "Printer-A", "on": True}, name)
+            self.assertEqual(a["word"], [["spagOpen", "Printer-A", "button"]], name)
+            w = R["wordOpen"]
+            self.assertTrue(w["dlg"] and w["home"] and w["pause"] and w["cancel"], name)                 # Printer-A is printing: Pause + Cancel print
+            self.assertIsNone(w["cur"], name)
 
     def test_a_card_pause_is_one_tap_and_does_not_open_the_printer(self):
         for name, query, size in self.LAYOUTS:
@@ -639,7 +644,9 @@ class FleetTests(unittest.TestCase):
             R = self.go(name, query, size)
             c = R["cardCancel"]
             self.assertEqual(c["dlg"]["title"], "Cancel the print on Printer-B?", name)
-            self.assertEqual(c["dlg"]["btns"], ["Keep printing", "CANCEL PRINT"], name)
+            self.assertEqual(c["dlg"]["btns"][-2:], ["Keep printing", "CANCEL PRINT"], name)
+            self.assertEqual(len(c["dlg"]["btns"]), 3, name)                                  # + the optional "It was spaghetti" tick (a printer with a camera)
+            self.assertIn("It was spaghetti", c["dlg"]["btns"][0], name)
             self.assertIn("Lid.gcode", c["dlg"]["text"], name)
             self.assertEqual((c["calls"], c["home"]), (0, True), name)
             self.assertEqual(R["cardKeep"], {"calls": 0, "open": False}, name)

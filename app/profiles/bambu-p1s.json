@@ -1,0 +1,29 @@
+{
+  "id": "bambu-p1s",
+  "label": "Bambu Lab P1S",
+  "maker": "Bambu Lab",
+  "types": [
+    "bambu"
+  ],
+  "matches": [
+    "p1s"
+  ],
+  "has": {
+    "light": true,
+    "nozzles": 1,
+    "nozzle_max_c": 300,
+    "bed_mm": [
+      256,
+      256
+    ],
+    "bed_max_c": 100,
+    "chamber": "none",
+    "filament": {
+      "system": "ams",
+      "slots": 4
+    },
+    "camera_builtin": true
+  },
+  "notes": "Enclosed, chamber light, no chamber temperature sensor (the value it reports is not real).",
+  "verified": false
+}

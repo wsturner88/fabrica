@@ -89,7 +89,7 @@ const MEAS = () => {
   return {vw: innerWidth, vh: innerHeight, docW: document.documentElement.scrollWidth, docH: document.documentElement.scrollHeight,
     bodyScrollH: document.body.scrollHeight, cscroll: (cs => cs ? [cs.scrollHeight, cs.clientHeight] : null)(document.querySelector('.cfscroll')), mbox: r(mb), mscroll: [mb.scrollHeight, mb.clientHeight], dlg: r(dlg),
     start: r(st), toggle: r(lab), modelToggle: mo ? r(mo.closest('.toggle')) : null, startVis: vis(st), plate: r(pl), plateVis: vis(pl), labelVis: vis(lab), modelVis: mo ? vis(mo) : null,
-    back: r(document.querySelector('.cfactions button:not(#startbtn)')), backVis: vis(document.querySelector('.cfactions button:not(#startbtn)')),
+    back: r(document.querySelector('.cfdlg .dlgx')), backVis: vis(document.querySelector('.cfdlg .dlgx')),         // (the X in the corner took the place of the Back button)
     buttons: btns, minBtnH: Math.min(...btns.map(b => b.h)), clipped, hscroll: (cs => cs ? cs.scrollWidth > cs.clientWidth + 1 : null)(document.querySelector('.cfscroll')),
     rows: [...document.querySelectorAll('#msrows .msrow')].map(e => r(e)), spoolgrid: r(document.getElementById('spoolgrid')),
     foot: r(document.querySelector('.cfactions')), head: r(document.querySelector('.cfhead')),

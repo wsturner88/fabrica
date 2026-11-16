@@ -1,0 +1,32 @@
+{
+  "id": "bambu-x1c",
+  "label": "Bambu Lab X1 Carbon",
+  "maker": "Bambu Lab",
+  "types": [
+    "bambu"
+  ],
+  "matches": [
+    "x1 carbon",
+    "x1c",
+    "x1e",
+    "x1"
+  ],
+  "has": {
+    "light": true,
+    "nozzles": 1,
+    "nozzle_max_c": 300,
+    "bed_mm": [
+      256,
+      256
+    ],
+    "bed_max_c": 110,
+    "chamber": "sensor",
+    "filament": {
+      "system": "ams",
+      "slots": 4
+    },
+    "camera_builtin": true
+  },
+  "notes": "Enclosed, chamber light and a real chamber temperature sensor.",
+  "verified": false
+}

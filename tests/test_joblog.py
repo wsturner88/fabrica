@@ -694,6 +694,9 @@ class MachineCostTests(Base):
 
 # ============================================================================ migrations
 
+LATEST = [m[0] for m in joblog.MIGRATIONS]          # 1 = the first table, 2 = the pause reason column
+
+
 class MigrationTests(Base):
     def versions(self):
         c = sqlite3.connect(self.path)
@@ -708,8 +711,8 @@ class MigrationTests(Base):
         for _ in range(3):
             jl.migrate()
             self.make()                                    # re-opening the file re-runs migrate()
-        self.assertEqual(self.versions(), [1])
-        self.assertEqual(jl.schema_version(), 1)
+        self.assertEqual(self.versions(), LATEST)
+        self.assertEqual(jl.schema_version(), LATEST[-1])
         self.assertEqual(jl.job(jid)["file"], "stand")      # data survived
 
     def test_new_migration_applies_once_and_keeps_data(self):
@@ -717,12 +720,12 @@ class MigrationTests(Base):
         jid = jl.on_event(ev("print_started", job="stand"))
 
         class Next(joblog.JobLog):
-            MIGRATIONS = list(joblog.MIGRATIONS) + [(2, "ALTER TABLE jobs ADD COLUMN note TEXT")]
+            MIGRATIONS = list(joblog.MIGRATIONS) + [(LATEST[-1] + 1, "ALTER TABLE jobs ADD COLUMN note TEXT")]
 
         n = Next(self.path, clock=lambda: self.now)
         Next(self.path, clock=lambda: self.now)            # second open: version 2 not re-applied
-        self.assertEqual(self.versions(), [1, 2])
-        self.assertEqual(n.schema_version(), 2)
+        self.assertEqual(self.versions(), LATEST + [LATEST[-1] + 1])
+        self.assertEqual(n.schema_version(), LATEST[-1] + 1)
         c = sqlite3.connect(self.path)
         try:
             self.assertEqual(c.execute("SELECT file FROM jobs WHERE id=?", (jid,)).fetchone()[0], "stand")
@@ -734,20 +737,28 @@ class MigrationTests(Base):
         jl = self.make()
 
         class Bad(joblog.JobLog):
-            MIGRATIONS = list(joblog.MIGRATIONS) + [(2, "CREATE TABLE half (a INTEGER);\nTHIS IS NOT SQL")]
+            MIGRATIONS = list(joblog.MIGRATIONS) + [(LATEST[-1] + 1, "CREATE TABLE half (a INTEGER);\nTHIS IS NOT SQL")]
 
         bad = Bad(self.path, clock=lambda: self.now)       # never raises into the Hub: runs from memory
         self.assertIn("syntax error", bad.degraded)
         self.assertEqual(bad.recent_jobs(), [])             # still usable (version 1 tables exist in memory)
         self.assertTrue(os.path.exists(self.path))          # a broken migration is not the file's fault: untouched
-        self.assertEqual(self.versions(), [1])
+        self.assertEqual(self.versions(), LATEST)
         c = sqlite3.connect(self.path)
         try:
             names = {r[0] for r in c.execute("SELECT name FROM sqlite_master")}
         finally:
             c.close()
         self.assertNotIn("half", names)
-        self.assertEqual(jl.schema_version(), 1)
+        self.assertEqual(jl.schema_version(), LATEST[-1])
+
+    def test_a_pause_reason_is_kept_with_the_pause_count(self):
+        jl = self.make()
+        jid = jl.on_event(ev("print_started", job="stand"))
+        jl.on_event(ev("print_paused", job="stand", reason="spaghetti (auto)"))
+        jl.on_event(ev("print_paused", job="stand"))                    # a runout later: no reason given, the first one stays
+        j = jl.job(jid)
+        self.assertEqual((j["pauses"], j["pause_reason"]), (2, "spaghetti (auto)"))
 
     def test_wal_mode(self):
         self.make()

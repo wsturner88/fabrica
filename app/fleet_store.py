@@ -21,6 +21,7 @@ Rules the manager enforces:
     feeds an API, page or tool ever returns one — only "set" / "not set".
 """
 
+import base64
 import hashlib
 import inspect
 import ipaddress
@@ -39,6 +40,7 @@ import urllib.request
 import camera as camera_mod
 import controls
 import framefix
+import profiles
 import setup_guides
 from bambu import BambuPrinter, OctoPrintPrinter, make_opener, is_redirect, REDIRECT_MSG
 
@@ -206,6 +208,24 @@ def record_jog_flip_y(rec) -> bool:
     Read leniently: a hand-edited printers.json never breaks a page."""
     v = rec.get("jog_flip_y") if isinstance(rec, dict) else None
     return v is True or (isinstance(v, str) and v.strip().lower() in ("1", "true", "yes", "on"))
+
+
+def record_profile_id(rec):
+    """The printer profile id saved on a stored record, or None (= pick automatically). Read leniently."""
+    v = rec.get("profile_id") if isinstance(rec, dict) else None
+    return v.strip() if isinstance(v, str) and v.strip() else None
+
+
+def record_profile_overrides(rec) -> dict:
+    """The saved per-printer overrides of a stored record (only valid parts; a hand-edited file never breaks a page)."""
+    return profiles.clean_overrides(rec.get("profile_overrides") if isinstance(rec, dict) else None, strict=False)
+
+
+def _clean_profile_overrides(value) -> dict:
+    try:
+        return profiles.clean_overrides(value)
+    except profiles.ProfileError as e:
+        raise FleetError(f"Printer profile: {e}") from None
 
 
 def _clean_flip_y(value) -> bool:
@@ -864,11 +884,12 @@ OCTOPRINT_FIELDS = [
 # removes the camera address, and leaving the key out changes nothing.
 CAMERA_FIELD = {
     "name": "camera_url", "label": "Camera address", "type": "text", "required": False, "secret": True,
-    "advanced": True, "shown_redacted": True, "placeholder": "rtsp://192.168.1.60/live",
-    "help": "Optional. Use a camera instead of the printer's own: an rtsp:// address (for example a Prusa "
-            "Buddy3D camera: rtsp://<its IP>/live, or a Tapo camera: rtsp://user:password@<IP>:554/stream1) "
+    "advanced": True, "shown_redacted": True, "placeholder": "rtsp://192.168.1.60/live", "section": "camera",
+    "help": "Optional. Use a network camera instead of the printer's own: an rtsp:// address (for example a "
+            "Prusa Buddy3D camera: rtsp://<its IP>/live, or a Tapo camera: rtsp://user:password@<IP>:554/stream1) "
             "or an http(s):// address that returns a JPEG picture. A login in the address is kept private. "
-            "RTSP needs ffmpeg, which is in the full Hub image."}
+            "RTSP needs ffmpeg, which is in the full Hub image. The dashboard shows it in its own Camera "
+            "section, with example buttons and a Test camera button."}
 
 
 def _with_camera_field(fields):
@@ -880,6 +901,10 @@ def _with_camera_field(fields):
 
 def is_secret_field(f: dict) -> bool:
     return bool(f.get("secret")) or f.get("type") == "password"
+
+
+CAMERA_TEST_TIMEOUT = 8.0
+_CAMERA_TEST_SLOT = threading.BoundedSemaphore(2)      # at most two camera tests at once
 
 
 class Family:
@@ -1158,8 +1183,9 @@ class FleetManager:
     """Add / edit / remove printers on a running Hub. `printers` is the shared
     name.lower() -> driver dict that server.py and backup.py read."""
 
-    def __init__(self, store: FleetStore, printers: dict, families=None, guards=None, log=print):
+    def __init__(self, store: FleetStore, printers: dict, families=None, guards=None, log=print, profile_registry=None):
         self.store = store
+        self.profiles = profile_registry if profile_registry is not None else profiles.default_registry()
         self.printers = printers
         self.families = FAMILIES if families is None else families
         self.guards = guards if guards is not None else []   # callables name -> reason|None
@@ -1190,7 +1216,9 @@ class FleetManager:
                 "address": self._address(rec), "model": rec.get("model", ""),
                 "added_at": rec.get("added_at"), "source": rec.get("source", "dashboard"),
                 "values": {k: v for k, v in plain.items()
-                           if k not in ("name", "type", "added_at", "updated_at", "source", "groups", "detect_area", "jog_flip_y")},
+                           if k not in ("name", "type", "added_at", "updated_at", "source", "groups", "detect_area", "jog_flip_y",
+                                        "profile_id", "profile_overrides")},
+                "profile": self.profile_block(rec),
                 "groups": record_groups(rec),
                 "detect_area": record_detect_area(rec),
                 "jog_flip_y": record_jog_flip_y(rec),
@@ -1201,6 +1229,13 @@ class FleetManager:
 
     def list_public(self) -> list:
         return [self.public(r) for r in self.store.records()]
+
+    def profile_block(self, rec) -> dict:
+        """The `profile` block of GET /api/printers (CONTRACT section 2): which profile applies, what the printer has
+        once its own overrides are laid on, and what was changed for this printer only."""
+        r = self.profiles.resolve(rec)
+        return {"id": r["id"], "label": r["label"], "auto": r["auto"], "has": r["has"], "overridden": r["overridden"],
+                "verified": r["verified"], "overrides": r["overrides"]}
 
     # ---- start-up ----------------------------------------------------------
 
@@ -1277,6 +1312,39 @@ class FleetManager:
             if res["ok"]:
                 self._probe_cache[key] = (now, res)
         return res
+
+    def camera_test(self, printer, url) -> dict:
+        """'Test camera' on the Add / Edit printer form: grab ONE frame from `url` and answer in words, with the
+        picture as a data: URL. `printer` (optional) names the printer being edited: when `url` is exactly the
+        login-hidden form the API showed (rtsp://***@host/path), the STORED address is tested - and only then, so
+        a stored login is never sent to a different destination. Nothing here saves, logs or returns a login."""
+        raw = url.strip() if isinstance(url, str) else ""
+        if not raw:
+            raise FleetError("Type or paste a camera address first.")
+        if printer:
+            rec = self.store.get(str(printer))
+            if rec is None:
+                raise NotFound(f"No printer named '{printer}'.")
+            kept = self.store.secret(rec["name"], "camera_url") or ""
+            if kept and raw == camera_mod.redact_url(kept):
+                raw = kept
+        try:
+            full = camera_mod.validate_camera_url(raw)
+        except camera_mod.CameraUrlError as e:
+            raise FleetError(str(e)) from None
+        if urllib.parse.urlsplit(full).scheme.lower() not in camera_mod.TEST_SCHEMES:
+            raise FleetError("A camera address must start with rtsp://, http:// or https://.")
+        if not _CAMERA_TEST_SLOT.acquire(blocking=False):
+            raise FleetError("Another camera test is still running. Wait a few seconds and try again.")
+        try:
+            res = camera_mod.grab_frame(full, CAMERA_TEST_TIMEOUT)
+        finally:
+            _CAMERA_TEST_SLOT.release()
+        out = {"ok": bool(res["ok"]), "reason": res["reason"], "message": camera_mod.redact_text(res["message"], full),
+               "where": camera_mod.plain_url(full)}
+        if res["ok"] and res.get("jpeg"):
+            out["image"] = "data:image/jpeg;base64," + base64.b64encode(res["jpeg"]).decode("ascii")
+        return out
 
     def test(self, type_key, values, existing_name=None) -> dict:
         """'Test connection': probe without saving anything. With existing_name, blank
@@ -1438,7 +1506,7 @@ class FleetManager:
         jog pad shows Y- on top): such an edit never probes, never disconnects and is allowed while the printer is printing (a label
         and a display setting, not connection settings)."""
         values = dict(values) if isinstance(values, dict) else {}
-        meta = {k: values.pop(k) for k in ("groups", "detect_area", "jog_flip_y") if k in values}
+        meta = {k: values.pop(k) for k in ("groups", "detect_area", "jog_flip_y", "profile_id", "profile_overrides") if k in values}
         if not meta:
             return self._update_connection(name, values, skip_test, force)
         rec = self.store.get(name)
@@ -1447,6 +1515,8 @@ class FleetManager:
         groups = normalize_groups(meta["groups"], self.store.group_spellings(skip=rec["name"])) if "groups" in meta else None
         area = _clean_detect_area(meta["detect_area"]) if "detect_area" in meta else None   # bad input: nothing changes
         flip = _clean_flip_y(meta["jog_flip_y"]) if "jog_flip_y" in meta else None
+        pid = self._clean_profile_id(rec, meta["profile_id"]) if "profile_id" in meta else None
+        pov = _clean_profile_overrides(meta["profile_overrides"]) if "profile_overrides" in meta else None
         if set(values) - {"name"}:
             res = self._update_connection(name, values, skip_test, force)
         else:
@@ -1460,11 +1530,32 @@ class FleetManager:
             self.store.update(rec["name"], {"jog_flip_y": True if flip else None})        # off = the default: nothing stored
             res = {**res, "printer": self.public(self.store.get(rec["name"])), "changed": sorted({*res.get("changed", []), "jog_flip_y"})}
             self.log(f"[fleet] '{rec['name']}': Controls jog pad Y " + ("flipped (Y- on top)" if flip else "normal (Y+ on top)"))
+        now = self.store.get(rec["name"])
+        for key, new, same, what in (("profile_id", pid, record_profile_id(now) == pid, "printer profile"),
+                                     ("profile_overrides", pov, pov is not None and record_profile_overrides(now) == pov,
+                                      "printer-only profile settings")):
+            if key in meta and not same:
+                self.store.update(rec["name"], {key: new or None})                 # empty / automatic = nothing stored
+                res = {**res, "printer": self.public(self.store.get(rec["name"])), "changed": sorted({*res.get("changed", []), key})}
+                self.log(f"[fleet] '{rec['name']}': {what} changed")
         if "detect_area" in meta:
             sub = self.set_detect_area(rec["name"], area)
             if sub["changed"]:
                 res = {**res, "printer": sub["printer"], "changed": sorted({*res.get("changed", []), "detect_area"})}
         return res
+
+    def _clean_profile_id(self, rec, value):
+        """A profile id to save (None / "" = pick automatically). It must exist and fit this kind of printer."""
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        if not isinstance(value, str):
+            raise FleetError("Printer profile: 'profile_id' must be the profile's id, or empty for automatic.")
+        prof = self.profiles.get(value.strip())
+        if prof is None:
+            raise FleetError(f"Printer profile: there is no profile called '{value.strip()[:60]}'. See GET /api/profiles for the list.")
+        if not self.profiles.fits(prof, rec.get("type")):
+            raise FleetError(f"Printer profile: '{prof['label']}' is not for this kind of printer ({rec.get('type')}).")
+        return prof["id"]
 
     def set_detect_area(self, name, area) -> dict:
         """Set (or, with None / "" / the whole picture, clear) the printer's spaghetti watch area: a box in percent

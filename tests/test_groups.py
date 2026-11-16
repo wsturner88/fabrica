@@ -825,7 +825,8 @@ const step = k => { R[k] = {injected: injected(), alerts: window.__alerts.length
 const wait = async (f, n) => { for(let i = 0; i < (n || 60) && !f(); i++) await sleep(100); };
 
 await openPrinters(); await wait(() => document.querySelector('.pmrow')); step('printers');
-R.rowGroups = [...document.querySelectorAll('.pmrow .bkinfo')].map(e => e.textContent).filter(t => t.startsWith('Groups:'));
+R.rowGroups = [...document.querySelectorAll('.pmrow .pl-grp')].map(e => e.textContent);       // the group line under a printer card
+document.querySelector('[data-act=pmTopMenu]').click(); document.querySelector('[data-act=pmGroups]').click(); await sleep(50);      // toolbar ⋯ > Manage groups opens the groups section
 R.sectionData = [...document.querySelectorAll('[data-act=pgRename]')].map(b => b.dataset.g);
 R.sectionText = [...document.querySelectorAll('.pmrow .bkhead b')].map(e => e.textContent);
 
@@ -907,7 +908,7 @@ class DashboardBrowserTests(unittest.TestCase):
 
     def test_printer_form_chips_round_trip_hostile_names_as_text(self):
         R, P1, P2, P3 = self.result(), self.tfd.P1, self.tfd.P2, P4
-        self.assertEqual(R["rowGroups"], [f"Groups: {P1}, {P2}", f"Groups: {P3}, Plain"])
+        self.assertEqual(R["rowGroups"], [f"{P1} · {P2}", f"{P3} · Plain"])
         self.assertEqual(sorted(R["sectionData"]), sorted([P1, P2, P3, "Plain"]))      # A-Z, whatever the browser's collation
         self.assertEqual(R["chipData"], [P1, P2])
         self.assertEqual(R["chipText"], [P1, P2])

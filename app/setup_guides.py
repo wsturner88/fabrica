@@ -91,7 +91,7 @@ BAMBU_GUIDE = {
                  "is no picture, look for a 'LAN mode liveview' option next to LAN Only Mode. X1 and "
                  "H2 printers use a different video format that the Hub does not support yet - "
                  "everything else works, just without a picture - unless you give the printer a "
-                 "'Camera address' (More options): an rtsp:// address works for any printer."},
+                 "'Camera address' (the Camera section of the form): an rtsp:// address works for any printer."},
     ],
 }
 
@@ -143,7 +143,7 @@ PRUSALINK_GUIDE = {
         {"id": "camera", "kind": "info", "title": "Camera",
          "text": "PrusaLink has no local camera, and Prusa's own camera view is cloud-only, so the "
                  "Hub shows no picture by default. If you have a network camera, put its address "
-                 "in 'Camera address' (under More options): for a Prusa Buddy3D camera that is "
+                 "in 'Camera address' (the Camera section of the form): for a Prusa Buddy3D camera that is "
                  "rtsp://<the camera's IP>/live; any rtsp:// address or a web address that returns "
                  "a JPEG picture works. RTSP needs the full Hub image (it includes ffmpeg)."},
     ],
@@ -230,8 +230,8 @@ MOONRAKER_GUIDE = {
         {"id": "camera", "kind": "info", "title": "Camera",
          "text": "The Hub uses the webcam you set up in Mainsail or Fluidd (stored in Moonraker). "
                  "Web links like /webcam/?action=snapshot are looked up on the printer's address "
-                 "without port 7125. If your camera is served elsewhere, fill in 'Web UI / camera "
-                 "base address'."},
+                 "without port 7125. If Mainsail / Fluidd is not on port 80, fill in 'Klipper web page "
+                 "address' (More options). To use a different camera, put its address in 'Camera address'."},
     ],
 }
 

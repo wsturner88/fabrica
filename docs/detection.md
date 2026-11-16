@@ -1,8 +1,17 @@
 # Spaghetti detection (optional add-on)
 
 The Hub can watch every **running** print through its chamber camera and send you an alert
-("P1S: possible print FAILURE") when it looks like spaghetti. It is **alert only**: the Hub never
-pauses or stops a print on its own, and there is no setting that makes it.
+("P1S: possible print FAILURE") when it looks like spaghetti. Each printer has one of three **modes**:
+
+| Mode | What it does |
+|---|---|
+| `○ OFF` | not watched (no picture is fetched or scored) |
+| `👁 WATCH` | warns and sends the alert; **never touches the print** (the default, and what every printer was before modes) |
+| `⏸ ACTIVE` | WATCH, plus the Hub **pauses** the print after the warning level has been seen in several pictures **in a row** |
+
+The Hub **never cancels** a print because of spaghetti: an ACTIVE printer is paused, and you Resume or Cancel it yourself.
+A detector that is down, a camera that gives no picture, and a print that is not RUNNING never cause an action. See
+[section 6a](#6a-modes-the-confirmation-and-the-flagged-pictures).
 
 > Status: the engine (`app/detection.py`), the detector service (`detector/`), the compose file and the
 > Hub wiring (settings, routes, tools, dashboard) are all in place and tested against fakes. The Hub starts the
@@ -237,11 +246,14 @@ Section `detection` (group "Printers & Hub"), keys `detection.<name>`:
 | `sensitivity` | enum `low` / `medium` / `high` | `medium` | |
 | `learn_only` | bool | `true` | score and log, send no alert; turn off after a few prints |
 | `cooldown_min` | int 1-120 | `10` | between repeated alerts in one print |
-| `excluded_printers` | list | `[]` | e.g. a printer with a bad camera |
+| `printer_modes` | map `printer -> off / watch / active` | `{}` | one mode per printer, set from the dashboard (below). A printer with no entry is WATCH |
+| `confirm_pictures` | enum `2` / `3` / `4` / `6` | `3` | pictures in a row at the warning level before an ACTIVE printer is paused (3 = about 30 s at one picture per 10 s) |
+| `excluded_printers` | list | `[]` | **older setting, still read**: a printer listed here and with no `printer_modes` entry is OFF. The dashboard keeps it in step (OFF = listed) |
 
-No `auto_pause` field exists or will: alert only.
+`/api/detection` says `auto_pause: true` when any printer is ACTIVE (and detection is not learn-only), `false` otherwise.
+There is no setting that cancels a print.
 
-Dashboard (Settings -> Detection): the three-way choice; address, token, interval, sensitivity, learn-only, cooldown and
+Dashboard (Settings -> Spaghetti): the three-way choice; address, token, interval, sensitivity, learn-only, cooldown and
 per-printer exclusion appear once it is not Off; a status line for what the Hub is doing right now (connected / unreachable /
 waiting); **Test connection**, which uses the values on the page, saved or not, and answers in words: connected, the detector
 cannot be reached (address / port), it is up but not ready (the model is still loading), or it rejected the token. A running
@@ -249,9 +261,62 @@ print shows one line on its printer screen: `Watching - score 0.02 - learn-only`
 `Camera sees almost nothing - turn the chamber light on`, `Detector unreachable - this print is NOT being watched`, `Off`,
 `Off for this printer` or `No camera`. The fleet cards carry nothing extra (their layout is deliberately fixed).
 
+## 6a. Modes, the confirmation and the flagged pictures
+
+**Migration.** Nothing to do: printers listed in `excluded_printers` are OFF, every other printer is WATCH (a new printer too).
+The first time you change a printer's mode the dashboard writes `printer_modes` and keeps `excluded_printers` in step.
+
+**The confirmation.** An ACTIVE printer is paused only after `confirm_pictures` (2, 3, 4 or 6) **consecutive scored pictures at the warning
+level** (the level that raises the WARNING alert). One OK picture starts the count again. ACTIVE behaves **exactly like WATCH**, and the
+screens say why, while any of these holds: the picture is in the warm-up of the print; the printer is still **learning** (its baseline has
+fewer than 360 pictures, or it is re-learning after a camera change: "Active once learned"); detection is in learn-only mode; the detector is
+down; the camera gave no picture; the printer is not RUNNING (already paused or finished); or a human resumed the print (below). There is
+**one pause per warning episode** (an episode ends with the first OK picture).
+
+**The pause.** The loop calls the same `pause_print` a human's Pause button and the MCP tool use, so every backend is covered (Bambu: MQTT
+pause; Klipper / Moonraker: `printer/print/pause`; OctoPrint: the pause command; PrusaLink: the pause request). The Hub then sends
+`"⏸ Paused <printer> — spaghetti seen in 3 pictures in a row. Check it, then Resume or Cancel in Fabrica."` with the picture and the usual
+*Open in Fabrica* link (event `spaghetti_paused`). If the pause command fails it sends `"⚠️ Could not pause <printer> — check it now."`
+(event `spaghetti_pause_failed`) and does not retry within that episode. The job log's `pauses` count goes up and `pause_reason` says
+`spaghetti (auto)`; the generic "print PAUSED" message is not sent a second time. Both events break through quiet hours like the other
+spaghetti alerts and can be switched off under Settings -> Notifications.
+
+**A human resumes** an auto-paused print: that printer is WATCH for the **rest of that print** (no pause loop on a false alarm; the
+screens say *Watching — you resumed this print*). The next print is ACTIVE again.
+
+**Flagged pictures.** Whenever a WATCH or ACTIVE printer reaches the warning level (not in learn-only mode) the Hub keeps the picture(s)
+of that episode - up to 6 JPEGs, the way the dashboard shows them - plus a small JSON (printer, time, scores, mode, paused yes/no, job,
+label) under `<data dir>/detection/flags/`. It keeps the newest 300 pictures or 300 MB, whichever is smaller, and deletes the oldest records.
+Labels: **real** (kept as an example), **false** (a false alarm), **missed** (see below), or none.
+
+* **False alarm** clears that print's warning and lets the labelled pictures into that printer's baseline (normally pictures that look like a
+  failure are kept out of it) and raises a per-printer floor under it (0.8 x the mean score of the pictures called false), because a few
+  pictures cannot move a twenty-hour average. The same view then stops alerting; spaghetti that scores clearly worse still does. The lesson is
+  stored in the printer's baseline file and is forgotten when the camera view changes.
+* **Real spaghetti** only labels the record.
+* **Missed:** in the Cancel confirm, an optional tick **"It was spaghetti"** keeps the current camera picture as a *missed* example (the
+  detector did not catch it) before the cancel is sent. The cancel itself is unchanged: one confirm, and a failure to keep the picture never
+  blocks it. A missed picture is never added to the baseline.
+
+| Route | Scope | |
+|---|---|---|
+| `GET /api/detection/flags?printer=&label=real\|false\|missed\|none&limit=` | read | `{flags, counts}`, newest first |
+| `GET /api/detection/flags/{id}/image?n=` | read | JPEG `n` (1-based, default: the last) |
+| `POST /api/detection/flags/{id}/label` `{"label": "real"\|"false"\|"none"}` | control | changes what the detector learns |
+| `PUT /api/settings` `{"values": {"detection.printer_modes": {...}}}` | control | changing a mode (same as before) |
+| `POST /api/printer/{name}/action` `{"action": "cancel", "was_spaghetti": true}` | control | cancel + keep the missed picture |
+
+The dashboard shows the mode as a three-way control (`○ OFF` / `👁 WATCH` / `⏸ ACTIVE`) on every printer screen and one compact row per
+printer in Settings -> Spaghetti (with what it has learned, *Set all*, *Confirm before pausing*, and the **Flagged pictures** gallery). The
+fleet badge carries the mode: `WATCH`, `ACTIVE`, `WARN 2/3` while an ACTIVE printer confirms, `PAUSED — spaghetti` after an auto-pause, `OFF`.
+The spaghetti pop-up shows the mode and the confirmation progress and has **✓ Real spaghetti** / **✗ False alarm**; the Telegram message is
+send-only, so its follow-up is the *Open in Fabrica* link, which lands on the printer screen where the same two buttons are.
+
 ## 7. How it is wired
 
-* `settings_store.py`: the section above; `spaghetti_suspected`'s help text is updated.
+* `settings_store.py`: the section above (`printer_modes` is a `map_enum` field); `spaghetti_suspected`'s help text is updated, and
+  `spaghetti_paused` / `spaghetti_pause_failed` are new event kinds.
+* `flagstore.py`: the flagged-picture store (stdlib only). `detection.py` owns the modes, the confirmation count and the call to the pause hook.
 * `events.py`: `EventWatcher.spaghetti_suspected(printer, score, image=None, level="failure")`. `level="warning"` gives the title
   `"<printer>: possible print problem (WARNING)"` and a warning-level message; `"failure"` keeps `"possible print FAILURE"`. The two levels
   have separate dedupe keys, so a WARNING followed by a FAILURE in one print is never swallowed as a repeat.

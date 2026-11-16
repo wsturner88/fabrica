@@ -132,8 +132,9 @@ const visTile = tiles().find(t => { const b = t.getBoundingClientRect(); return 
 R.tapName = visTile.dataset.f;
 visTile.click(); await sleep(500);
 R.detail = {on: document.getElementById('modal').classList.contains('on'), name: (document.querySelector('#mbody .fd-name') || {textContent: ''}).textContent, hasPrint: !!document.querySelector('#mbody [data-act="fdPrint"]'),
-  hasDelete: !!document.querySelector('#mbody [data-act="fdDelete"]'), hasBack: !!document.querySelector('#mbody [data-act="fdBack"]'), calls: window.__calls.filter(c => /filedetail/.test(c)).length};
-document.querySelector('#mbody [data-act="fdBack"]').click(); await sleep(300);
+  hasDelete: !!document.querySelector('#mbody [data-act="fdDelete"]'), hasBack: !!document.querySelector('#mbody [data-act="fdBack"]'), calls: window.__calls.filter(c => /filedetail/.test(c)).length,
+  startDlg: !!document.querySelector('#mbody .cfdlg, #mbody .dp, #mbody .mx'), x: !!document.querySelector('#mbody [data-act="dlgX"]')};     // (a wall screen's tile opens the start pop-up at once)
+(document.querySelector('#mbody [data-act="fdBack"]') || document.querySelector('#mbody [data-act="dlgX"]')).click(); await sleep(300);
 R.backOn = document.getElementById('modal').classList.contains('on');
 R.scrollBack = sc === document.scrollingElement ? window.scrollY : sc.scrollTop;
 // scroll to the bottom: the rest of the pictures are handed out
@@ -205,11 +206,15 @@ class GridBrowserTests(unittest.TestCase):
     def test_the_toggle_is_two_words_with_a_tick_on_the_active_one(self):
         for name, R, active in (("kiosk", self.kiosk(), "Grid"), ("five", self.five(), "Grid"), ("desk", self.desk(), "List"), ("phone", self.phone(), "List")):
             self.assertEqual(sorted(x.replace("✓ ", "").rstrip("*") for x in R["def"]["view_btns"]), ["Grid", "List"], name)
-            self.assertTrue(R["def"]["view_vis"], name)
+            if name in ("kiosk", "phone"):
+                self.assertFalse(R["def"]["view_vis"], name)         # the toolbar row's room goes to the always-on Controls button: Grid / List are in the sort chooser here
+            else:
+                self.assertTrue(R["def"]["view_vis"], name)
             ticked = [x for x in R["def"]["view_btns"] if x.startswith("✓")]
             self.assertEqual(len(ticked), 1, name)
             self.assertEqual(ticked[0], "✓ " + active + "*", name)
-            self.assertGreaterEqual(R["def"]["view_h"], 36 if name in ("five", "desk") else 44, name)         # a real touch target (a mouse: 36)
+            if name in ("five", "desk"):
+                self.assertGreaterEqual(R["def"]["view_h"], 36, name)         # a real touch target (a mouse: 36)
 
     def test_the_choice_is_remembered_and_survives_leaving_the_printer(self):
         for name, R in (("kiosk", self.kiosk()), ("five", self.five()), ("desk", self.desk()), ("phone", self.phone())):
@@ -231,7 +236,7 @@ class GridBrowserTests(unittest.TestCase):
         self.assertFalse(self.desk()["grid"]["strip"])            # (the desktop layout keeps its big camera band: there is room for both)
         k = self.kiosk()
         self.assertLess(k["grid"]["filesTop"], k["list"]["filesTop"] - 100, (k["grid"]["filesTop"], k["list"]["filesTop"]))
-        self.assertLessEqual(k["grid"]["filesTop"], 135)
+        self.assertLessEqual(k["grid"]["filesTop"], 145)          # (was 135: the strip now carries the 3-way OFF / WATCH / ACTIVE control, 40 px high)
 
     # ---- Recent: the default order, the last print lifts a file
     def test_recent_is_the_first_sort_and_the_default(self):
@@ -320,9 +325,14 @@ class GridBrowserTests(unittest.TestCase):
             R = go(self, name, {"kiosk": "?kiosk=1", "five": "?layout=5in", "desk": "", "phone": ""}[name], {"kiosk": (1024, 600), "five": (800, 480), "desk": (1440, 900), "phone": (390, 844)}[name])
             d = R["detail"]
             self.assertTrue(d["on"], name)
-            self.assertTrue(d["hasPrint"] and d["hasDelete"] and d["hasBack"], name)
-            self.assertEqual(d["calls"], 1, name)
-            self.assertTrue(d["name"].startswith(R["tapName"].replace(".gcode.3mf", "").replace(".gcode", "")[:12]), (name, d["name"], R["tapName"]))
+            if name in ("kiosk", "five"):          # the wall screens skip the sheet: the tile opens the start pop-up (tests/test_nav_popups.py)
+                self.assertTrue(d["startDlg"] and d["x"], name)
+                self.assertFalse(d["hasPrint"] or d["hasDelete"] or d["hasBack"], name)
+                self.assertEqual(d["calls"], 0, name)
+            else:
+                self.assertTrue(d["hasPrint"] and d["hasDelete"] and d["hasBack"], name)
+                self.assertEqual(d["calls"], 1, name)
+                self.assertTrue(d["name"].startswith(R["tapName"].replace(".gcode.3mf", "").replace(".gcode", "")[:12]), (name, d["name"], R["tapName"]))
             self.assertFalse(R["backOn"], name)
             self.assertEqual(R["scrollBack"], R["scrollSet"], name)
         self.assertGreater(self.kiosk()["scrollSet"], 0)              # (the kiosk's box really did scroll before the tap)

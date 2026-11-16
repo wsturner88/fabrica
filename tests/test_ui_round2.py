@@ -149,7 +149,8 @@ class Browser(unittest.TestCase):
         R = self.result()
         self.assertNotIn("error", R, R.get("error"))
         self.assertEqual(R["clean"], {"label": "No changes", "disabled": True, "primary": False, "skipHidden": True})
-        self.assertEqual(R["fieldIds"][:3], ["name", "url", "password"])               # advanced ones come after
+        self.assertEqual(R["fieldIds"][:3], ["camera_url", "url", "password"])         # Edit pop-up: the camera card (left) first, then the connection card; the name and the advanced ones sit in More
+        self.assertIn("name", R["fieldIds"][3:])
         self.assertEqual(R["moreHiddenAtStart"], False)                                # camera address already set -> opened
         self.assertEqual((R["cameraType"], R["cameraValue"]), ("text", "rtsp://***@10.0.0.9/live"))
         self.assertEqual(R["cameraPlaceholder"], "rtsp://192.168.1.60/live")

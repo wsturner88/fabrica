@@ -52,7 +52,10 @@ import joblog
 import costs
 import discovery
 import detection
+import flagstore
 import framefix
+import profiles
+import temps
 import agentkit  # ==== agent kit ====
 import spool_memory
 from linkstate import LINKS
@@ -168,6 +171,61 @@ def _camera_fields(prn) -> dict:
     return {"camera": cam, **src, **({"camera_orientation": info} if info else {}), **({"detect_area": area} if area else {})}
 
 
+# ------------------------------------------------------------- printer profiles + temperature cards
+_RECORD_TYPE = {"bambu": "bambu", "octoprint": "octoprint", "prusalink": "prusalink", "moonraker": "moonraker"}
+_TEMPS_HELD: dict = {}       # printer name (lower) -> (temps, sensors) last shown, so a short network blip keeps the cards
+
+
+def _profile_record(prn) -> dict:
+    """The stored record of a running printer, or (printer from an old config file / a test) one made from its driver."""
+    rec = STORE.get(prn.name)
+    if rec is None:
+        kind = getattr(prn, "kind", "")
+        rec = {"name": prn.name, "type": _RECORD_TYPE.get(kind, kind), "model": getattr(prn, "model", "") or ""}
+    elif not rec.get("model") and getattr(prn, "model", ""):
+        rec = {**rec, "model": prn.model}
+    if rec.get("type") == "bambu" and not rec.get("model"):
+        rec = {**rec, "model": fleet_store.bambu_model_from_serial(getattr(prn, "serial", ""))}
+    return rec
+
+
+def _profile_has(prn):
+    return FLEET.profiles.resolve(_profile_record(prn))["has"]
+
+
+controls.profile_has = _profile_has             # the light reason text (controls.py) knows what the machine has
+
+
+def _temp_cards(prn, shown) -> dict:
+    """{"temps": [...], "sensors": [...]} for one printer, built in one place (temps.py) from what its driver already
+    polled. `shown` = the snapshot being shown; while that is a held one (a short network blip, `reconnecting`) the
+    cards shown last are held too, so the extra nozzles and sensors do not vanish for a moment."""
+    key = str(prn.name).lower()
+    try:
+        if isinstance(shown, dict) and shown.get("reconnecting") and key in _TEMPS_HELD:
+            t, s = _TEMPS_HELD[key]
+        else:
+            rec = _profile_record(prn)
+            res = FLEET.profiles.resolve(rec)
+            try:
+                fn = getattr(prn, "temp_readings", None)
+                raw = fn() if callable(fn) else None
+            except Exception:
+                raw = None                          # a driver that cannot say still gets its nozzle and bed from the snapshot
+            t, s = temps.build(raw, shown, res["has"], res["overrides"], rec.get("type"))
+            if t or s:
+                _TEMPS_HELD[key] = (t, s)
+    except Exception:
+        t, s = [], []
+    return {"temps": t, "sensors": s}
+
+
+def _fleet_row(prn, group_of) -> dict:
+    """One GET /api/fleet entry: the snapshot as shown, camera + groups, and the temperature cards (CONTRACT section 2)."""
+    shown = _with_job_materials(prn, LINKS.apply(prn.name, prn.snapshot()))
+    return {**shown, **_camera_fields(prn), "groups": group_of.get(str(prn.name).lower(), []), **_temp_cards(prn, shown)}
+
+
 # ------------------------------------------------------------- settings, notifications, events
 # SETTINGS = typed settings (data dir settings.json; secrets in secrets.json, written through the
 # fleet store so there is one writer). NOTIFIER delivers; WATCHER turns fleet snapshots into events.
@@ -197,6 +255,8 @@ def _event_sink(ev):
         JOBLOG.on_event(ev)
     except Exception as e:
         print(f"[joblog] could not log {getattr(ev, 'kind', '?')}: {type(e).__name__}: {e}", flush=True)
+    if getattr(ev, "kind", "") == "print_paused" and (getattr(ev, "data", None) or {}).get("reason"):
+        return                    # the Hub paused it itself (spaghetti watch): its own message says so, with the picture
     try:
         NOTIFIER.submit(ev)
     except Exception as e:
@@ -237,6 +297,81 @@ def _cached_meta_for(printer_name: str, job: str):
     return best
 
 
+def _seen_entry(prn, job):
+    """The last listing's entry for a job name. OctoPrint reports the running job WITHOUT its folder ("Phone Stand …")
+    while its file list keys the file WITH it ("Jobs/Phone Stand ….gcode"): exact key first, then the one entry
+    whose name after the last '/' matches (two files of that name in different folders = ambiguous = None)."""
+    seen = _FILES_SEEN.get(prn.name.lower()) or {}
+    key = costs.file_key(job)
+    if not key:
+        return None
+    if key in seen:
+        entry = seen[key]
+    else:
+        hits = [e for k, e in seen.items() if k.rsplit("/", 1)[-1] == key.rsplit("/", 1)[-1]]
+        entry = hits[0] if len(hits) == 1 else None
+    if not isinstance(entry, dict):
+        return None
+    # the raw listing has no materials / grams for OctoPrint files: those come from the header read kept in the metadata
+    # cache (the same merge the file list does in list_sd_files) - cache only, never a request
+    entry = dict(entry)
+    try:
+        with _cache_lock:
+            e = _cache_load().get(f"{prn.name}|{entry.get('name')}|{entry.get('size')}") or {}
+        if not entry.get("materials") and e.get("materials"):
+            entry["materials"] = list(e["materials"])
+        for k in ("weight_g", "layer_mm", "nozzle_mm"):
+            if not entry.get(k) and e.get(k):
+                entry[k] = e[k]
+    except Exception:
+        pass
+    return entry
+
+
+_JOBMAT_MEMO: dict = {}       # (printer lower, job) -> (time, [materials]); the cards poll every few seconds, the file cache is read at most once a minute per job
+
+
+def _job_materials(prn, snap) -> list:
+    """The materials the slicer wrote into the file of the job that is RUNNING right now (["PETG"], ["PLA", "PETG"]), for the fleet cards and the
+    Controls pop-up. Caches only (the last listing, the metadata cache): never a request to a printer. [] = not known - the page then says nothing
+    (it never works a material out from a temperature)."""
+    try:
+        job = (snap or {}).get("job")
+        if not job or (snap or {}).get("state") not in ("RUNNING", "PREPARE", "PAUSE"):
+            return []
+        key = (prn.name.lower(), str(job))
+        hit = _JOBMAT_MEMO.get(key)
+        if hit and time.time() - hit[0] < 60:
+            return list(hit[1])
+        mats = []
+        entry = _seen_entry(prn, job)
+        if isinstance(entry, dict):
+            mats = [str(m) for m in (entry.get("materials") or ([entry.get("filament_type")] if entry.get("filament_type") else [])) if m]
+        if not mats:
+            meta = _cached_meta_for(prn.name, job)
+            if meta:
+                mats = [str(f.get("type")) for f in (meta.get("filaments") or []) if isinstance(f, dict) and f.get("type")] \
+                    or [str(m) for m in (meta.get("materials") or []) if m]
+        out, seen = [], set()
+        for m in mats:
+            m = m.strip().upper()
+            if m and m not in seen:
+                seen.add(m)
+                out.append(m)
+        if len(_JOBMAT_MEMO) > 200:
+            _JOBMAT_MEMO.clear()
+        _JOBMAT_MEMO[key] = (time.time(), out)
+        return list(out)
+    except Exception:
+        return []
+
+
+def _with_job_materials(prn, snap: dict) -> dict:
+    """snap + `job_materials` (only when known; see _job_materials)."""
+    mats = _job_materials(prn, snap)
+    return {**snap, "job_materials": mats} if mats else snap
+
+
 def _apply_ams_choice(prn, key: str, res: dict) -> dict:
     """If this Hub started the print itself it knows which AMS tray feeds each filament: price what is
     actually loaded rather than what the slicer assumed (type + colour from the tray, grams from the file)."""
@@ -270,7 +405,7 @@ def _job_resolver(printer, job):
     if prn is None or not key:
         return {}
     if _is_octo(prn):
-        entry = (_FILES_SEEN.get(prn.name.lower()) or {}).get(key)
+        entry = _seen_entry(prn, job)
         return joblog.resolved_from_file_entry(entry, kind=getattr(prn, "kind", None)) if entry else {}
     meta = _cached_meta_for(prn.name, job)
     if not meta:
@@ -347,7 +482,7 @@ def _fleet_snapshots() -> dict:
     return out
 
 
-# ---- spaghetti detection (docs/detection.md). ALERT ONLY: nothing here ever pauses or stops a print.
+# ---- spaghetti detection (docs/detection.md). OFF / WATCH / ACTIVE per printer; ACTIVE PAUSES (never cancels) after a confirmation.
 # The loop is created here but started in __main__ (never on import), and it does nothing until
 # Settings > Detection is switched on.
 DETECTION_DIR = os.path.join(DATA_DIR, "detection")
@@ -388,9 +523,37 @@ def _detection_view(name):
     return framefix.View.of(info, fleet_store.record_detect_area(STORE.get(prn.name)))
 
 
+FLAGS = flagstore.FlagStore(os.path.join(DETECTION_DIR, "flags"))
+
+
+def _detection_pause(printer, info):
+    """ACTIVE mode: pause the print the way a human's Pause does (pause_print = the MCP tool and the REST action, every
+    backend: Bambu MQTT, Klipper / Moonraker, OctoPrint, PrusaLink), then tell the owner. Never a cancel. -> True when sent."""
+    info = info or {}
+    prn = PRINTERS.get((printer or "").lower())
+    name = prn.name if prn is not None else printer
+    WATCHER.note_pause_reason(name, detection.PAUSE_REASON)
+    try:
+        res = pause_print(name)
+        ok = isinstance(res, str) and res.startswith("pause sent")
+    except Exception as e:
+        print(f"[detection] pause of {name} failed: {type(e).__name__}", flush=True)
+        ok = False
+    try:
+        if ok:
+            WATCHER.spaghetti_paused(name, info.get("count"), info.get("score"), info.get("jpeg"))
+        else:
+            WATCHER.note_pause_reason(name, None)
+            WATCHER.spaghetti_pause_failed(name, info.get("jpeg"))
+    except Exception as e:
+        print(f"[detection] could not tell the owner about the pause of {name}: {type(e).__name__}", flush=True)
+    return ok
+
+
 DETECTION = detection.DetectionLoop(_fleet_snapshots, _detection_frame, _detection_alert,
                                     has_camera=_detection_has_camera, store_dir=DETECTION_DIR,
-                                    on_detector=_detector_status_hook, view_fetcher=_detection_view)
+                                    on_detector=_detector_status_hook, view_fetcher=_detection_view,
+                                    on_pause=_detection_pause, flags=FLAGS)
 
 
 def _detection_target(mode=None, url=None, token=None):
@@ -419,7 +582,9 @@ def _apply_detection_settings(_changed=None):
                   sensitivity=SETTINGS.get("detection.sensitivity"),
                   learn_only=SETTINGS.get("detection.learn_only"),
                   cooldown_s=SETTINGS.get("detection.cooldown_min") * 60,
-                  excluded=SETTINGS.get("detection.excluded_printers"))
+                  excluded=SETTINGS.get("detection.excluded_printers"),
+                  modes=SETTINGS.get("detection.printer_modes"),
+                  confirm_pictures=SETTINGS.get("detection.confirm_pictures"))
         key = (mode, url, token)
         if key != _detection_key[0]:
             _detection_key[0] = key
@@ -447,7 +612,9 @@ def _detection_status() -> dict:
     st = DETECTION.status()
     mode, url, _token = _detection_target()
     st["setup"] = {"mode": mode, "url": _detection_public_url(url), "learn_only": bool(SETTINGS.get("detection.learn_only")),
-                   "excluded_printers": [str(x) for x in (SETTINGS.get("detection.excluded_printers") or [])]}   # the per-printer Spaghetti switch on the 5-inch screens reads / writes this list
+                   "excluded_printers": [str(x) for x in (SETTINGS.get("detection.excluded_printers") or [])],   # the older per-printer switch's list (kept)
+                   "printer_modes": {prn.name: DETECTION.mode_of(prn.name) for prn in list(PRINTERS.values())},    # OFF / WATCH / ACTIVE for every printer, whether or not it is running
+                   "confirm_pictures": DETECTION.confirm, "confirm_choices": list(detection.CONFIRM_CHOICES)}
     return st
 
 
@@ -459,6 +626,15 @@ def _detection_line_ex(name: str) -> dict:
     out["learn"] = st["mode"] == "learn"
     out["alerts"] = len(p.get("alerts") or [])
     out["learning"] = p.get("learning") or ""          # "camera view changed" while the baseline is learned afresh
+    out["mode"] = DETECTION.mode_of(name)
+    out["gate"] = p.get("gate") or ""                  # why ACTIVE is acting like WATCH right now
+    out["confirm"] = p.get("confirm") or {"count": 0, "needed": DETECTION.confirm}
+    out["auto_paused"] = bool(p.get("auto_paused"))
+    out["resumed"] = bool(p.get("resumed"))
+    out["flag_id"] = p.get("flag_id")
+    out["baseline_frames"] = p.get("baseline_frames", 0)
+    out["learn_frames"] = detection.FailureTracker.LEARN_FRAMES
+    out["pause_reason"] = detection.PAUSE_REASON if out["auto_paused"] else ""
     return out
 
 
@@ -476,7 +652,7 @@ def _detection_line(name: str) -> dict:
         learn += " \u00b7 picture not turned or cut: this build has no ffmpeg"
     relearn = p.get("learning") or ""             # "camera view changed": the baseline is being learned afresh
     lead = f"LEARNING - {relearn} \u00b7 " if relearn else ""
-    if p.get("excluded") or (name or "").lower() in DETECTION.excluded:     # (a printer the loop has not ticked yet is not in `p`)
+    if p.get("excluded") or DETECTION.mode_of(name or "") == detection.MODE_OFF:     # (a printer the loop has not ticked yet is not in `p`)
         return {"state": "excluded", "text": "Off for this printer"}
     if st["detector"]["state"] == "down":
         return {"state": "down", "text": "Detector unreachable - this print is NOT being watched"}
@@ -860,10 +1036,10 @@ def _prewarm_pause_reason(prn) -> str:
     (also checked before every single file, so a pass stops the moment a pre-heat starts). Cheap: the driver's
     cached snapshot and an in-memory timestamp, no printer traffic.
       * a control action (pre-heat, cool-down, light, filament) was sent in the last 2 minutes,
-      * the printer is not reachable (do not queue requests behind a blip),
-      * a heater target is above 0 while no job runs (someone is warming it up). A running print has its heaters
-        on by design; those are covered by the existing busy rules (Bambu never; OctoPrint/Klipper/PrusaLink read
-        small files off the host, never the printer)."""
+      * the printer is not reachable (do not queue requests behind a blip).
+    A heating printer is NOT a reason any more (owner decision, 2026-11-15: "do not pause"): the user uploads, pre-heats, then picks
+    the job by its picture - exactly when the old rule kept the pictures and the file list back. The busy rules are
+    unchanged (Bambu never mid-print; OctoPrint/Klipper/PrusaLink read small files off the host, never the printer)."""
     try:
         s = prn.snapshot()
     except Exception:
@@ -872,13 +1048,6 @@ def _prewarm_pause_reason(prn) -> str:
         return "a control action was sent in the last 2 minutes"
     if not s.get("connected", True):
         return "the printer is not reachable"
-    if s.get("state") not in controls.BUSY_STATES:
-        for k in ("nozzle_target_c", "bed_target_c"):
-            try:
-                if float(s.get(k) or 0) > 0:
-                    return "the printer is heating"
-            except (TypeError, ValueError):
-                pass
     return ""
 
 
@@ -3720,6 +3889,13 @@ async def _api_printer_types(request: Request):
     return JSONResponse({"types": FLEET.types()})
 
 
+@mcp.custom_route("/api/profiles", methods=["GET"])
+@_safe_route
+async def _api_profiles(request: Request):
+    """The printer profiles shipped with Fabrica (what each model has), sorted by maker then label."""
+    return JSONResponse({"profiles": FLEET.profiles.public_list()})
+
+
 @mcp.custom_route("/api/printers", methods=["GET"])
 @_safe_route
 async def _api_printers(request: Request):
@@ -3748,6 +3924,23 @@ async def _api_printers_test(request: Request):
     return JSONResponse({"result": res})
 
 
+@mcp.custom_route("/api/camera/test", methods=["POST"])
+@_safe_route
+async def _api_camera_test(request: Request):
+    """'Test camera' on the printer form: ONE frame from {url} (rtsp / http / https), the picture back as a data: URL.
+    Control scope only (the same gate as adding / editing a printer). {printer} lets the login-hidden form of that
+    printer's stored camera address be tested with the stored login. No login is ever logged or returned."""
+    if security.caller_read_only():
+        return JSONResponse({"error": "Testing a camera needs full access (it makes the Hub contact the address).",
+                             "required_scope": "control"}, status_code=403)
+    try:
+        body = await _json_body(request)
+        res = await _run(FLEET.camera_test, body.get("printer") or None, body.get("url"))
+    except fleet_store.FleetError as e:
+        return _fleet_json(e)
+    return JSONResponse(res)
+
+
 @mcp.custom_route("/api/printers", methods=["POST"])
 @_safe_route
 async def _api_printers_add(request: Request):
@@ -3764,7 +3957,11 @@ async def _api_printers_add(request: Request):
 async def _api_printers_update(request: Request):
     try:
         body = await _json_body(request)
-        res = await _run(FLEET.update, request.path_params["name"], body.get("values"),
+        values = body.get("values")
+        extra = {k: body[k] for k in ("profile_id", "profile_overrides") if k in body}   # also accepted next to "values"
+        if extra:
+            values = {**(values if isinstance(values, dict) else {}), **extra}
+        res = await _run(FLEET.update, request.path_params["name"], values,
                          bool(body.get("skip_test")), bool(body.get("force")))
     except fleet_store.FleetError as e:
         return _fleet_json(e)
@@ -4107,7 +4304,14 @@ def _storage_words(prn, row: dict) -> str:
         return "OctoPrint storage"
     if kind == "moonraker":
         return "Klipper (gcodes folder)"
-    return "SD card"
+    return getattr(prn, "storage_name", None) or "SD card"
+
+
+def _storage_fields(prn):
+    """What the printer page calls this printer's file storage, and a one-line note when the list is not the whole
+    story (H2D: USB drive only). None = nothing special, the page keeps its own words."""
+    name, note = getattr(prn, "storage_name", None), getattr(prn, "storage_note", None)
+    return {"name": name, "note": note or ""} if name else None
 
 
 def _file_cost_estimate(prn, d: dict, include_machine=None) -> dict:
@@ -4241,8 +4445,7 @@ async def _api_filedetail(request: Request):
 async def _api_fleet(request: Request):
     def work():
         group_of = {k.lower(): v for k, v in FLEET.store.groups_by_printer().items()}
-        return [{**LINKS.apply(prn.name, prn.snapshot()), **_camera_fields(prn), "groups": group_of.get(str(prn.name).lower(), []),
-                 "can_connect": hasattr(prn, "connect_serial")}      # the NOT CONNECTED chip on a fleet card is only a button when this is true
+        return [{**_fleet_row(prn, group_of), "can_connect": hasattr(prn, "connect_serial")}      # the NOT CONNECTED chip on a fleet card is only a button when this is true
                 for prn in list(PRINTERS.values())]
     out = await _run(work)
     return JSONResponse(out)
@@ -4258,12 +4461,14 @@ async def _api_printer(request: Request):
         trays = []
         for t in prn.ams_trays():
             trays.append({**t, "color_name": color_name(t["color"]) if t["color"] else None})
-        return {"snapshot": {**LINKS.apply(prn.name, prn.snapshot()), **_camera_fields(prn)}, "trays": trays,
+        shown = _with_job_materials(prn, LINKS.apply(prn.name, prn.snapshot()))
+        return {"snapshot": {**shown, **_camera_fields(prn), **_temp_cards(prn, shown)}, "trays": trays,
                 "palette": sorted(PALETTE.keys()), "materials": list(MATERIALS),
                 "kind": prn.kind, "can_connect": hasattr(prn, "connect_serial"),
                 "controls": controls.summary(prn),
                 "jog_flip_y": fleet_store.record_jog_flip_y(STORE.get(prn.name)),       # the Controls jog pad shows Y- (front) on top
                 "detection": _detection_line_ex(prn.name),
+                "storage": _storage_fields(prn),
                 **_camera_fields(prn)}
     return JSONResponse(await _run(work))
 
@@ -4396,7 +4601,7 @@ async def _api_files(request: Request):
     name = request.path_params["name"]
     if request.query_params.get("bg") == "1":
         # the dashboard's automatic re-check (opening the files, the 60 s timer) - not a tap on Refresh. It follows the same
-        # politeness rules as the prewarm: while the printer is heating, was just controlled or is unreachable, say "skipped"
+        # politeness rules as the prewarm: while the printer was just controlled or is unreachable, say "skipped"
         # and let the screen keep the list it has. The Refresh button never sends bg.
         prn = PRINTERS.get(name.lower())
         why = await _run(_prewarm_pause_reason, prn) if prn else ""
@@ -4468,6 +4673,11 @@ async def _api_action(request: Request):
     name = request.path_params["name"]
     act = body.get("action")
     if act == "cancel":
+        if body.get("was_spaghetti") is True:        # the owner ticked "It was spaghetti": keep the picture BEFORE the stop is sent
+            try:
+                await _run(DETECTION.save_missed, name)
+            except Exception as e:                   # never in the way of the cancel
+                print(f"[detection] could not keep the missed picture: {type(e).__name__}", flush=True)
         res = await _run(cancel_print, name)
     elif act == "pause":
         res = await _run(pause_print, name)
@@ -5737,6 +5947,56 @@ async def _api_detection_test(request: Request):
     return JSONResponse(await _run(work))
 
 
+def _flag_public(r):
+    d = {k: r.get(k) for k in ("id", "kind", "printer", "ts", "mode", "job", "level", "paused", "pause_reason", "label",
+                               "labelled_at", "baseline", "scores")}
+    d["pictures"] = len(r.get("pictures") or [])
+    d["score"] = max(r.get("scores") or [0.0]) if r.get("scores") else None
+    return d
+
+
+@mcp.custom_route("/api/detection/flags", methods=["GET"])
+@_safe_route
+async def _api_detection_flags(request: Request):
+    """?printer=&label=real|false|missed|none&limit= -> {"flags": [...newest first], "counts": {...}}. Pictures are
+    GET /api/detection/flags/{id}/image?n=."""
+    qp = request.query_params
+    label = (qp.get("label") or "").strip().lower() or None
+    if label and label not in ("real", "false", "missed", "none"):
+        return JSONResponse({"error": "label must be real, false, missed or none"}, status_code=400)
+    try:
+        limit = max(1, min(300, int(qp.get("limit") or 100)))
+    except ValueError:
+        limit = 100
+    recs = await _run(FLAGS.list, (qp.get("printer") or "").strip() or None, label, limit)
+    return JSONResponse({"flags": [_flag_public(r) for r in recs], "counts": await _run(FLAGS.counts)},
+                        headers={"Cache-Control": "no-store"})
+
+
+@mcp.custom_route("/api/detection/flags/{fid}/image", methods=["GET"])
+@_safe_route
+async def _api_detection_flag_image(request: Request):
+    jpeg = await _run(FLAGS.image, request.path_params["fid"], request.query_params.get("n"))
+    if not jpeg:
+        return JSONResponse({"error": "no such picture"}, status_code=404)
+    return Response(jpeg, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"})
+
+
+@mcp.custom_route("/api/detection/flags/{fid}/label", methods=["POST"])
+@_safe_route
+async def _api_detection_flag_label(request: Request):
+    """{"label": "real" | "false" | "none"}. false = a false alarm: this print's warning clears and the picture is let into
+    the printer's baseline. Needs the control scope (it changes what the detector learns)."""
+    body = await _optional_json(request)
+    label = str(body.get("label") or "").strip().lower()
+    if label not in ("real", "false", "missed", "none"):
+        return JSONResponse({"error": "label must be real, false, missed or none"}, status_code=400)
+    rec = await _run(DETECTION.mark_flag, request.path_params["fid"], label)
+    if rec is None:
+        return JSONResponse({"error": "no such flagged picture"}, status_code=404)
+    return JSONResponse({"flag": _flag_public(rec)})
+
+
 @mcp.custom_route("/api/printer/{name}/detection/score", methods=["POST"])
 @_safe_route
 async def _api_detection_score(request: Request):
@@ -5751,8 +6011,8 @@ async def _api_detection_score(request: Request):
 @_tool
 async def detection_status() -> str:
     """Spaghetti detection at a glance: whether it is on, learn-only or alerting, whether the detector is reachable,
-    and for each printer the latest verdict (OK / WARNING / FAILURE), score and any camera problem. It only alerts;
-    it never pauses or stops a print."""
+    and for each printer its mode (off / watch / active), the latest verdict (OK / WARNING / FAILURE), score and any
+    camera problem. An ACTIVE printer is paused after several warning pictures in a row; nothing here ever cancels a print."""
     return json.dumps(await _run(_detection_status), indent=2)
 
 

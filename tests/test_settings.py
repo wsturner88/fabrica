@@ -75,7 +75,7 @@ class SchemaTests(Base):
         self.assertTrue(s.get("notifications.enabled"))
         self.assertFalse(s.get("notifications.quiet_enabled"))
         self.assertEqual(s.get("notifications.quiet_breakthrough"),
-                         ["print_failed", "backup_failed", "spaghetti_suspected", "preheat_auto_off_failed"])
+                         ["print_failed", "backup_failed", "spaghetti_suspected", "spaghetti_paused", "spaghetti_pause_failed", "preheat_auto_off_failed"])
         self.assertFalse(s.get("notifications.print_started"))
         self.assertTrue(s.get("notifications.print_finished"))
         self.assertTrue(s.get("notifications.print_failed"))

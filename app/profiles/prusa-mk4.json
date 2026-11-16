@@ -1,0 +1,30 @@
+{
+  "id": "prusa-mk4",
+  "label": "Prusa MK4",
+  "maker": "Prusa",
+  "types": [
+    "prusalink",
+    "octoprint"
+  ],
+  "matches": [
+    "mk4"
+  ],
+  "has": {
+    "light": false,
+    "nozzles": 1,
+    "nozzle_max_c": 290,
+    "bed_mm": [
+      250,
+      210
+    ],
+    "bed_max_c": 120,
+    "chamber": "none",
+    "filament": {
+      "system": "none",
+      "slots": 1
+    },
+    "camera_builtin": false
+  },
+  "notes": "Open frame, no light, no chamber.",
+  "verified": false
+}

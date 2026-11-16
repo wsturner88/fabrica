@@ -1,0 +1,29 @@
+{
+  "id": "bambu-h2d",
+  "label": "Bambu Lab H2D",
+  "maker": "Bambu Lab",
+  "types": [
+    "bambu"
+  ],
+  "matches": [
+    "h2d"
+  ],
+  "has": {
+    "light": true,
+    "nozzles": 2,
+    "nozzle_max_c": 350,
+    "bed_mm": [
+      350,
+      320
+    ],
+    "bed_max_c": 120,
+    "chamber": "heater",
+    "filament": {
+      "system": "ams_2_pro",
+      "slots": 4
+    },
+    "camera_builtin": true
+  },
+  "notes": "Two nozzles and an active chamber heater. Fabrica shows the first nozzle until the second nozzle's report format is confirmed.",
+  "verified": false
+}

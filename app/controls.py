@@ -911,6 +911,31 @@ def all_unsupported(reason):
     return caps
 
 
+# What the printer's profile says it has (profiles.py). server.py plugs in a function  printer driver -> effective `has`
+# dict (or None); without it (tests, other callers) the drivers' own words are used unchanged.
+profile_has = None
+
+_CONNECTION_NAME = {"prusalink": "PrusaLink", "octoprint": "OctoPrint", "moonraker": "Klipper", "bambu": "Fabrica"}
+
+
+def _light_from_profile(prn, light) -> dict:
+    """The light capability, with the profile's knowledge laid over the driver's. The DRIVER still decides whether the
+    light can be switched; the profile only changes the words (this machine has a light but this connection cannot
+    switch it / this machine has none), and a profile that says "no light" turns a driver's guess off."""
+    if not callable(profile_has) or light.get("transient"):
+        return light
+    try:
+        has = profile_has(prn) or {}
+    except Exception:
+        return light
+    if has.get("light") is False:
+        return {"supported": False, "state": None, "reason": "This printer has no light."}
+    if has.get("light") is True and not light.get("supported"):
+        conn = _CONNECTION_NAME.get(getattr(prn, "kind", ""), "this connection")
+        return {**light, "reason": f"This printer has a light, but {conn} can't switch it - use the printer's own screen."}
+    return light
+
+
 def _caps(prn) -> dict:
     fn = getattr(prn, "control_caps", None)
     caps = fn() if callable(fn) else all_unsupported(_ALL_UNSUPPORTED_REASON)
@@ -918,6 +943,7 @@ def _caps(prn) -> dict:
     for k, v in (caps or {}).items():
         if k in out and isinstance(v, dict):
             out[k] = v
+    out["light"] = _light_from_profile(prn, out["light"])
     return out
 
 

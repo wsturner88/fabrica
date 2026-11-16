@@ -93,7 +93,7 @@ class TestStatic(unittest.TestCase):
         self.assertNotIn("startSelected(${JSON.stringify", HTML)
 
     def test_delegated_actions_carry_data_in_attributes(self):
-        for act in ("openPrinter", "tray", "trayMat", "trayColor", "trayBack", "pickSpool", "start", "delete", "bkStart", "stTest"):
+        for act in ("openPrinter", "tray", "trayMat", "trayColor", "pickSpool", "start", "delete", "bkStart", "stTest"):
             self.assertRegex(HTML, rf'data-act="{act}"', act)
             self.assertRegex(HTML, rf"\b{act}:\s+(b|\(\))\s+=>", act)
         self.assertIn("e.target.closest('[data-act]')", HTML)
@@ -163,8 +163,8 @@ class TestStatic(unittest.TestCase):
         self.assertIn("const papi = (name, tail) => '/api/printer/' + pu(name)", HTML)
 
     def test_pinned_wiring_other_suites_rely_on_is_kept(self):
-        for needle in ('START A PRINT ON <span class="cfprn">${CUR}</span>?', ">START PRINT ON ${CUR}</button>",
-                       "Live view of ${CUR} &mdash; check the bed is clear", "confirm += '|model_override'",
+        for needle in ('Print on <span class="cfprn">${CUR}</span>', ">${IC('play')}START ON ${CUR}</button>",
+                       "Check the bed is empty", "confirm += '|model_override'",
                        "model_override:override", "const CF_MS = 3000", "function cfStop", "pmEsc(d.model_warning",
                        'data-ctl class="primary" onclick="askPrint(', "No camera on this printer"):
             self.assertIn(needle, HTML, needle)
@@ -323,7 +323,7 @@ R.fileData = [...document.querySelectorAll('.frow button.primary')].map(b => b.d
 R.fileNames = [...document.querySelectorAll('.frow .fname')].map(e => e.textContent);
 // tray change
 document.querySelector('#p-trays [data-act=tray]').click(); await sleep(100); step('trayStep1');
-const curBtn = [...$('mbody').querySelectorAll('[data-act=trayMat]')].find(b => b.dataset.cur); R.curMat = curBtn && curBtn.dataset.cur;
+R.curMat = TY.curMat;               // the slot's own (hostile) material text, carried through the one-page slot dialog
 $('mbody').querySelector('[data-act=trayMat]').click(); await sleep(100); step('trayStep2');
 R.trayHeading = $('mbody').querySelector('h2').textContent;
 $('mbody').querySelector('[data-act=trayColor]').click(); await sleep(300); step('trayDone');   // 404 stub -> error text echoed
@@ -436,12 +436,12 @@ class TestBrowser(unittest.TestCase):
         self.assertEqual(R["cardJob"], P3 + P1)
         self.assertEqual(R["title"], P1)
         self.assertEqual(R["trayMat"], P2)
-        self.assertEqual(R["curMat"], P2)                                # "(current)" mark + Back keep the exact text
+        self.assertEqual(R["curMat"], P2)                                # "(current)" mark keeps the exact text
         self.assertEqual(R["delFile"], "Bob's " + P2 + " \U0001F600 é中 & </b>.gcode.3mf")
         self.assertIn("a" + P1 + ".gcode.3mf", R["fileData"])            # an apostrophe or quote no longer breaks Print / Delete
         self.assertIn("Bob's " + P2 + " \U0001F600 \u00e9\u4e2d & </b>", R["fileNames"])
         self.assertEqual(R["spoolTrays"], ["0", "1"])
-        self.assertIn("START PRINT ON", R["startText"])
+        self.assertIn("START ON", R["startText"])
         self.assertIn(P1, R["startText"])
 
     def test_a_javascript_download_link_is_neutralised(self):

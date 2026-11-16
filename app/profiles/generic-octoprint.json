@@ -1,0 +1,21 @@
+{
+  "id": "generic-octoprint",
+  "label": "Generic OctoPrint printer",
+  "maker": "Generic",
+  "types": [
+    "octoprint"
+  ],
+  "matches": [],
+  "has": {
+    "light": null,
+    "nozzles": 1,
+    "nozzle_max_c": null,
+    "bed_mm": null,
+    "bed_max_c": null,
+    "chamber": null,
+    "filament": null,
+    "camera_builtin": null
+  },
+  "notes": "Model not recognised: nothing is assumed.",
+  "verified": false
+}

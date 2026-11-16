@@ -80,7 +80,8 @@ class FiveInStaticTests(unittest.TestCase):
         self.assertNotRegex(CSS, r"\bon[a-z]+\s*=")
         card = HTML[HTML.index("html = data.map((p,i)=>{"):HTML.index("// nothing changed since the last poll")]
         self.assertIn("esc(cp.pct)", card)
-        self.assertIn('data-act="openPrinter" data-name="${esc(p.printer)}"', card)
+        self.assertIn('data-name="${esc(p.printer)}"', card)
+        self.assertIn("'spagOpen' : 'openPrinter'", card)                 # a warned card opens the camera pop-up; every other card its screen
         self.assertNotRegex(card, r"\$\{(?:p\.printer|p\.job|word)\}")
         self.assertNotRegex(card, r"\bon(click|error|load)\s*=")
 
@@ -397,7 +398,7 @@ class FiveInBrowserTests(unittest.TestCase):
         self.assertEqual(first["kinds"], ["printing", "paused", "idle", "error"])
         self.assertEqual(first["bigs"], ["42%", "63%", "IDLE", "OFFLINE"])
         self.assertEqual(first["barw"], ["42%", "63%", "0%", "0%"])
-        self.assertTrue(all(s.startswith("Spaghetti: ") for s in first["spags"]), first["spags"])
+        self.assertTrue(all(s in ("WATCH", "ACTIVE", "LEARN", "OFF", "NO CAM", "DOWN", "WARN", "FAIL", "PAUSED \u2014 spaghetti") for s in first["spags"]), first["spags"])      # a small badge: a shape + a word
 
     def test_the_header_is_one_slim_row_and_the_pages_move_into_the_menu(self):
         R = self.result()

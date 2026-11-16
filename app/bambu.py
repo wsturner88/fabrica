@@ -30,9 +30,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
-from ftplib import FTP_TLS, error_perm
+from ftplib import FTP, FTP_TLS, error_perm
 
-from camera import CameraStream, PollingCameraStream, fetch_jpeg
+from camera import CameraStream, PollingCameraStream, fetch_jpeg, make_camera_stream
 import controls as _controls
 from controls import ControlUnsupported
 
@@ -208,6 +208,14 @@ class ImplicitFTPTLS(FTP_TLS):
         self.file = self.sock.makefile("r", encoding=self.encoding)
         self.welcome = self.getresp()
         return self.welcome
+
+    def ntransfercmd(self, cmd, rest=None):
+        """The data connection reuses the control connection's TLS session. The H2D (and X1-class) file server
+        refuses a fresh one: `522 SSL connection failed: session reuse required`. P1/A1 accept either."""
+        conn, size = FTP.ntransfercmd(self, cmd, rest)
+        if self._prot_p:
+            conn = self.sock.context.wrap_socket(conn, server_hostname=self.host, session=self.sock.session)
+        return conn, size
 
 
 # ---------------------------------------------------------------- helpers
@@ -639,19 +647,54 @@ class BambuPrinter:
 
     # ---- camera --------------------------------------------------------
 
+    # X1 / H2 series stream their built-in chamber camera as RTSPS on :322 (LAN-only "Liveview" on);
+    # P1 / A1 series speak the TLS :6000 JPEG protocol. Both log in with user bblp + the access code.
+    RTSP_CAMERA_PREFIXES = ("X1", "H2")
+    RTSP_CAMERA_PORT = 322
+
+    # ---- storage words ------------------------------------------------
+    # The H2 series file server (FTPS :990) shows the external USB drive only. Jobs sent from a slicer are kept in the
+    # printer's internal storage, which that server does not expose - so the list here can look short. P1/A1/X1 = SD card.
+    USB_STORAGE_PREFIXES = ("H2",)
+
+    def _model_code(self) -> str:
+        return (self.model or "").upper().replace("BAMBU LAB", "").strip()
+
+    @property
+    def storage_name(self) -> str:
+        return "USB drive" if self._model_code().startswith(self.USB_STORAGE_PREFIXES) else "SD card"
+
+    @property
+    def storage_note(self) -> str:
+        if self._model_code().startswith(self.USB_STORAGE_PREFIXES):
+            return ("USB drive only. Jobs sent from the slicer are kept in the printer's internal storage, "
+                    "which Fabrica cannot read.")
+        return ""
+
+    @property
+    def uses_rtsp_camera(self) -> bool:
+        return (self.model or "").upper().replace("BAMBU LAB", "").strip().startswith(self.RTSP_CAMERA_PREFIXES)
+
+    def builtin_camera_url(self) -> str:
+        """rtsps:// address of an X1/H2 printer's own camera (contains the access code: never log or show it)."""
+        return "rtsps://bblp:%s@%s:%d/streaming/live/1" % (
+            urllib.parse.quote(self.access_code or "", safe=""), self.ip, self.RTSP_CAMERA_PORT)
+
     @property
     def has_camera(self) -> bool:
-        """True for printers whose chamber camera speaks the TLS :6000 JPEG
-        protocol (P1 / A1 series). X1- and H2-series printers stream RTSP
-        instead, which this server does not read, so they report no camera."""
-        return not (self.model or "").upper().replace("BAMBU LAB", "").strip().startswith(("X1", "H2"))
+        """Every Bambu has a built-in camera: P1/A1 over TLS :6000 JPEG, X1/H2 over RTSPS :322 (read with
+        ffmpeg, like any rtsp camera). A camera address typed in the printer form still wins (camera.py)."""
+        return True
 
-    def camera(self) -> CameraStream:
+    def camera(self):
         """The printer's single shared camera connection (created lazily; the
         socket itself only opens when somebody asks for a frame)."""
         with self._camera_guard:
             if self._camera is None:
-                self._camera = CameraStream(self.ip, self.access_code, label=self.name)
+                if self.uses_rtsp_camera:
+                    self._camera = make_camera_stream(self.builtin_camera_url(), label=self.name)
+                else:
+                    self._camera = CameraStream(self.ip, self.access_code, label=self.name)
             return self._camera
 
     # ---- MQTT ----------------------------------------------------------
@@ -863,6 +906,18 @@ class BambuPrinter:
         if state != raw_state:
             out["state_raw"] = raw_state      # a state the Hub does not know: shown, never trusted
         return out
+
+    def temp_readings(self) -> dict:
+        """Chamber temperature for the fleet cards (temps.py). The printer sends `chamber_temper` for EVERY model,
+        sensor or not, so temps.py believes it only when the printer's profile says there is a chamber sensor.
+        TODO(H2D): the second nozzle is not read - the H2D's per-nozzle report (a `device.extruder.info` list in
+        the community protocol notes) is not confirmed against a real printer, so only the main nozzle shows."""
+        with self._lock:
+            p = dict(self.state.get("print", {}))
+        c = p.get("chamber_temper")
+        if isinstance(c, (int, float)) and not isinstance(c, bool):
+            return {"chamber": {"c": c, "target": None}}
+        return {}
 
     @staticmethod
     def global_tray_id(unit_id, tray_id) -> int:
@@ -1653,6 +1708,24 @@ class OctoPrintPrinter:
             "age_seconds": round(time.time() - self._last_ts),
             "kind": "octoprint",
         }
+
+    def temp_readings(self) -> dict:
+        """Every tool, the bed and the chamber OctoPrint reported at its last poll (temps.py). No network."""
+        last = self._last if self._ok else None
+        if not isinstance(last, tuple):
+            return {}
+        temps = (last[0] or {}).get("temperature") if isinstance(last[0], dict) else None
+        if not isinstance(temps, dict):
+            return {}
+        tools = []
+        for key in sorted((k for k in temps if re.fullmatch(r"tool\d+", str(k))), key=lambda k: int(k[4:])):
+            t = temps[key] if isinstance(temps[key], dict) else {}
+            tools.append({"c": t.get("actual"), "target": t.get("target")})
+        out = {"nozzles": tools} if tools else {}
+        ch = temps.get("chamber")
+        if isinstance(ch, dict) and isinstance(ch.get("actual"), (int, float)):
+            out["chamber"] = {"c": ch["actual"], "target": None}
+        return out
 
     def fresh_snapshot(self) -> dict:
         """snapshot() that skips the 3 s cache: safety decisions (the pre-heat auto-off) must not act on a

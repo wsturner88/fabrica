@@ -60,6 +60,9 @@ DEFAULT_UNLOAD_MM, DEFAULT_LOAD_MM = 100.0, 90.0
 JOG_FEED = {"X": 6000, "Y": 6000, "Z": 600}      # mm/min: a quick sideways tap, a slow Z tap
 EXTRUDE_FEED = 300                               # mm/min (5 mm/s): gentle enough for a cold-ish hotend's first push
 _OBJECTS = "print_stats&virtual_sdcard&display_status&extruder&heater_bed&toolhead&webhooks"
+_NOZZLE_OBJ = re.compile(r"^extruder(\d*)$")
+_SENSOR_KINDS = ("heater_generic", "temperature_sensor", "temperature_fan", "temperature_probe", "temperature_host")
+MAX_TEMP_OBJECTS = 32               # a runaway config must not make the status URL huge
 
 
 def _perr(msg: str, status=None, cls=PrinterError) -> PrinterError:
@@ -125,11 +128,10 @@ class MoonrakerPrinter:
          "help": "Only if Moonraker asks for one. Most home setups do not: Moonraker trusts the local "
                  "network if it is listed under [authorization] trusted_clients in moonraker.conf. "
                  "Leave empty unless the test says a key is needed."},
-        {"name": "camera_base_url", "label": "Web UI / camera base address", "type": "url",
+        {"name": "camera_base_url", "label": "Klipper web page address", "type": "url",
          "required": False, "advanced": True, "placeholder": "http://192.168.1.60", "guide_step": "camera",
-         "help": "Optional. Where relative webcam links (like /webcam/?action=snapshot) are served "
-                 "from, if not the same host on port 80. The webcam itself comes from the Mainsail or "
-                 "Fluidd settings automatically."},
+         "help": "Only needed when Mainsail / Fluidd isn't on port 80 of the printer's address. "
+                 "Not for cameras \u2014 use \U0001F4F7 Camera above."},
         {"name": "model", "label": "Model", "type": "text", "required": False, "advanced": True,
          "placeholder": "Voron 2.4", "help": "Display only."},
         {"name": "unload_mm", "label": "Unload length (mm)", "type": "text", "required": False, "advanced": True,
@@ -165,6 +167,7 @@ class MoonrakerPrinter:
         self._cam_refreshing = False
         self._camera = None
         self._caps_cache = None            # (timestamp, {lights, macros, extruder, bed})
+        self._temp_objs = None             # temperature objects Klipper has: {"nozzles": [ids], "sensors": [ids]}; None = not read yet
         self._excl = None                  # ==== plate contents ==== is [exclude_object] loaded? True / False / None = not looked yet
         self._excl_ts = 0.0                # when it was last looked at (or tried)
 
@@ -400,11 +403,35 @@ class MoonrakerPrinter:
         objs = res.get("objects") if isinstance(res, dict) else None
         if isinstance(objs, list):
             self._excl = "exclude_object" in objs
+            self._temp_objs = self.classify_temp_objects(objs)      # the same list also tells which temperature sensors exist
     # ==== end plate contents ====
 
+    def _temp_objects(self) -> dict:
+        """The temperature objects this Klipper has (extruder, extruder1.., heater_generic / temperature_sensor /
+        temperature_fan / temperature_probe / temperature_host). They are read from the SAME /printer/objects/list answer
+        that _check_exclude_object already fetches once per connect (no extra request, no extra polling load), so the
+        first poll after a connect shows nozzle and bed only and the next one adds the sensors."""
+        return self._temp_objs or {}
+
+    @staticmethod
+    def classify_temp_objects(objs) -> dict:
+        """Object names (from /printer/objects/list) -> {"nozzles": ["extruder", "extruder1"..], "sensors": [...]}."""
+        noz, sens = [], []
+        for o in objs:
+            o = str(o)
+            m = _NOZZLE_OBJ.match(o)
+            if m:
+                noz.append((int(m.group(1) or 0), o))
+            elif o.partition(" ")[0] in _SENSOR_KINDS and o.partition(" ")[2]:
+                sens.append(o)
+        return {"nozzles": [o for _, o in sorted(noz)], "sensors": sens[:MAX_TEMP_OBJECTS]}
+
     def _poll(self):
+        found = self._temp_objects()
+        extra = [o for o in found.get("nozzles", []) if o != "extruder"] + found.get("sensors", [])
+        query = _OBJECTS + "".join("&" + urllib.parse.quote(o) for o in extra)
         try:
-            res = self._call("GET", "/printer/objects/query?" + _OBJECTS, timeout=4, what="read status")
+            res = self._call("GET", "/printer/objects/query?" + query, timeout=4, what="read status")
         except PrinterError as e:
             if getattr(e, "status", None) in (500, 503):
                 return self._poll_klippy_down()
@@ -451,10 +478,32 @@ class MoonrakerPrinter:
             "can_extrude": ex.get("can_extrude") if isinstance(ex.get("can_extrude"), bool) else None,
             "nozzle_c": self._r1(ex.get("temperature")), "nozzle_target_c": self._r1(ex.get("target")),
             "bed_c": self._r1(bed.get("temperature")), "bed_target_c": self._r1(bed.get("target")),
+            "temps": self._read_temps(status, found),
             "print_error": 1 if raw == "error" else 0,
             "fault": raw == "error",        # a hard fault is not "idle": no heater / filament moves, no start
             "message": ps.get("message") if raw == "error" else None,
         }
+
+    def _read_temps(self, status, found) -> dict:
+        """Raw temperature readings out of one status reply (see temps.py): every nozzle, every discovered sensor."""
+        noz = []
+        for oid in found.get("nozzles") or ["extruder"]:
+            o = status.get(oid)
+            if isinstance(o, dict):
+                noz.append({"c": self._r1(o.get("temperature")), "target": self._r1(o.get("target"))})
+        sensors = []
+        for oid in found.get("sensors", []):
+            o = status.get(oid)
+            if isinstance(o, dict) and isinstance(o.get("temperature"), (int, float)):
+                kind, _, name = oid.partition(" ")
+                sensors.append({"id": oid, "kind": kind, "name": name, "c": self._r1(o["temperature"]),
+                                "target": self._r1(o.get("target")) if kind == "heater_generic" else None})
+        return {"nozzles": noz, "sensors": sensors}
+
+    def temp_readings(self) -> dict:
+        """What the last poll saw, for the fleet temperature cards. No network."""
+        s = self._last if self._ok else None
+        return dict(s.get("temps") or {}) if isinstance(s, dict) else {}
 
     def _poll_klippy_down(self):
         """The objects query failed with 5xx: Moonraker is up but Klipper isn't ready."""
@@ -715,7 +764,9 @@ class MoonrakerPrinter:
             except PrinterError as e:
                 down = f"Klipper's object list is not available ({e})."
         if down:
-            return _controls.all_unsupported(down)
+            caps = _controls.all_unsupported(down)
+            caps["light"]["transient"] = True          # not an answer about the machine: the profile reason text must not replace it
+            return caps
         lights = info["lights"]
         un, ld = self._macro_for(info, "unload"), self._macro_for(info, "load")
         has_ex = info["extruder"]

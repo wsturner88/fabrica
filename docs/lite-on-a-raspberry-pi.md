@@ -64,7 +64,7 @@ thumbnails, so keep its data off the card where you can.
 | **Another machine** | Run the detector on a PC, Mac, NAS or stronger machine with Docker, then in **Settings > Detection > Another machine** enter its address and token. See [detection.md](detection.md) |
 
 Do not run the detector on a small Pi: the model needs roughly 1 GB of RAM and seconds per picture.
-Detection is alert-only and never stops a print.
+Detection never cancels a print (a printer in ACTIVE mode is paused, in WATCH mode only alerted).
 
 ## A stable address
 

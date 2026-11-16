@@ -15,7 +15,9 @@ Three pieces, none of which imports server.py or any driver (stdlib only):
                      turns it upright and cuts it to the printer's watch area (framefix.py), scores
                      it, feeds the tracker and - unless learn-only - calls the alert hook.
 
-Alert only. Nothing in here pauses or stops a print, by design; the owner decides.
+Three modes per printer (OFF / WATCH / ACTIVE). OFF = not scored. WATCH = warn and alert, never touches the
+print. ACTIVE = WATCH plus a PAUSE (never a cancel) after N scored pictures in a row at the warning level, through
+the `on_pause` hook - the same pause a human's Pause button sends. Nothing in here ever cancels a print.
 
 The detector is "image in, score out"; the Hub owns timing, smoothing, state and alerts.
 A dead detector is a state of its own ("down"), never shown as "all clear".
@@ -46,6 +48,27 @@ LEVEL_OK, LEVEL_WARNING, LEVEL_FAILURE = "ok", "warning", "failure"
 _RANK = {LEVEL_OK: 0, LEVEL_WARNING: 1, LEVEL_FAILURE: 2}
 LABELS = {LEVEL_OK: "OK", LEVEL_WARNING: "WARNING - possible spaghetti",
           LEVEL_FAILURE: "FAILURE - likely spaghetti"}
+
+MODE_OFF, MODE_WATCH, MODE_ACTIVE = "off", "watch", "active"
+MODES = (MODE_OFF, MODE_WATCH, MODE_ACTIVE)
+CONFIRM_CHOICES = (2, 3, 4, 6)       # pictures in a row at the warning level before an ACTIVE printer is paused
+DEFAULT_CONFIRM = 3
+EPISODE_PICTURES = 6                 # pictures kept per warning episode (flagged-picture store)
+PAUSE_REASON = "spaghetti (auto)"
+
+
+def normalize_mode(value, default=MODE_WATCH):
+    v = str(value or "").strip().lower()
+    return v if v in MODES else default
+
+
+def normalize_confirm(value, default=DEFAULT_CONFIRM) -> int:
+    try:
+        n = int(float(value))
+    except (TypeError, ValueError):
+        return default
+    return n if n in CONFIRM_CHOICES else default
+
 
 SENSITIVITY = {"low": 0.5, "medium": 1.0, "normal": 1.0, "high": 2.0}
 
@@ -152,6 +175,8 @@ class FailureTracker:
     # gets no alert for an hour. One in ADMIT_FLAGGED_EVERY still goes in, so a camera that always
     # looks like spaghetti (a bed clip in view) is eventually learned instead of alerting forever.
     ADMIT_FLAGGED_EVERY = 10
+    NORMAL_KEEP = 30                     # false-alarm scores remembered per printer
+    NORMAL_FLOOR = 0.8
 
     def __init__(self, printer, params=None, store_dir=None, clock=time.time, save_every_s=300.0):
         self.printer = printer
@@ -173,6 +198,10 @@ class FailureTracker:
         # printer has no baseline file yet; a file from before this was recorded counts as the untouched picture.
         self._view = None
         self.learning = ""               # why the baseline is being re-learned ("" = it is not)
+        # Scores of pictures the owner labelled "false alarm": a handful of pictures cannot move a 20-hour average, so they
+        # also set a floor under the baseline (NORMAL_FLOOR x their mean) - the same view then stops alerting. View-specific.
+        self._normal = collections.deque(maxlen=self.NORMAL_KEEP)
+        self.last_admitted = True        # did the last picture go into the baseline? (False = it looked like a failure)
         self._load()
 
     # ---- parameters ----------------------------------------------------
@@ -212,6 +241,7 @@ class FailureTracker:
         with self._lock:
             self._long.clear()
             self._short.clear()
+            self._normal.clear()
             self._ewm = None
             self.frame = 0
             self._flagged = 0
@@ -248,7 +278,7 @@ class FailureTracker:
             if self.learning and len(self._long) >= self.LEARN_FRAMES:
                 self.learning = ""
             short_mean = sum(self._short) / len(self._short)
-            long_mean = sum(self._long) / len(self._long)
+            long_mean = max(sum(self._long) / len(self._long), self._floor())
             adjusted = (self._ewm - long_mean) * prm.sensitivity
             warm = self.frame <= prm.warmup_frames
             if warm:
@@ -261,12 +291,32 @@ class FailureTracker:
                 level = LEVEL_OK
             self.last = Verdict(level, warm, self.frame, p, self._ewm, short_mean, long_mean,
                                 adjusted, self._gauge(level, warm, adjusted))
+            self.last_admitted = True
             if level != LEVEL_OK and not warm:               # keep flagged pictures out of the baseline
                 self._flagged += 1
                 if self._flagged % self.ADMIT_FLAGGED_EVERY:
                     self._long.pop()
+                    self.last_admitted = False
             self._save(force=False)
             return self.last
+
+    def _floor(self) -> float:
+        return self.NORMAL_FLOOR * sum(self._normal) / len(self._normal) if self._normal else 0.0
+
+    def admit(self, scores):
+        """The owner said these pictures are normal (false alarm): they go into the baseline (they were kept out
+        while they looked like a failure), they raise the floor for this view, and the smoothing starts afresh so
+        the warning clears. Only labelled-false pictures come in this way."""
+        vals = [max(0.0, _finite(x)) for x in (scores or [])][:EPISODE_PICTURES * 4]
+        if not vals:
+            return
+        with self._lock:
+            self._long.extend(vals)
+            self._normal.extend(vals)
+            self._short.clear()
+            self._ewm = None
+            self._dirty = True
+            self._save(force=True)
 
     def _failing(self, ewm, short_mean, long_mean, factor) -> bool:
         prm = self.params
@@ -312,6 +362,7 @@ class FailureTracker:
             with open(tmp, "w") as f:
                 json.dump({"v": 1, "printer": self.printer, "saved": self._clock(),
                            "view": self._view, "learning": self.learning,
+                           "normal": [round(x, 3) for x in self._normal],
                            "long": [round(x, 3) for x in self._long]}, f, separators=(",", ":"))
             os.replace(tmp, self.path)
             self._dirty = False
@@ -330,6 +381,8 @@ class FailureTracker:
             vals = doc["long"]
             clean = [x for x in (_finite(v, None) for v in vals) if x is not None and x >= 0]
             self._long.extend(clean[-self.params.long_window:])
+            self._normal.extend([x for x in (_finite(v, None) for v in (doc.get("normal") or [])[-self.NORMAL_KEEP:])
+                                 if x is not None and x >= 0])
             v = doc.get("view")
             self._view = v if isinstance(v, str) and v else framefix.IDENTITY_SIGNATURE   # older file: untouched pictures
             lr = doc.get("learning")
@@ -526,6 +579,12 @@ class _PS:
         self.view = framefix.IDENTITY   # how this printer's pictures are turned / cropped before scoring
         self.prep = "off"            # off (nothing to do) | ok (turned / cropped)
         self.unprepared = False      # the picture should be turned / cropped but this build has no ffmpeg
+        self.consec = 0              # scored pictures in a row at the warning level while ACTIVE could act on them
+        self.episode = None          # the open warning episode: {"rec": flag record, "paused": bool, "pause_failed": bool}
+        self.auto_paused = False     # THIS print was paused by the watch (until a human resumes it / it ends)
+        self.auto_paused_at = None
+        self.resumed = False         # a human resumed an auto-paused print: WATCH for the rest of this print
+        self.gate = ""               # why ACTIVE is acting like WATCH right now ("" = it is not)
 
 
 class DetectionLoop:
@@ -550,11 +609,16 @@ class DetectionLoop:
                  store_dir=None, interval_s=10, sensitivity="medium", learn_only=False,
                  cooldown_s=600, max_backoff_s=300, excluded=(), blind_bytes=2500,
                  scale_to_interval=True, clock=time.time, tick_s=2.0, on_detector=None,
-                 outage_alert_after=3, view_fetcher=None):
+                 outage_alert_after=3, view_fetcher=None, modes=None, confirm_pictures=DEFAULT_CONFIRM,
+                 on_pause=None, flags=None):
         self._fleet = fleet_fetcher
         self._jpeg = jpeg_fetcher
         self._view_fetcher = view_fetcher
         self._on_alert = on_alert
+        # on_pause(printer, info) -> bool: send a PAUSE the way a human's Pause button does and tell the owner. info =
+        # {"count", "score", "jpeg", "job", "flag_id"}. Never a cancel. Without it ACTIVE cannot act (it behaves as WATCH).
+        self._on_pause = on_pause
+        self.flags = flags               # flagstore.FlagStore | None
         # on_detector("down", {"error","code","failures"}) once the detector has failed `outage_alert_after`
         # times in a row (a blip is not an outage), and on_detector("up", {}) when it answers again.
         # Without it a dead detector is only visible in status(): nobody is told prints are unwatched.
@@ -576,6 +640,8 @@ class DetectionLoop:
         self.learn_only = bool(learn_only)
         self.cooldown_s = float(cooldown_s)
         self.excluded = {str(x).lower() for x in excluded}
+        self.modes = self._clean_modes(modes)
+        self.confirm = normalize_confirm(confirm_pictures)
         self.params = self._make_params()
         # detector health
         self._fails = 0
@@ -587,6 +653,18 @@ class DetectionLoop:
         self._last_tick = None
 
     # ---- configuration -------------------------------------------------
+
+    @staticmethod
+    def _clean_modes(modes):
+        return {str(k).lower(): normalize_mode(v) for k, v in (modes or {}).items()}
+
+    def mode_of(self, name) -> str:
+        """OFF / WATCH / ACTIVE for a printer. An explicit entry wins; else the old 'excluded' list means OFF; else WATCH."""
+        low = str(name).lower()
+        m = self.modes.get(low)
+        if m:
+            return m
+        return MODE_OFF if low in self.excluded else MODE_WATCH
 
     def _make_params(self):
         return Params.for_interval(self.interval_s, self.sensitivity, scale=self.scale_to_interval)
@@ -610,6 +688,10 @@ class DetectionLoop:
                 self.cooldown_s = max(0.0, _finite(kw["cooldown_s"], self.cooldown_s))
             if "excluded" in kw:
                 self.excluded = {str(x).lower() for x in kw["excluded"]}
+            if "modes" in kw:
+                self.modes = self._clean_modes(kw["modes"])
+            if "confirm_pictures" in kw:
+                self.confirm = normalize_confirm(kw["confirm_pictures"], self.confirm)
             self.params = self._make_params()
             for ps in self._ps.values():
                 ps.tracker.set_params(self.params)
@@ -689,7 +771,7 @@ class DetectionLoop:
     def _eligible(self, name, snap) -> bool:
         if str(snap.get("state", "")).upper() != "RUNNING" or snap.get("connected") is False:
             return False
-        if name.lower() in self.excluded:
+        if self.mode_of(name) == MODE_OFF:
             return False
         try:
             return bool(self._has_camera(name))
@@ -715,6 +797,8 @@ class DetectionLoop:
         pct = snap.get("percent")
         pct = float(pct) if isinstance(pct, (int, float)) else None
         prev = ps.state
+        if state == "RUNNING" and prev in ("PAUSE", "PAUSED") and ps.auto_paused:
+            ps.auto_paused, ps.resumed, ps.consec = False, True, 0       # a human resumed it: WATCH for the rest of this print
         if state == "RUNNING":
             new_print = (prev not in ("RUNNING", "PAUSE", "PAUSED")
                          or (job and ps.job and job != ps.job)
@@ -724,6 +808,7 @@ class DetectionLoop:
             ps.job = job or ps.job
         elif prev in ("RUNNING", "PAUSE", "PAUSED") and state not in ("PAUSE", "PAUSED"):
             ps.tracker.flush()                           # the print ended
+            ps.auto_paused, ps.consec, ps.episode = False, 0, None
         if state in ("PAUSE", "PAUSED") and job:
             ps.job = job
         ps.percent = pct if pct is not None else ps.percent
@@ -756,6 +841,8 @@ class DetectionLoop:
 
     def _new_print(self, name, ps, now):
         ps.tracker.start_print()
+        ps.consec, ps.episode = 0, None
+        ps.auto_paused, ps.auto_paused_at, ps.resumed, ps.gate = False, None, False, ""
         ps.last_alert = None
         ps.last_ts = 0.0
         ps.camera, ps.camera_misses = "unknown", 0
@@ -817,8 +904,9 @@ class DetectionLoop:
         ps.verdict = dict(v.to_dict(), at=now, detections=len(res.detections))
         if self.learn_only:
             self._learn_log(name, v, res, now)
+            ps.consec, ps.gate = 0, "learn_only"
             return
-        self._maybe_alert(name, ps, v, jpeg, now)
+        self._after_observe(name, ps, v, res.score, jpeg, now)
 
     # ---- detector health -----------------------------------------------------
 
@@ -872,7 +960,135 @@ class DetectionLoop:
 
     # ---- alerts -----------------------------------------------------------------
 
-    def _maybe_alert(self, name, ps, v, jpeg, now):
+    def _shown(self, ps, jpeg):
+        """The picture the way the dashboard shows it (upright, whole), not the raw camera frame."""
+        try:
+            shown = framefix.prepare(jpeg, ps.view.without_area())
+            return shown.jpeg if shown.status == framefix.STATUS_DONE else jpeg
+        except Exception:
+            return jpeg
+
+    def active_gate(self, name, ps, v=None) -> str:
+        """Why an ACTIVE printer behaves exactly like WATCH right now ("" = nothing stops it from acting)."""
+        if self._on_pause is None:
+            return "no_pause"
+        if self.learn_only:
+            return "learn_only"
+        if ps.resumed:
+            return "resumed"
+        if self._det["state"] == "down":
+            return "detector_down"
+        if ps.camera != "ok":
+            return "camera"
+        if ps.state != "RUNNING":
+            return "not_running"
+        tr = ps.tracker
+        if tr.learning or tr.baseline_frames < tr.LEARN_FRAMES:
+            return "learning"
+        if v is not None and v.warmup:
+            return "warmup"
+        return ""
+
+    def _after_observe(self, name, ps, v, score, jpeg, now):
+        """One scored picture: the flagged-picture store, the alert, and (ACTIVE) the
+        confirmation count that ends in a pause."""
+        flagged = v.level != LEVEL_OK and not v.warmup
+        mode = self.mode_of(name)
+        ps.gate = self.active_gate(name, ps, v) if mode == MODE_ACTIVE else ""
+        if not flagged:
+            ps.consec = 0
+            ps.episode = None                            # an OK picture ends the episode (and the pause allowance with it)
+            return
+        shown = self._shown(ps, jpeg)
+        ep = ps.episode
+        if ep is None:
+            ep = ps.episode = {"rec": None, "paused": False}
+        self._flag_picture(name, ps, ep, v, score, shown, mode, now)
+        self._maybe_alert(name, ps, v, jpeg, now, shown)
+        if mode != MODE_ACTIVE or ps.gate:
+            ps.consec = 0
+            return
+        ps.consec += 1
+        if ps.consec >= self.confirm and not ep["paused"]:
+            ep["paused"] = True                          # ONE attempt per warning episode, success or not
+            self._do_pause(name, ps, ep, score, shown, now)
+
+    def _flag_picture(self, name, ps, ep, v, score, shown, mode, now):
+        if self.flags is None:
+            return
+        try:
+            rec = ep["rec"]
+            if rec is None:
+                rec = ep["rec"] = self.flags.new_record(name, mode=mode, job=ps.job, level=v.level, paused=False, ts=now)
+            if len(rec["pictures"]) < EPISODE_PICTURES:
+                rec["level"] = v.level if _RANK[v.level] >= _RANK.get(rec.get("level"), 0) else rec["level"]
+                self.flags.add_picture(rec, shown, score, now)
+        except Exception as e:
+            log.warning("could not keep the flagged picture for %s: %s", name, e)
+
+    def _do_pause(self, name, ps, ep, score, shown, now):
+        info = {"count": self.confirm, "score": min(1.0, round(score, 3)), "jpeg": shown, "job": ps.job,
+                "flag_id": ep["rec"]["id"] if ep.get("rec") else None}
+        try:
+            ok = bool(self._on_pause(name, info))
+        except Exception as e:
+            log.warning("pause hook failed for %s: %s", name, e)
+            ok = False
+        if ok:
+            ps.auto_paused, ps.auto_paused_at = True, now
+        ps.alerts.append({"at": now, "level": "paused" if ok else "pause_failed", "ewm": round(ps.tracker.last.ewm, 3) if ps.tracker.last else 0})
+        rec = ep.get("rec")
+        if rec is not None and self.flags is not None:
+            rec["paused"] = ok
+            rec["pause_reason"] = PAUSE_REASON if ok else "pause failed"
+            self.flags.save(rec)
+
+    def mark_flag(self, flag_id, label):
+        """The owner's verdict on a flagged picture. 'false' also clears this print's warning and lets the pictures into
+        the printer's baseline. -> the record, or None when there is none."""
+        if self.flags is None:
+            return None
+        rec = self.flags.get(flag_id)
+        if rec is None:
+            return None
+        if label == "false" and rec.get("kind") == "flag" and not rec.get("baseline"):
+            with self._lock:
+                ps = next((p for n, p in self._ps.items() if n.lower() == str(rec.get("printer", "")).lower()), None)
+            if ps is not None:
+                ps.tracker.admit(rec.get("scores") or [])
+                cur = ps.episode and ps.episode.get("rec")
+                if cur and cur.get("id") == flag_id:      # this print's warning clears now; a view that still scores worse than "normal" flags afresh
+                    ps.consec, ps.last_alert, ps.episode = 0, None, None
+                    if ps.verdict:
+                        ps.verdict["level"], ps.verdict["dismissed"] = LEVEL_OK, True
+                rec["baseline"] = True
+                self.flags.save(rec)
+        return self.flags.set_label(flag_id, label)
+
+    def save_missed(self, printer, now=None):
+        """Cancel-with-'It was spaghetti': keep the camera picture as a 'missed' example. -> record | None. Never raises."""
+        if self.flags is None:
+            return None
+        try:
+            if not self._has_camera(printer):
+                return None
+            jpeg, _ts = self._fetch_jpeg(printer)
+            if not jpeg:
+                return None
+            with self._lock:
+                ps = self._ps.get(printer)
+            if ps is None:
+                ps = next((p for n, p in self._ps.items() if n.lower() == str(printer).lower()), None)
+            shown = self._shown(ps, jpeg) if ps is not None else jpeg
+            rec = self.flags.new_record(printer, kind="missed", mode=self.mode_of(printer), job=ps.job if ps else "",
+                                        ts=now if now is not None else self._clock())
+            sc = ps.verdict.get("score") if ps and ps.verdict else None
+            return rec if self.flags.add_picture(rec, shown, sc, rec["ts"]) else None
+        except Exception as e:
+            log.warning("could not keep the missed picture for %s: %s", printer, e)
+            return None
+
+    def _maybe_alert(self, name, ps, v, jpeg, now, shown=None):
         if v.warmup or v.level == LEVEL_OK:
             return
         rank = _RANK[v.level]
@@ -884,8 +1100,7 @@ class DetectionLoop:
         score = min(1.0, round(v.ewm, 3))
         try:
             # the owner gets the picture the way the dashboard shows it (upright, whole), not the raw camera frame
-            shown = framefix.prepare(jpeg, ps.view.without_area())
-            self._on_alert(name, v.level, score, shown.jpeg if shown.status == framefix.STATUS_DONE else jpeg)
+            self._on_alert(name, v.level, score, shown if shown is not None else self._shown(ps, jpeg))
         except Exception as e:
             log.warning("alert hook failed for %s: %s", name, e)
 
@@ -948,10 +1163,19 @@ class DetectionLoop:
                 det["retry_in_s"] = max(0, round(self._down_until - now))
             printers = {}
             for name, ps in self._ps.items():
-                watching = ps.state == "RUNNING" and name.lower() not in self.excluded
+                pmode = self.mode_of(name)
+                watching = ps.state == "RUNNING" and pmode != MODE_OFF
+                ep = ps.episode or {}
                 printers[name] = {
                     "watching": bool(watching and self._client is not None),
-                    "excluded": name.lower() in self.excluded,
+                    "excluded": pmode == MODE_OFF,
+                    "mode": pmode,
+                    "gate": ps.gate if pmode == MODE_ACTIVE else "",
+                    "confirm": {"count": ps.consec if pmode == MODE_ACTIVE and not ps.gate else 0, "needed": self.confirm},
+                    "auto_paused": bool(ps.auto_paused and ps.state in ("PAUSE", "PAUSED")),
+                    "resumed": bool(ps.resumed),
+                    "flag_id": (ep.get("rec") or {}).get("id"),
+                    "learn_frames": FailureTracker.LEARN_FRAMES,
                     "state": ps.state, "camera": ps.camera, "frames_scored": ps.scored,
                     "baseline_frames": ps.tracker.baseline_frames,
                     "learning": ps.tracker.learning,
@@ -964,7 +1188,9 @@ class DetectionLoop:
             mode = "off" if not enabled else ("learn" if self.learn_only else "alert")
         return {"enabled": enabled, "mode": mode, "interval_s": self.interval_s,
                 "sensitivity": self.sensitivity, "cooldown_s": self.cooldown_s,
-                "auto_pause": False, "detector": det, "printers": printers,
+                "auto_pause": bool(self._on_pause is not None and not self.learn_only
+                                   and any(self.mode_of(n) == MODE_ACTIVE for n in set(self._ps) | set(self.modes))),
+                "confirm_pictures": self.confirm, "detector": det, "printers": printers,
                 "summary": self._summary(enabled, mode, det, printers)}
 
     @staticmethod
